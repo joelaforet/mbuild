@@ -9,6 +9,7 @@ from mbuild.lib.molecules import (
     WaterTIP4P,
     WaterTIP4P2005,
     WaterTIP4PIce,
+    FattyAcid
 )
 from mbuild.tests.base_test import BaseTest
 
@@ -79,10 +80,6 @@ class TestWater(BaseTest):
             ),
             angle,
         )
-
-
-from mbuild.lib.molecules import FattyAcid
-
 
 class TestFattyAcid(BaseTest):
     @pytest.mark.parametrize("chain_length", [4, 12, 18])
