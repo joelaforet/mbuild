@@ -24,15 +24,15 @@ class FattyAcid(mb.Compound):
 
     @staticmethod
     def _build_smiles(chain_length, double_bonds):
-        bond_symbols = {"cis": r"/C=C\\", "trans": "/C=C/"}
+        bond_symbols = {"cis": "/C=C\\", "trans": "/C=C/"}
         double_bonds = sorted(double_bonds)
-        chain = []
-        carbons_placed = 0
+        chain = ["O=C(O)"]
+        carbons_placed = 1
         for position, geometry in double_bonds:
             n_plain = position - 1 - carbons_placed
             chain.append("C" * n_plain)
             chain.append(bond_symbols[geometry])
             carbons_placed = position + 1
-        chain.append("C" * (chain_length - 1 - carbons_placed))
-        chain.append("C(=O)O")
+
+        chain.append("C" * (chain_length - carbons_placed))
         return "".join(chain)
