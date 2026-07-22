@@ -79,3 +79,15 @@ class TestWater(BaseTest):
             ),
             angle,
         )
+
+from mbuild.lib.molecules import (
+    FattyAcid
+)
+
+class TestFattyAcid(BaseTest):
+    @pytest.mark.parametrize(
+        "chain_length", [4, 12, 18])
+    def test_chain_length(self, chain_length):
+        fatty_acid = FattyAcid(chain_length=chain_length)
+
+        assert len(list(fatty_acid.particles_by_element("C"))) == chain_length
