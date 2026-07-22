@@ -87,3 +87,22 @@ class TestFattyAcid(BaseTest):
         fatty_acid = FattyAcid(chain_length=chain_length)
 
         assert len(list(fatty_acid.particles_by_element("C"))) == chain_length
+
+    @pytest.mark.parametrize(
+        "double_bonds, expected_count",
+        [
+            (None, 0),
+            ([(9, "cis")], 1),
+            ([(9, "trans"), (12, "cis")], 2),
+        ],
+    )
+    def test_number_of_double_bonds(self, double_bonds, expected_count):
+        fatty_acid = FattyAcid(double_bonds=double_bonds)
+
+        tail_double_bonds = [
+            bond for bond in fatty_acid.bonds(return_bond_order=True)
+            if  bond[2]["bond_order"] == 2.0
+            and bond[0].element.symbol == "C"
+            and bond[1].element.symbol == "C"
+        ]
+        assert len(tail_double_bonds) == expected_count
