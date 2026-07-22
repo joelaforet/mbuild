@@ -3,7 +3,7 @@
 import mbuild as mb
 
 
-class FattyAcid(Compound):
+class FattyAcid(mb.Compound):
     def __init__(self, chain_length=18, double_bonds=None, name="FA"):
         """An even more extensible fatty acid builder: Set chain lengths, number and position of the double bonds
 
