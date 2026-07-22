@@ -12,3 +12,6 @@ from mbuild.lib.molecules.water import (
     WaterTIP4P2005,
     WaterTIP4PIce,
 )
+from mbuild.lib.molecules.fatty_acid import(
+    FattyAcid
+)
