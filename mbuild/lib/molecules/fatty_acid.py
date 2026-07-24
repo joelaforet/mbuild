@@ -14,8 +14,31 @@ class FattyAcid(mb.Compound):
         double_bonds : list of (position, geometry) tuples, or None
             position is counted from the carboxylic acid end,
             geometry is "cis" or "trans". None or [] gives a saturated chain.
-            Examples: [(9, "cis")] -> oleic acid
-                 [(9, "cis"), (12, "cis")] -> linoleic acid
+        
+        Examples
+        --------
+        Saturated
+            Palmitic acid: ``fa = FattyAcid(16)``
+
+        Monounsaturated
+            Palmitoleic acid: ``fa = FattyAcid(16, [(9, "cis")])``
+            Oleic acid: ``fa = FattyAcid(18, [(9, "cis")])``
+
+        Polyunsaturated
+            Linoleic acid: ``fa = FattyAcid(18, [(9, "cis"), (12, "cis")])``
+
+            EPA: 
+                ``fa =FattyAcid(
+                        20, [(5, "cis"), (8, "cis"),
+                        (11, "cis"), (14, "cis"),
+                        (17, "cis")]
+                )``
+            DHA: 
+                ``fa = FattyAcid(
+                          22, [(4, "cis"), (7, "cis"),
+                          (10, "cis"), (13, "cis"),
+                          (16, "cis"), (19, "cis")]
+                )``
         """
         super(FattyAcid, self).__init__()
         smiles = self._build_smiles(chain_length, double_bonds or [])
