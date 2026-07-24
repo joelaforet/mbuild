@@ -14,7 +14,7 @@ class FattyAcid(mb.Compound):
         double_bonds : list of (position, geometry) tuples, or None
             position is counted from the carboxylic acid end,
             geometry is "cis" or "trans". None or [] gives a saturated chain.
-        
+
         Examples
         --------
         Saturated
@@ -27,13 +27,13 @@ class FattyAcid(mb.Compound):
         Polyunsaturated
             Linoleic acid: ``fa = FattyAcid(18, [(9, "cis"), (12, "cis")])``
 
-            EPA: 
+            EPA:
                 ``fa =FattyAcid(
                         20, [(5, "cis"), (8, "cis"),
                         (11, "cis"), (14, "cis"),
                         (17, "cis")]
                 )``
-            DHA: 
+            DHA:
                 ``fa = FattyAcid(
                           22, [(4, "cis"), (7, "cis"),
                           (10, "cis"), (13, "cis"),
