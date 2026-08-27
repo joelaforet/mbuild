@@ -6,5 +6,14 @@ from mbuild.biopolymers.ccd import (
     CCDLibrary,
     ResidueTemplate,
 )
+from mbuild.biopolymers.protein import Chain, Protein, Residue
 
-__all__ = ["AtomTemplate", "BondTemplate", "CCDLibrary", "ResidueTemplate"]
+__all__ = [
+    "AtomTemplate",
+    "BondTemplate",
+    "CCDLibrary",
+    "Chain",
+    "Protein",
+    "Residue",
+    "ResidueTemplate",
+]

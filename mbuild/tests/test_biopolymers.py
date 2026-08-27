@@ -1,7 +1,9 @@
 import pytest
 
-from mbuild.biopolymers import CCDLibrary
+from mbuild.biopolymers import CCDLibrary, Protein
+from mbuild.exceptions import MBuildError
 from mbuild.tests.base_test import BaseTest
+from mbuild.utils.io import get_fn
 
 
 class TestCCDLibrary(BaseTest):
@@ -117,6 +119,66 @@ class TestCCDLibrary(BaseTest):
             }
             for bond in ours.bonds:
                 assert their_orders[frozenset((bond.atom1, bond.atom2))] == bond.order
+
+    def test_load_protonated_protein(self):
+        # Tests that a pdbfixer-protonated protein PDB loads by template
+        # matching with full chemistry: hierarchy, per-residue formal
+        # charges from the matched variants, charged termini, and a bond
+        # order on every bond. This is needed because the whole recipe
+        # rests on the loader stamping template chemistry instead of
+        # guessing from the file. The test loads the bundled protonated
+        # SARS-CoV-2 main protease (306 residues, net charge -4 at pH 7)
+        # and checks structure and chemistry counts.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        assert [chain.chain_id for chain in protein.chains] == ["A"]
+        residues = list(protein.residues())
+        assert len(residues) == 306
+        assert protein.n_particles == 4682
+        assert protein.net_formal_charge == -4
+
+        first, last = residues[0], residues[-1]
+        assert (first.name, first.resnum, first.formal_charge) == ("SER", 1, 1)
+        assert last.formal_charge == -1
+        assert any(p.name == "OXT" for p in last.particles())
+
+        lysines = [r for r in residues if r.name == "LYS"]
+        assert all(r.formal_charge == 1 for r in lysines)
+
+        orders = {
+            bond[2]["bond_order"] for bond in protein.bonds(return_bond_order=True)
+        }
+        assert orders == {1.0, 2.0}
+
+    def test_load_strict_errors(self, tmp_path):
+        # Tests that the loader fails loudly, with the residue named in
+        # the message, on a bad atom name and on an unknown residue code.
+        # This is needed because the loader must never guess chemistry:
+        # a file that does not match the templates has to be fixed by the
+        # user, not silently misread. The test corrupts one atom name and
+        # one residue name of the good asset and asserts on the errors.
+        text = open(get_fn("6m03_protonated.pdb")).read()
+
+        bad_atom = tmp_path / "bad_atom.pdb"
+        bad_atom.write_text(text.replace(" CB  SER A   1", " QQ  SER A   1", 1))
+        with pytest.raises(MBuildError, match="SER A:1"):
+            Protein(str(bad_atom))
+
+        bad_residue = tmp_path / "bad_residue.pdb"
+        bad_residue.write_text(text.replace("SER A   1", "XYZ A   1"))
+        with pytest.raises(MBuildError, match="download=True"):
+            Protein(str(bad_residue))
+
+    def test_get_atom(self):
+        # Tests that residues and atoms are addressable by residue number
+        # and atom name. This is needed because functionalization
+        # workflows pick attachment sites this way (e.g. lysine NZ). The
+        # test fetches a known atom and asserts the not-found error names
+        # the residue's atoms.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        nz = protein.get_atom(90, "NZ", chain_id="A")
+        assert nz.name == "NZ" and nz.element.symbol == "N"
+        with pytest.raises(MBuildError, match="no atom"):
+            protein.get_atom(90, "XX", chain_id="A")
 
     def test_unknown_residue_raises(self):
         # Tests that an unknown residue code raises a KeyError that names
