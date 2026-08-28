@@ -27,11 +27,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from mbuild import clone
 from mbuild.biopolymers.ccd import CCDLibrary
 from mbuild.box import Box
 from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
 from mbuild.polymer import Polymer
+from mbuild.port import Port
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +161,18 @@ class _Match:
     expects_prior: bool
     expects_posterior: bool
     expects_crosslink: bool
+
+
+def _atom_in_residue(residue, atom_name):
+    """Return the named particle of a residue, or None.
+
+    Particles are found by scanning names instead of labels, because
+    labels can go stale after ``remove()``.
+    """
+    for particle in residue.particles():
+        if particle.name == atom_name:
+            return particle
+    return None
 
 
 def _parse_pdb(text):
@@ -515,8 +529,8 @@ class Protein(Polymer):
                         f"{groups[i + 1].label} (chain break without TER)."
                     )
                 continue
-            carbon = residues[i].labels.get("C[0]")
-            nitrogen = residues[i + 1].labels.get("N[0]")
+            carbon = _atom_in_residue(residues[i], "C")
+            nitrogen = _atom_in_residue(residues[i + 1], "N")
             if carbon is None or nitrogen is None:
                 raise MBuildError(
                     f"Cannot form the peptide bond between {groups[i].label} "
@@ -553,8 +567,8 @@ class Protein(Polymer):
             other_group, other_match, other_residue, other_record = expecting[
                 partner_serial
             ]
-            particle1 = residue.labels.get(f"{record.name}[0]")
-            particle2 = other_residue.labels.get(f"{other_record.name}[0]")
+            particle1 = _atom_in_residue(residue, record.name)
+            particle2 = _atom_in_residue(other_residue, other_record.name)
             self.add_bond((particle1, particle2), bond_order=1.0)
             self.cross_bonds.append(
                 InterResidueBond(
@@ -593,6 +607,234 @@ class Protein(Polymer):
                 )
 
     # ------------------------------------------------------------------
+    # Functionalization
+    # ------------------------------------------------------------------
+    def attach(
+        self,
+        fragment,
+        fragment_atom_name,
+        resnum,
+        atom_name,
+        chain_id=None,
+        icode="",
+        fragment_resnum=None,
+        fragment_resname=None,
+        bond_order=1,
+        separation=0.15,
+    ):
+        """Bond a fragment Compound onto a residue of this protein.
+
+        One hydrogen leaves each side: a hydrogen bonded to the named
+        protein atom, and a hydrogen bonded to the named fragment atom.
+        Ports along the removed-hydrogen vectors align the fragment
+        (``force_overlap``), a bond with ``bond_order`` forms between
+        the two named atoms, and the new inter-residue bond is recorded
+        in ``cross_bonds`` together with the removed (leaving) hydrogen
+        names — exactly the information Pablo's ``with_crosslink``
+        needs to parameterize the product.
+
+        The fragment is cloned; the original is not changed. Fragment
+        residues keep their identity: a fragment whose children are
+        ``Residue`` compounds (a single PTM residue, a linear polymer,
+        or a branched glycan) is added residue-per-residue metadata
+        intact; any other Compound is wrapped into one new ``Residue``.
+        To build branched, multiply-linked structures, call ``attach``
+        repeatedly — an attached residue is addressable like any other,
+        so a later call can target it. Every call records its bond, so
+        residues may carry any number of links inside mBuild (note that
+        Pablo 0.2.2 supports at most one crosslink per residue
+        definition when loading the result).
+
+        Parameters
+        ----------
+        fragment : mbuild.Compound
+            The group to add. Cloned before use.
+        fragment_atom_name : str
+            Name of the fragment atom that forms the new bond. It must
+            have at least one bonded hydrogen.
+        resnum : int
+            Residue number of the protein attachment site.
+        atom_name : str
+            Name of the protein atom that forms the new bond. It must
+            have at least one bonded hydrogen.
+        chain_id : str, optional
+            Chain of the attachment site; required when residue numbers
+            repeat across chains.
+        icode : str, optional
+            Insertion code of the attachment site.
+        fragment_resnum : int, optional
+            Residue number, within the fragment, of the fragment atom;
+            required when the fragment atom name repeats across the
+            fragment's residues.
+        fragment_resname : str, optional
+            Residue name given to a fragment that is not made of
+            Residue compounds and therefore gets wrapped.
+        bond_order : int, optional, default=1
+            Order of the new bond.
+        separation : float, optional, default=0.15
+            Length of the new bond in nanometers.
+
+        Returns
+        -------
+        InterResidueBond
+            The recorded bond, as appended to ``cross_bonds``.
+        """
+        site_residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
+        site_atom = self.get_atom(resnum, atom_name, chain_id=chain_id, icode=icode)
+        site_hydrogen = self._bonded_hydrogen(site_atom, site_residue.name)
+
+        added = clone(fragment)
+        if not isinstance(added, Residue):
+            fragment_residues = [
+                child for child in added.successors() if isinstance(child, Residue)
+            ]
+            if not fragment_residues:
+                added = self._wrap_in_residue(added, fragment_resname)
+        frag_residues = (
+            [added]
+            if isinstance(added, Residue)
+            else [c for c in added.successors() if isinstance(c, Residue)]
+        )
+        for residue in frag_residues:
+            self._ensure_unique_atom_names(residue)
+
+        frag_atom, frag_residue = self._find_fragment_atom(
+            frag_residues, fragment_atom_name, fragment_resnum
+        )
+        frag_hydrogen = self._bonded_hydrogen(frag_atom, frag_residue.name)
+
+        site_orientation = site_hydrogen.pos - site_atom.pos
+        frag_orientation = frag_hydrogen.pos - frag_atom.pos
+
+        self.remove(site_hydrogen)
+        (added if added.parent is None else added.root).remove(frag_hydrogen)
+
+        # Renumber fragment residues into the site's chain.
+        chain = next(c for c in site_residue.ancestors() if isinstance(c, Chain))
+        next_resnum = max(r.resnum for r in self.residues(chain.chain_id)) + 1
+        for offset, residue in enumerate(frag_residues):
+            residue.resnum = next_resnum + offset
+            residue.hetatm = True
+        chain.add(added)
+
+        site_port = Port(
+            anchor=site_atom,
+            orientation=site_orientation,
+            separation=separation / 2,
+        )
+        site_residue.add(site_port, label="attach_site")
+        frag_port = Port(
+            anchor=frag_atom,
+            orientation=frag_orientation,
+            separation=separation / 2,
+        )
+        added.add(frag_port, label="attach_frag")
+
+        from mbuild.coordinate_transform import force_overlap
+
+        force_overlap(
+            move_this=added,
+            from_positions=frag_port,
+            to_positions=site_port,
+            add_bond=True,
+            bond_order=float(bond_order),
+        )
+
+        record = InterResidueBond(
+            residue1=site_residue,
+            residue2=frag_residue,
+            atom1_name=site_atom.name,
+            atom2_name=frag_atom.name,
+            order=int(bond_order),
+            leaving1=(site_hydrogen.name,),
+            leaving2=(frag_hydrogen.name,),
+        )
+        self.cross_bonds.append(record)
+        return record
+
+    @staticmethod
+    def _bonded_hydrogen(atom, residue_name):
+        """Return one hydrogen bonded to the atom (first by sorted name)."""
+        hydrogens = sorted(
+            (
+                particle
+                for particle in atom.direct_bonds()
+                if particle.element is not None and particle.element.symbol == "H"
+            ),
+            key=lambda particle: particle.name,
+        )
+        if not hydrogens:
+            raise MBuildError(
+                f"Atom {atom.name} of residue {residue_name} has no bonded "
+                "hydrogen to substitute. Pick an atom with a hydrogen."
+            )
+        return hydrogens[0]
+
+    @staticmethod
+    def _wrap_in_residue(compound, fragment_resname):
+        """Wrap a plain Compound into a single Residue."""
+        resname = (fragment_resname or compound.name or "LIG")[:3].upper()
+        if not resname.isalnum():
+            resname = "LIG"
+        residue = Residue(resname=resname, resnum=1, hetatm=True)
+        residue.add(compound)
+        logger.info(f"Fragment {compound.name!r} wrapped into residue {resname!r}.")
+        return residue
+
+    @staticmethod
+    def _ensure_unique_atom_names(residue):
+        """Rename particles element+index when names repeat in a residue.
+
+        The PDB export and Pablo's matching need atom names that are
+        unique within each residue; fragments from SMILES usually name
+        every carbon "C".
+        """
+        names = [particle.name for particle in residue.particles()]
+        if len(set(names)) == len(names):
+            return
+        counters = {}
+        for particle in residue.particles():
+            symbol = (
+                particle.element.symbol.upper()
+                if particle.element is not None
+                else particle.name.upper()
+            )
+            counters[symbol] = counters.get(symbol, 0) + 1
+            particle.name = f"{symbol}{counters[symbol]}"
+        logger.info(
+            f"Renamed atoms of residue {residue.name} to element+index "
+            "names so they are unique within the residue."
+        )
+
+    @staticmethod
+    def _find_fragment_atom(frag_residues, atom_name, fragment_resnum):
+        """Locate the named atom among the fragment residues."""
+        hits = []
+        for residue in frag_residues:
+            if fragment_resnum is not None and residue.resnum != fragment_resnum:
+                continue
+            particle = _atom_in_residue(residue, atom_name)
+            if particle is not None:
+                hits.append((particle, residue))
+        if not hits:
+            raise MBuildError(
+                f"No fragment atom named {atom_name!r}"
+                + (
+                    f" in fragment residue {fragment_resnum}"
+                    if fragment_resnum is not None
+                    else ""
+                )
+                + f". Fragment atoms are "
+                f"{[p.name for r in frag_residues for p in r.particles()]}."
+            )
+        if len(hits) > 1:
+            raise MBuildError(
+                f"Fragment atom name {atom_name!r} is ambiguous across "
+                "fragment residues; pass fragment_resnum."
+            )
+        return hits[0]
+
+    # ------------------------------------------------------------------
     # Accessors
     # ------------------------------------------------------------------
     @property
@@ -601,13 +843,21 @@ class Protein(Polymer):
         return [child for child in self.children if isinstance(child, Chain)]
 
     def residues(self, chain_id=None):
-        """Yield Residue compounds, optionally restricted to one chain."""
+        """Yield Residue compounds, optionally restricted to one chain.
+
+        The traversal is recursive because attached fragments may sit in
+        a grouping compound under a chain.
+        """
         for chain in self.chains:
             if chain_id is not None and chain.chain_id != chain_id:
                 continue
-            for residue in chain.children:
-                if isinstance(residue, Residue):
-                    yield residue
+            stack = list(chain.children)
+            while stack:
+                child = stack.pop(0)
+                if isinstance(child, Residue):
+                    yield child
+                elif child.children:
+                    stack = list(child.children) + stack
 
     def get_residue(self, resnum, chain_id=None, icode=""):
         """Return the residue with the given number (and chain/icode)."""
@@ -631,7 +881,7 @@ class Protein(Polymer):
     def get_atom(self, resnum, atom_name, chain_id=None, icode=""):
         """Return the named atom particle of the given residue."""
         residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
-        particle = residue.labels.get(f"{atom_name}[0]")
+        particle = _atom_in_residue(residue, atom_name)
         if particle is None:
             raise MBuildError(
                 f"Residue {residue.name} {residue.resnum} has no atom "

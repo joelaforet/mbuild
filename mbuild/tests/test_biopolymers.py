@@ -1,9 +1,10 @@
 import pytest
 
+import mbuild as mb
 from mbuild.biopolymers import CCDLibrary, Protein
 from mbuild.exceptions import MBuildError
 from mbuild.tests.base_test import BaseTest
-from mbuild.utils.io import get_fn
+from mbuild.utils.io import get_fn, has_rdkit
 
 
 class TestCCDLibrary(BaseTest):
@@ -179,6 +180,80 @@ class TestCCDLibrary(BaseTest):
         assert nz.name == "NZ" and nz.element.symbol == "N"
         with pytest.raises(MBuildError, match="no atom"):
             protein.get_atom(90, "XX", chain_id="A")
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach(self):
+        # Tests that attach() substitutes one hydrogen on each side,
+        # bonds the named atoms at the requested separation, adds the
+        # fragment as its own HETATM residue, and records the bond with
+        # its leaving hydrogens. This is needed because the recorded
+        # bond is exactly what Pablo's with_crosslink needs to load the
+        # modified protein. The test attaches an acetone-derived
+        # fragment at LYS 5 NZ and checks topology, count, and record;
+        # it also checks that an atom without hydrogens is rejected.
+        import numpy as np
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        n_before = protein.n_particles
+        fragment = mb.load("CC(C)=O", smiles=True)
+
+        with pytest.raises(MBuildError, match="no bonded hydrogen"):
+            protein.attach(fragment, "C2", resnum=5, atom_name="NZ", chain_id="A")
+
+        record = protein.attach(
+            fragment,
+            "C1",
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="ACT",
+        )
+        assert (record.atom1_name, record.atom2_name) == ("NZ", "C1")
+        assert record.leaving1 == ("HZ1",) and record.leaving2 == ("H1",)
+        assert protein.n_particles == n_before + fragment.n_particles - 2
+
+        fragment_residue = protein.get_residue(307, chain_id="A")
+        assert fragment_residue.name == "ACT" and fragment_residue.hetatm
+
+        nz = protein.get_atom(5, "NZ", chain_id="A")
+        carbon = protein.get_atom(307, "C1", chain_id="A")
+        assert protein.bond_graph.has_edge(nz, carbon)
+        assert np.isclose(np.linalg.norm(carbon.pos - nz.pos), 0.15, atol=1e-3)
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach_chained(self):
+        # Tests that a residue added by attach() can itself be a later
+        # attachment site. This is needed because multi-residue and
+        # branched structures (polymer chains, Y-shaped glycans) are
+        # built by repeated attach() calls, and every link must be
+        # recorded without any per-residue limit. The test attaches a
+        # fragment to the protein and a second fragment to the first,
+        # then checks both recorded bonds and the connectivity.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        fragment = mb.load("CC(C)=O", smiles=True)
+
+        protein.attach(
+            fragment,
+            "C1",
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="AC1",
+        )
+        record = protein.attach(
+            fragment,
+            "C1",
+            resnum=307,
+            atom_name="C3",
+            chain_id="A",
+            fragment_resname="AC2",
+        )
+        assert record.residue1.resnum == 307
+        assert record.residue2.resnum == 308
+        assert len(protein.cross_bonds) == 2
+        first = protein.get_atom(307, "C3", chain_id="A")
+        second = protein.get_atom(308, "C1", chain_id="A")
+        assert protein.bond_graph.has_edge(first, second)
 
     def test_unknown_residue_raises(self):
         # Tests that an unknown residue code raises a KeyError that names
