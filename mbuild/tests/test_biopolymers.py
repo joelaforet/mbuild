@@ -197,7 +197,7 @@ class TestCCDLibrary(BaseTest):
         n_before = protein.n_particles
         fragment = mb.load("CC(C)=O", smiles=True)
 
-        with pytest.raises(MBuildError, match="no bonded hydrogen"):
+        with pytest.raises(MBuildError, match="0 bonded hydrogens"):
             protein.attach(fragment, "C2", resnum=5, atom_name="NZ", chain_id="A")
 
         record = protein.attach(
@@ -590,6 +590,146 @@ class TestCCDLibrary(BaseTest):
                 if name not in hetero_resnames:
                     hetero_resnames.append(name)
         assert hetero_resnames == ["AC2", "AC1"]
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach_bond_order_removes_matching_hydrogens(self):
+        # Tests that a higher-order attach removes one hydrogen per bond
+        # order unit on each side, and rejects invalid orders. This is
+        # needed because removing a single hydrogen while writing a
+        # double bond produces impossible valences (a pentavalent
+        # nitrogen), which review reproduced. The test forms an
+        # imine-like double bond at LYS 5 NZ and checks the hydrogen
+        # count, recorded leaving atoms, and the order guard.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        fragment = mb.load("CC=O", smiles=True)
+        record = protein.attach(
+            fragment,
+            "C1",
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="IMN",
+            bond_order=2,
+        )
+        assert record.leaving1 == ("HZ1", "HZ2")
+        assert len(record.leaving2) == 2
+        nz = protein.get_atom(5, "NZ", chain_id="A")
+        assert sorted(p.name for p in nz.direct_bonds()) == ["C1", "CE", "HZ3"]
+
+        with pytest.raises(MBuildError, match="bond_order must be"):
+            protein.attach(
+                fragment,
+                "C1",
+                resnum=12,
+                atom_name="NZ",
+                chain_id="A",
+                bond_order=0,
+            )
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_clone_preserves_protein_state(self):
+        # Tests that clone() returns a working Protein whose library and
+        # cross-bond records survive, with the records pointing at the
+        # cloned residues. This is needed because packing and solvation
+        # workflows clone their inputs, and a clone that loses these
+        # attributes crashes later calls. The test clones a modified
+        # protein and checks identity and remapping.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        fragment = mb.load("CC(C)=O", smiles=True)
+        protein.attach(
+            fragment,
+            "C1",
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="ACT",
+        )
+        copy = mb.clone(protein)
+        assert copy.library is protein.library
+        assert len(copy.cross_bonds) == 1
+        assert copy.cross_bonds[0].residue1 is not protein.cross_bonds[0].residue1
+        assert copy.cross_bonds[0].residue1.resnum == 5
+        assert copy.net_formal_charge == protein.net_formal_charge
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_to_rdkit_carries_chemistry(self):
+        # Tests that Protein.to_rdkit returns a sanitized molecule with
+        # the correct net formal charge and PDB residue info, including
+        # charges of an attached zwitterionic fragment. This is needed
+        # because the generic Compound export drops formal charges, so
+        # RDKit/OpenFF handoff would silently mis-protonate. The test
+        # exports before and after attaching a sulfobetaine and checks
+        # net charge and per-atom info.
+        from rdkit import Chem
+
+        from mbuild.biopolymers import prepare_fragment
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        mol = protein.to_rdkit()
+        assert Chem.GetFormalCharge(mol) == protein.net_formal_charge == -4
+        info = mol.GetAtomWithIdx(0).GetPDBResidueInfo()
+        assert (info.GetResidueName(), info.GetResidueNumber()) == ("SER", 1)
+
+        fragment = prepare_fragment("C[N+](C)(C)CCS(=O)(=O)[O-]", "SBM")
+        assert fragment.formal_charge == 0
+        assert len(fragment.atom_formal_charges) == 2
+        protein.attach(fragment, "C1", resnum=5, atom_name="NZ", chain_id="A")
+        assert Chem.GetFormalCharge(protein.to_rdkit()) == -4
+
+    def test_save_routes_pdb(self, tmp_path):
+        # Tests that the canonical save() verb writes a correct PDB via
+        # save_pdb, and that to_parmed keeps the residue partitioning.
+        # This is needed because the generic ParmEd path silently wrote
+        # one residue named RES with no chains, which loses the protein's
+        # identity without any warning. The test saves through save()
+        # and checks residue fields, then counts ParmEd residues.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        out = tmp_path / "routed.pdb"
+        protein.save(str(out))
+        first = next(
+            line for line in out.read_text().splitlines() if line.startswith("ATOM")
+        )
+        assert first[17:20] == "SER" and first[21] == "A"
+        assert len(protein.to_parmed().residues) == 306
+
+    def test_add_port_at(self):
+        # Tests the canonical-port escape hatch: a real Port anchored at
+        # the named atom, pointing along the removed hydrogen. This is
+        # needed so power users can run force_overlap themselves for
+        # placements attach() does not cover, keeping the recipe on
+        # mBuild's standard linking machinery. The test creates a port
+        # at LYS 12 NZ and checks anchor and hydrogen accounting.
+        from mbuild.port import Port
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        port = protein.add_port_at(12, "NZ", chain_id="A")
+        assert isinstance(port, Port)
+        assert port.anchor.name == "NZ"
+        nz = protein.get_atom(12, "NZ", chain_id="A")
+        hydrogens = [p for p in nz.direct_bonds() if p.element.symbol == "H"]
+        assert len(hydrogens) == 2
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach_warns_on_clashes(self, caplog):
+        # Tests that attaching a bulky fragment into a crowded site logs
+        # a clash warning. This is needed because port alignment is
+        # rigid and a fragment placed inside the protein would otherwise
+        # fail silently until MD blows up. The test attaches
+        # triphenylmethane at a buried lysine and checks the log.
+        import logging
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        bulky = mb.load("C(c1ccccc1)(c1ccccc1)c1ccccc1", smiles=True)
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein.attach(
+                bulky,
+                "C1",
+                resnum=5,
+                atom_name="NZ",
+                chain_id="A",
+                fragment_resname="TPM",
+            )
+        assert "Relax the structure" in caplog.text
 
     def test_unknown_residue_raises(self):
         # Tests that an unknown residue code raises a KeyError that names

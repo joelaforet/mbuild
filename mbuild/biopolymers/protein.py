@@ -23,7 +23,7 @@ example with pdbfixer or reduce) at the desired pH.
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -32,7 +32,6 @@ from mbuild.biopolymers.ccd import CCDLibrary
 from mbuild.box import Box
 from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
-from mbuild.polymer import Polymer
 from mbuild.port import Port
 
 logger = logging.getLogger(__name__)
@@ -96,6 +95,9 @@ class Residue(Compound):
         self.hetatm = hetatm
         self.template = None
         self.formal_charge = 0
+        #: Sparse map of atom name -> integer formal charge, filled by
+        #: the loader (from the matched template) and fragment loaders.
+        self.atom_formal_charges = {}
 
     def _clone(self, clone_of=None, root_container=None):
         newone = super()._clone(clone_of, root_container)
@@ -108,6 +110,7 @@ class Residue(Compound):
             "formal_charge",
         ):
             setattr(newone, attribute, getattr(self, attribute))
+        newone.atom_formal_charges = dict(self.atom_formal_charges)
         return newone
 
 
@@ -193,13 +196,36 @@ def prepare_fragment(compound, resname):
     Residue
         A detached residue with unique, stable atom names.
     """
-    copied = clone(compound)
+    charges = None
+    if isinstance(compound, str):
+        # A SMILES string: load it and keep its formal charges, which
+        # an mbuild Compound cannot store.
+        from rdkit import Chem
+
+        from mbuild import load
+
+        rdmol = Chem.MolFromSmiles(compound)
+        if rdmol is None:
+            raise MBuildError(f"Could not parse SMILES {compound!r}.")
+        charges = [atom.GetFormalCharge() for atom in Chem.AddHs(rdmol).GetAtoms()]
+        copied = load(compound, smiles=True)
+    else:
+        copied = clone(compound)
     if isinstance(copied, Residue):
         residue = copied
         residue.name = (resname or residue.name)[:3].upper()
     else:
         residue = Protein._wrap_in_residue(copied, resname)
     Protein._ensure_unique_atom_names(residue)
+    if charges is not None:
+        particles = list(residue.particles())
+        if len(particles) == len(charges):
+            residue.atom_formal_charges = {
+                particle.name: charge
+                for particle, charge in zip(particles, charges)
+                if charge
+            }
+            residue.formal_charge = sum(charges)
     return residue
 
 
@@ -311,9 +337,9 @@ def fragment_from_sdf(filename, resname):
     Prefer it (or SMILES) over ``fragment_from_pdb`` when you control
     the fragment source. Atom names are assigned as element+index
     (the SDF format has no atom names); read them from the returned
-    residue. Formal charges stay in the SDF file — build the external
-    (Pablo) residue definition from the same file so the charges reach
-    parameterization.
+    residue. Formal charges from the SDF are kept on the residue's
+    ``atom_formal_charges`` map, so exports carry them; the external
+    (Pablo) residue definition is still best built from the same file.
 
     Parameters
     ----------
@@ -378,6 +404,12 @@ def fragment_from_sdf(filename, resname):
             bond_order=order,
         )
     Protein._ensure_unique_atom_names(residue)
+    residue.atom_formal_charges = {
+        particles[atom.GetIdx()].name: atom.GetFormalCharge()
+        for atom in molecule.GetAtoms()
+        if atom.GetFormalCharge()
+    }
+    residue.formal_charge = sum(residue.atom_formal_charges.values())
     return residue
 
 
@@ -597,7 +629,7 @@ def _matches_agree(matches, group):
     return reference
 
 
-class Protein(Polymer):
+class Protein(Compound):
     """A protein loaded from a fully protonated PDB file.
 
     The hierarchy is ``Protein -> Chain -> Residue -> particles``. Atom
@@ -620,12 +652,26 @@ class Protein(Polymer):
     """
 
     def __init__(self, filename=None, library=None, download=False, name="Protein"):
-        super().__init__()
-        self.name = name
+        super().__init__(name=name)
         self.library = library or CCDLibrary(download=download)
         self.cross_bonds = []
         if filename is not None:
             self._load_pdb(filename)
+
+    def _clone(self, clone_of=None, root_container=None):
+        newone = super()._clone(clone_of, root_container)
+        newone.library = self.library
+        # cross_bonds reference live Residue objects; point the records
+        # at the cloned residues so the clone stays self-consistent.
+        newone.cross_bonds = [
+            replace(
+                bond,
+                residue1=clone_of.get(bond.residue1, bond.residue1),
+                residue2=clone_of.get(bond.residue2, bond.residue2),
+            )
+            for bond in self.cross_bonds
+        ]
+        return newone
 
     # ------------------------------------------------------------------
     # Loading
@@ -693,6 +739,11 @@ class Protein(Polymer):
             residue.formal_charge = sum(
                 atom.formal_charge for atom in match.record_atoms.values()
             )
+            residue.atom_formal_charges = {
+                atom.name: atom.formal_charge
+                for atom in match.record_atoms.values()
+                if atom.formal_charge
+            }
             residues.append(residue)
 
             particles = {}
@@ -825,8 +876,147 @@ class Protein(Polymer):
                 )
 
     # ------------------------------------------------------------------
+    # Canonical Compound verbs, routed to residue-aware behavior
+    # ------------------------------------------------------------------
+    def save(self, filename, **kwargs):
+        """Save the protein; ``.pdb`` files route to ``save_pdb``.
+
+        The generic ParmEd writer cannot express residue numbers, chain
+        identifiers, or CONECT records, so a plain ``save`` would write
+        a file that silently loses the protein's identity.
+        """
+        if str(filename).lower().endswith(".pdb"):
+            return self.save_pdb(filename, overwrite=kwargs.get("overwrite", False))
+        return super().save(filename, **kwargs)
+
+    def to_parmed(self, **kwargs):
+        """Create a ParmEd structure with residues taken from hierarchy."""
+        kwargs.setdefault(
+            "residues", sorted({residue.name for residue in self.residues()})
+        )
+        return super().to_parmed(**kwargs)
+
+    def to_rdkit(self):
+        """Create a sanitized RDKit molecule of the (modified) protein.
+
+        Unlike the generic ``Compound.to_rdkit``, this export carries
+        the chemistry the recipe knows: formal charges from the matched
+        templates and fragment records, bond orders, explicit hydrogens,
+        one conformer, and PDB residue info on every atom. The result
+        sanitizes, so it is directly usable by RDKit and by tools that
+        consume RDKit molecules.
+        """
+        from rdkit import Chem
+
+        editable = Chem.RWMol()
+        particle_index = {}
+        particle_residue = {}
+        chain_of = {}
+        for chain in self.chains:
+            for residue in self.residues(chain.chain_id):
+                for particle in residue.particles():
+                    particle_residue[particle] = residue
+                    chain_of[particle] = chain.chain_id
+        particles = [
+            p for p in self.particles() if not p.port_particle and p in particle_residue
+        ]
+        for particle in particles:
+            residue = particle_residue[particle]
+            atom = Chem.Atom(particle.element.atomic_number)
+            atom.SetFormalCharge(residue.atom_formal_charges.get(particle.name, 0))
+            atom.SetNoImplicit(True)
+            info = Chem.AtomPDBResidueInfo()
+            info.SetName(
+                particle.name.center(4)
+                if len(particle.name) >= 4
+                else f" {particle.name:<3s}"
+            )
+            info.SetResidueName(residue.name)
+            info.SetResidueNumber(residue.resnum)
+            info.SetChainId(chain_of[particle] or " ")
+            info.SetInsertionCode(residue.icode or " ")
+            info.SetIsHeteroAtom(residue.hetatm)
+            atom.SetPDBResidueInfo(info)
+            particle_index[particle] = editable.AddAtom(atom)
+
+        aromatic_pairs = []
+        for particle1, particle2, data in self.bonds(return_bond_order=True):
+            if particle1 not in particle_index or particle2 not in particle_index:
+                continue
+            order = float(data["bond_order"])
+            if order <= 0.0:
+                raise MBuildError(
+                    f"Bond {particle1.name}-{particle2.name} has no bond "
+                    "order; cannot export chemistry to RDKit."
+                )
+            bond_type = {
+                1.0: Chem.BondType.SINGLE,
+                2.0: Chem.BondType.DOUBLE,
+                3.0: Chem.BondType.TRIPLE,
+                1.5: Chem.BondType.AROMATIC,
+            }[order]
+            editable.AddBond(
+                particle_index[particle1], particle_index[particle2], bond_type
+            )
+            if order == 1.5:
+                aromatic_pairs.append((particle1, particle2))
+        for particle1, particle2 in aromatic_pairs:
+            for particle in (particle1, particle2):
+                editable.GetAtomWithIdx(particle_index[particle]).SetIsAromatic(True)
+            editable.GetBondBetweenAtoms(
+                particle_index[particle1], particle_index[particle2]
+            ).SetIsAromatic(True)
+
+        mol = editable.GetMol()
+        conformer = Chem.Conformer(len(particles))
+        for particle, index in particle_index.items():
+            x, y, z = particle.pos * 10.0
+            conformer.SetAtomPosition(index, (float(x), float(y), float(z)))
+        mol.AddConformer(conformer, assignId=True)
+        mol.UpdatePropertyCache(strict=False)
+        try:
+            Chem.SanitizeMol(mol)
+        except (RuntimeError, ValueError) as error:
+            raise MBuildError(
+                "RDKit rejected the protein's chemistry during sanitize: "
+                f"{error}. If atoms were removed manually, update the "
+                "residue's atom_formal_charges accordingly."
+            ) from error
+        return mol
+
+    # ------------------------------------------------------------------
     # Functionalization
     # ------------------------------------------------------------------
+    def add_port_at(
+        self,
+        resnum,
+        atom_name,
+        chain_id=None,
+        icode="",
+        separation=0.15,
+        bond_order=1,
+    ):
+        """Create and return a real Port at the named atom.
+
+        This is the canonical-mBuild escape hatch under ``attach()``:
+        the named atom loses ``bond_order`` hydrogens, and a ``Port``
+        pointing along the removed hydrogens is added to the residue.
+        Use it with ``force_overlap`` for placements ``attach()`` does
+        not cover. Note that bonds formed this way are not recorded in
+        ``cross_bonds``.
+        """
+        residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
+        atom = self.get_atom(resnum, atom_name, chain_id=chain_id, icode=icode)
+        hydrogens = self._bonded_hydrogens(atom, residue.name, int(bond_order))
+        orientation = sum(h.pos - atom.pos for h in hydrogens)
+        if np.linalg.norm(orientation) < 1e-8:
+            orientation = hydrogens[0].pos - atom.pos
+        for hydrogen in hydrogens:
+            self.remove(hydrogen)
+        port = Port(anchor=atom, orientation=orientation, separation=separation / 2)
+        residue.add(port, label="port[$]")
+        return port
+
     def attach(
         self,
         fragment,
@@ -897,9 +1087,16 @@ class Protein(Polymer):
         InterResidueBond
             The recorded bond, as appended to ``cross_bonds``.
         """
+        bond_order = int(bond_order)
+        if not 1 <= bond_order <= 3:
+            raise MBuildError(
+                f"bond_order must be 1, 2, or 3; you passed {bond_order}."
+            )
         site_residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
         site_atom = self.get_atom(resnum, atom_name, chain_id=chain_id, icode=icode)
-        site_hydrogen = self._bonded_hydrogen(site_atom, site_residue.name)
+        site_hydrogens = self._bonded_hydrogens(
+            site_atom, site_residue.name, bond_order
+        )
 
         added = clone(fragment)
         if not isinstance(added, Residue):
@@ -919,13 +1116,25 @@ class Protein(Polymer):
         frag_atom, frag_residue = self._find_fragment_atom(
             frag_residues, fragment_atom_name, fragment_resnum
         )
-        frag_hydrogen = self._bonded_hydrogen(frag_atom, frag_residue.name)
+        frag_hydrogens = self._bonded_hydrogens(
+            frag_atom, frag_residue.name, bond_order
+        )
 
-        site_orientation = site_hydrogen.pos - site_atom.pos
-        frag_orientation = frag_hydrogen.pos - frag_atom.pos
+        # One hydrogen leaves per bond order unit on each side (the
+        # polymer.add_monomer convention); the port points along the sum
+        # of the removed-hydrogen vectors.
+        site_orientation = sum(h.pos - site_atom.pos for h in site_hydrogens)
+        frag_orientation = sum(h.pos - frag_atom.pos for h in frag_hydrogens)
+        if np.linalg.norm(site_orientation) < 1e-8:
+            site_orientation = site_hydrogens[0].pos - site_atom.pos
+        if np.linalg.norm(frag_orientation) < 1e-8:
+            frag_orientation = frag_hydrogens[0].pos - frag_atom.pos
 
-        self.remove(site_hydrogen)
-        (added if added.parent is None else added.root).remove(frag_hydrogen)
+        for hydrogen in site_hydrogens:
+            self.remove(hydrogen)
+        frag_root = added if added.parent is None else added.root
+        for hydrogen in frag_hydrogens:
+            frag_root.remove(hydrogen)
 
         # Renumber fragment residues into the site's chain.
         chain = next(c for c in site_residue.ancestors() if isinstance(c, Chain))
@@ -958,21 +1167,28 @@ class Protein(Polymer):
             bond_order=float(bond_order),
         )
 
+        self._warn_on_clashes(added, site_atom, frag_atom)
+
         record = InterResidueBond(
             residue1=site_residue,
             residue2=frag_residue,
             atom1_name=site_atom.name,
             atom2_name=frag_atom.name,
-            order=int(bond_order),
-            leaving1=(site_hydrogen.name,),
-            leaving2=(frag_hydrogen.name,),
+            order=bond_order,
+            leaving1=tuple(sorted(h.name for h in site_hydrogens)),
+            leaving2=tuple(sorted(h.name for h in frag_hydrogens)),
         )
         self.cross_bonds.append(record)
         return record
 
     @staticmethod
-    def _bonded_hydrogen(atom, residue_name):
-        """Return one hydrogen bonded to the atom (first by sorted name)."""
+    def _bonded_hydrogens(atom, residue_name, count):
+        """Return ``count`` hydrogens bonded to the atom (sorted by name).
+
+        One hydrogen leaves per unit of bond order. Reactions that
+        remove other leaving groups (e.g. condensations) are the domain
+        of future reaction recipes built on top of ``attach``.
+        """
         hydrogens = sorted(
             (
                 particle
@@ -981,12 +1197,45 @@ class Protein(Polymer):
             ),
             key=lambda particle: particle.name,
         )
-        if not hydrogens:
+        if len(hydrogens) < count:
             raise MBuildError(
-                f"Atom {atom.name} of residue {residue_name} has no bonded "
-                "hydrogen to substitute. Pick an atom with a hydrogen."
+                f"Atom {atom.name} of residue {residue_name} has "
+                f"{len(hydrogens)} bonded hydrogens, but a bond of order "
+                f"{count} must replace {count}. Pick an atom with enough "
+                "hydrogens."
             )
-        return hydrogens[0]
+        return hydrogens[:count]
+
+    def _warn_on_clashes(self, added, site_atom, frag_atom, cutoff=0.1):
+        """Warn when placed fragment atoms overlap the rest of the system.
+
+        Port alignment is rigid; a bulky fragment can land inside the
+        protein. The check compares every added atom against every other
+        atom (excluding the new bond pair) and warns below ``cutoff`` nm,
+        so the user knows to relax the structure before simulating.
+        """
+        from scipy.spatial import cKDTree
+
+        added_particles = [p for p in added.particles() if not p.port_particle]
+        added_set = set(added_particles) | {site_atom}
+        others = [
+            p for p in self.particles() if p not in added_set and not p.port_particle
+        ]
+        if not others or not added_particles:
+            return
+        tree = cKDTree([p.pos for p in others])
+        distances, _ = tree.query(
+            [p.pos for p in added_particles if p is not frag_atom]
+        )
+        n_clashes = int((distances < cutoff).sum())
+        if n_clashes:
+            logger.warning(
+                f"{n_clashes} atoms of the attached fragment sit within "
+                f"{cutoff * 10:.1f} A of existing atoms (closest: "
+                f"{distances.min() * 10:.2f} A). Relax the structure before "
+                "simulating (e.g. energy minimization with the protein held "
+                "fixed)."
+            )
 
     @staticmethod
     def _wrap_in_residue(compound, fragment_resname):
