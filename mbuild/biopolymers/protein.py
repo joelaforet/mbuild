@@ -783,11 +783,7 @@ class Protein(Compound):
         residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
         atom = self.get_atom(resnum, atom_name, chain_id=chain_id, icode=icode)
         hydrogens = self._bonded_hydrogens(atom, residue.name, int(bond_order))
-        orientation = sum(h.pos - atom.pos for h in hydrogens)
-        if np.linalg.norm(orientation) < 1e-8:
-            orientation = hydrogens[0].pos - atom.pos
-        self.remove(hydrogens)
-        port = Port(anchor=atom, orientation=orientation, separation=separation / 2)
+        port = self._port_along_hydrogens(self, atom, hydrogens, separation)
         residue.add(port, label="port[$]")
         return port
 
@@ -910,15 +906,14 @@ class Protein(Compound):
         # One hydrogen leaves per bond order unit on each side (the
         # polymer.add_monomer convention); the port points along the sum
         # of the removed-hydrogen vectors.
-        site_orientation = sum(h.pos - site_atom.pos for h in site_hydrogens)
-        frag_orientation = sum(h.pos - frag_atom.pos for h in frag_hydrogens)
-        if np.linalg.norm(site_orientation) < 1e-8:
-            site_orientation = site_hydrogens[0].pos - site_atom.pos
-        if np.linalg.norm(frag_orientation) < 1e-8:
-            frag_orientation = frag_hydrogens[0].pos - frag_atom.pos
-
-        self.remove(site_hydrogens)
-        added.remove(frag_hydrogens)
+        site_port = self._port_along_hydrogens(
+            self, site_atom, site_hydrogens, separation
+        )
+        site_residue.add(site_port, label="attach_site")
+        frag_port = self._port_along_hydrogens(
+            added, frag_atom, frag_hydrogens, separation
+        )
+        added.add(frag_port, label="attach_frag")
 
         # Renumber fragment residues into the site's chain.
         chain = next(c for c in site_residue.ancestors() if isinstance(c, Chain))
@@ -927,19 +922,6 @@ class Protein(Compound):
             residue.resnum = next_resnum + offset
             residue.hetatm = True
         chain.add(added)
-
-        site_port = Port(
-            anchor=site_atom,
-            orientation=site_orientation,
-            separation=separation / 2,
-        )
-        site_residue.add(site_port, label="attach_site")
-        frag_port = Port(
-            anchor=frag_atom,
-            orientation=frag_orientation,
-            separation=separation / 2,
-        )
-        added.add(frag_port, label="attach_frag")
 
         from mbuild.coordinate_transform import force_overlap
 
@@ -970,6 +952,32 @@ class Protein(Compound):
         )
         self.cross_bonds.append(record)
         return record
+
+    @staticmethod
+    def _port_along_hydrogens(root, atom, hydrogens, separation):
+        """Remove the hydrogens and return a Port pointing along them.
+
+        The port points along the sum of the removed-hydrogen vectors,
+        or along the first hydrogen when the sum is degenerate.
+        ``Compound.remove`` leaves one auto-generated port on the atom
+        per severed bond; those are pruned (the same cleanup
+        ``Polymer.add_monomer`` does) so the returned Port is the only
+        open port at the atom.
+        """
+        orientation = sum(h.pos - atom.pos for h in hydrogens)
+        if np.linalg.norm(orientation) < 1e-8:
+            orientation = hydrogens[0].pos - atom.pos
+        residue = atom.parent
+        old_ports = {p for p in residue.children if isinstance(p, Port)}
+        root.remove(hydrogens)
+        root.remove(
+            [
+                p
+                for p in residue.children
+                if isinstance(p, Port) and p not in old_ports
+            ]
+        )
+        return Port(anchor=atom, orientation=orientation, separation=separation / 2)
 
     @staticmethod
     def _bonded_hydrogens(atom, residue_name, count):
