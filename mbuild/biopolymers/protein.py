@@ -131,7 +131,6 @@ class InterResidueBond:
     order: int = 1
     leaving1: tuple = ()
     leaving2: tuple = ()
-    kind: str = "crosslink"  # "peptide" bonds need no crosslink spec
 
 
 @dataclass
@@ -207,7 +206,9 @@ def prepare_fragment(compound, resname):
         rdmol = Chem.MolFromSmiles(compound)
         if rdmol is None:
             raise MBuildError(f"Could not parse SMILES {compound!r}.")
-        charges = [atom.GetFormalCharge() for atom in Chem.AddHs(rdmol).GetAtoms()]
+        rdmol = Chem.AddHs(rdmol)
+        charges = [atom.GetFormalCharge() for atom in rdmol.GetAtoms()]
+        elements = [atom.GetSymbol() for atom in rdmol.GetAtoms()]
         copied = load(compound, smiles=True)
     else:
         copied = clone(compound)
@@ -219,13 +220,19 @@ def prepare_fragment(compound, resname):
     Protein._ensure_unique_atom_names(residue)
     if charges is not None:
         particles = list(residue.particles())
-        if len(particles) == len(charges):
-            residue.atom_formal_charges = {
-                particle.name: charge
-                for particle, charge in zip(particles, charges)
-                if charge
-            }
-            residue.formal_charge = sum(charges)
+        symbols = [particle.element.symbol for particle in particles]
+        if len(particles) != len(charges) or symbols != elements:
+            raise MBuildError(
+                "Atom order of the loaded fragment does not match the "
+                "SMILES, so formal charges cannot be mapped onto atoms. "
+                "This is a bug in the loading path; please report it."
+            )
+        residue.atom_formal_charges = {
+            particle.name: charge
+            for particle, charge in zip(particles, charges)
+            if charge
+        }
+        residue.formal_charge = sum(charges)
     return residue
 
 
@@ -662,12 +669,25 @@ class Protein(Compound):
         newone = super()._clone(clone_of, root_container)
         newone.library = self.library
         # cross_bonds reference live Residue objects; point the records
-        # at the cloned residues so the clone stays self-consistent.
+        # at the cloned residues so the clone stays self-consistent. A
+        # record whose residue is no longer part of this Protein is an
+        # inconsistent state and must fail here, not far downstream.
+        clone_of = clone_of if clone_of is not None else {}
+
+        def mapped(residue):
+            if residue in clone_of:
+                return clone_of[residue]
+            raise MBuildError(
+                f"cross_bonds references residue {residue.name} "
+                f"{residue.resnum}, which is not part of this Protein. "
+                "Remove stale records before cloning."
+            )
+
         newone.cross_bonds = [
             replace(
                 bond,
-                residue1=clone_of.get(bond.residue1, bond.residue1),
-                residue2=clone_of.get(bond.residue2, bond.residue2),
+                residue1=mapped(bond.residue1),
+                residue2=mapped(bond.residue2),
             )
             for bond in self.cross_bonds
         ]
@@ -886,14 +906,26 @@ class Protein(Compound):
         a file that silently loses the protein's identity.
         """
         if str(filename).lower().endswith(".pdb"):
+            unexpected = set(kwargs) - {"overwrite"}
+            if unexpected:
+                raise MBuildError(
+                    "Saving a Protein to .pdb uses save_pdb(), which takes "
+                    f"only 'overwrite'; the arguments {sorted(unexpected)} "
+                    "would be ignored."
+                )
             return self.save_pdb(filename, overwrite=kwargs.get("overwrite", False))
         return super().save(filename, **kwargs)
 
     def to_parmed(self, **kwargs):
-        """Create a ParmEd structure with residues taken from hierarchy."""
-        kwargs.setdefault(
-            "residues", sorted({residue.name for residue in self.residues()})
-        )
+        """Create a ParmEd structure with residues taken from hierarchy.
+
+        ``conversion.save`` passes ``residues=None`` explicitly, so the
+        default must fill in whenever the value is None, not only when
+        the key is absent — otherwise every ParmEd-routed format (mol2,
+        psf, ...) collapses the protein into one residue.
+        """
+        if kwargs.get("residues") is None:
+            kwargs["residues"] = sorted({residue.name for residue in self.residues()})
         return super().to_parmed(**kwargs)
 
     def to_rdkit(self):
@@ -917,9 +949,16 @@ class Protein(Compound):
                 for particle in residue.particles():
                     particle_residue[particle] = residue
                     chain_of[particle] = chain.chain_id
-        particles = [
-            p for p in self.particles() if not p.port_particle and p in particle_residue
-        ]
+        particles = [p for p in self.particles() if not p.port_particle]
+        orphans = [p for p in particles if p not in particle_residue]
+        if orphans:
+            raise MBuildError(
+                "Every atom of a Protein must belong to a Residue, but "
+                f"{[p.name for p in orphans[:5]]} "
+                f"{'(and more) ' if len(orphans) > 5 else ''}do not. Add "
+                "atoms through attach() or into a Residue, not directly "
+                "onto the Protein."
+            )
         for particle in particles:
             residue = particle_residue[particle]
             atom = Chem.Atom(particle.element.atomic_number)
@@ -1032,8 +1071,10 @@ class Protein(Compound):
     ):
         """Bond a fragment Compound onto a residue of this protein.
 
-        One hydrogen leaves each side: a hydrogen bonded to the named
-        protein atom, and a hydrogen bonded to the named fragment atom.
+        ``bond_order`` hydrogens leave each side: hydrogens bonded to
+        the named protein atom, and hydrogens bonded to the named
+        fragment atom (one per unit of bond order, so a double bond
+        removes two from each atom).
         Ports along the removed-hydrogen vectors align the fragment
         (``force_overlap``), a bond with ``bond_order`` forms between
         the two named atoms, and the new inter-residue bond is recorded
@@ -1059,12 +1100,12 @@ class Protein(Compound):
             The group to add. Cloned before use.
         fragment_atom_name : str
             Name of the fragment atom that forms the new bond. It must
-            have at least one bonded hydrogen.
+            have at least ``bond_order`` bonded hydrogens.
         resnum : int
             Residue number of the protein attachment site.
         atom_name : str
             Name of the protein atom that forms the new bond. It must
-            have at least one bonded hydrogen.
+            have at least ``bond_order`` bonded hydrogens.
         chain_id : str, optional
             Chain of the attachment site; required when residue numbers
             repeat across chains.
@@ -1088,10 +1129,6 @@ class Protein(Compound):
             The recorded bond, as appended to ``cross_bonds``.
         """
         bond_order = int(bond_order)
-        if not 1 <= bond_order <= 3:
-            raise MBuildError(
-                f"bond_order must be 1, 2, or 3; you passed {bond_order}."
-            )
         site_residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
         site_atom = self.get_atom(resnum, atom_name, chain_id=chain_id, icode=icode)
         site_hydrogens = self._bonded_hydrogens(
@@ -1189,6 +1226,8 @@ class Protein(Compound):
         remove other leaving groups (e.g. condensations) are the domain
         of future reaction recipes built on top of ``attach``.
         """
+        if not 1 <= count <= 3:
+            raise MBuildError(f"bond_order must be 1, 2, or 3; you passed {count}.")
         hydrogens = sorted(
             (
                 particle
@@ -1367,6 +1406,10 @@ class Protein(Compound):
     # ------------------------------------------------------------------
     def save_pdb(self, filename, overwrite=False):
         """Write a prepared PDB file that OpenFF Pablo can load.
+
+        Bonds made through ``add_port_at`` + ``force_overlap`` get
+        CONECT records but no ``cross_bonds`` record, so downstream
+        loaders need residue definitions for them from you.
 
         mBuild's generic PDB writer (ParmEd via ``save``) cannot express
         residue numbers, chain identifiers, HETATM records, or a

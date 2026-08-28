@@ -676,6 +676,11 @@ class TestCCDLibrary(BaseTest):
         protein.attach(fragment, "C1", resnum=5, atom_name="NZ", chain_id="A")
         assert Chem.GetFormalCharge(protein.to_rdkit()) == -4
 
+        # Atoms outside any Residue must fail loudly, not vanish.
+        protein.add(mb.Compound(name="XX", element="C"))
+        with pytest.raises(MBuildError, match="belong to a Residue"):
+            protein.to_rdkit()
+
     def test_save_routes_pdb(self, tmp_path):
         # Tests that the canonical save() verb writes a correct PDB via
         # save_pdb, and that to_parmed keeps the residue partitioning.
@@ -691,6 +696,17 @@ class TestCCDLibrary(BaseTest):
         )
         assert first[17:20] == "SER" and first[21] == "A"
         assert len(protein.to_parmed().residues) == 306
+
+        with pytest.raises(MBuildError, match="would be ignored"):
+            protein.save(str(out), overwrite=True, residues=["FOO"])
+
+        # conversion.save passes residues=None explicitly, so the mol2
+        # route must still carry the residue partitioning.
+        import parmed
+
+        mol2 = tmp_path / "routed.mol2"
+        protein.save(str(mol2), overwrite=True)
+        assert len(parmed.load_file(str(mol2), structure=True).residues) == 306
 
     def test_add_port_at(self):
         # Tests the canonical-port escape hatch: a real Port anchored at
@@ -708,6 +724,9 @@ class TestCCDLibrary(BaseTest):
         nz = protein.get_atom(12, "NZ", chain_id="A")
         hydrogens = [p for p in nz.direct_bonds() if p.element.symbol == "H"]
         assert len(hydrogens) == 2
+
+        with pytest.raises(MBuildError, match="bond_order must be"):
+            protein.add_port_at(5, "NZ", chain_id="A", bond_order=0)
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_attach_warns_on_clashes(self, caplog):
