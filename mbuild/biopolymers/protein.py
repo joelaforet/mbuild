@@ -148,13 +148,10 @@ class _Match:
 def _atom_in_residue(residue, atom_name):
     """Return the named particle of a residue, or None.
 
-    Particles are found by scanning names instead of labels, because
-    labels can go stale after ``remove()``.
+    Particles are found by name instead of by label, because labels can
+    go stale after ``remove()``.
     """
-    for particle in residue.particles():
-        if particle.name == atom_name:
-            return particle
-    return None
+    return next(residue.particles_by_name(atom_name), None)
 
 
 def _match_residue(group, variants, prior_possible, posterior_possible):
