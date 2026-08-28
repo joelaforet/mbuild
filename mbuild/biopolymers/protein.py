@@ -775,7 +775,7 @@ class Protein(Compound):
         ``cross_bonds``.
         """
         residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
-        atom = self.get_atom(resnum, atom_name, chain_id=chain_id, icode=icode)
+        atom = self._atom_of(residue, atom_name)
         hydrogens = self._bonded_hydrogens(atom, residue.name, int(bond_order))
         port = self._port_along_hydrogens(self, atom, hydrogens, separation)
         residue.add(port, label="port[$]")
@@ -855,7 +855,7 @@ class Protein(Compound):
         """
         bond_order = int(bond_order)
         site_residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
-        site_atom = self.get_atom(resnum, atom_name, chain_id=chain_id, icode=icode)
+        site_atom = self._atom_of(site_residue, atom_name)
         site_hydrogens = self._bonded_hydrogens(
             site_atom, site_residue.name, bond_order
         )
@@ -1143,6 +1143,11 @@ class Protein(Compound):
     def get_atom(self, resnum, atom_name, chain_id=None, icode=""):
         """Return the named atom particle of the given residue."""
         residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
+        return self._atom_of(residue, atom_name)
+
+    @staticmethod
+    def _atom_of(residue, atom_name):
+        """Return the named atom of a residue already in hand, or raise."""
         particle = _atom_in_residue(residue, atom_name)
         if particle is None:
             raise MBuildError(
