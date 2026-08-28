@@ -35,6 +35,7 @@ from mbuild.biopolymers.protein_pdb_io import _parse_pdb
 from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
 from mbuild.port import Port
+from mbuild.utils.io import import_
 
 logger = logging.getLogger(__name__)
 
@@ -589,6 +590,7 @@ class Protein(Compound):
         so it stays unset for a typing engine to fill), bond orders,
         insertion codes, and the HETATM flag.
         """
+        gmso = import_("gmso")  # noqa: F841
         from gmso.abc.abstract_site import Residue as GMSOResidue
 
         topology = super().to_gmso(**kwargs)
@@ -619,6 +621,7 @@ class Protein(Compound):
         sanitizes, so it is directly usable by RDKit and by tools that
         consume RDKit molecules.
         """
+        rdkit = import_("rdkit")  # noqa: F841
         from rdkit import Chem
 
         editable = Chem.RWMol()
