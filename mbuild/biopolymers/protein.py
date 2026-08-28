@@ -1110,7 +1110,11 @@ class Protein(Compound):
         """Yield Residue compounds, optionally restricted to one chain.
 
         The traversal is recursive because attached fragments may sit in
-        a grouping compound under a chain.
+        a grouping compound under a chain. It is a hand-rolled walk, not
+        ``chain.successors()``, on purpose: this walk stops at each
+        Residue, while successors() would descend into every particle —
+        thousands of nodes instead of hundreds of residues, in a method
+        that backs get_residue, net_formal_charge, and the exports.
         """
         for chain in self.chains:
             if chain_id is not None and chain.chain_id != chain_id:
