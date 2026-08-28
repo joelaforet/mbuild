@@ -37,7 +37,13 @@ from mbuild.port import Port
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Protein", "Chain", "Residue"]
+__all__ = [
+    "Protein",
+    "Chain",
+    "Residue",
+    "fragment_from_pdb",
+    "prepare_fragment",
+]
 
 
 class Chain(Compound):
@@ -161,6 +167,108 @@ class _Match:
     expects_prior: bool
     expects_posterior: bool
     expects_crosslink: bool
+
+
+def prepare_fragment(compound, resname):
+    """Return a fragment as a named Residue with final atom names.
+
+    ``attach()`` wraps and renames fragments internally, so a caller who
+    passes a plain Compound cannot know the atom names in advance. This
+    helper applies the same wrapping and renaming up front and returns
+    the Residue, so the caller can (1) read the names to pick the
+    attachment atom, (2) pass the same object to ``attach()``, and
+    (3) reuse the names when building an external residue definition
+    (e.g. an OpenFF Pablo ``ResidueDefinition``) for the fragment.
+
+    Parameters
+    ----------
+    compound : mbuild.Compound
+        The fragment. Cloned; the input is not changed.
+    resname : str
+        The residue name (up to 3 characters, e.g. "MYR").
+
+    Returns
+    -------
+    Residue
+        A detached residue with unique, stable atom names.
+    """
+    copied = clone(compound)
+    if isinstance(copied, Residue):
+        residue = copied
+        residue.name = (resname or residue.name)[:3].upper()
+    else:
+        residue = Protein._wrap_in_residue(copied, resname)
+    Protein._ensure_unique_atom_names(residue)
+    return residue
+
+
+def fragment_from_pdb(filename):
+    """Load a fragment PDB file into Residue compounds for ``attach()``.
+
+    Unlike ``Protein``, this loader matches no templates and stamps no
+    chemistry: it is for fragment files (e.g. GLYCAM glycans) whose
+    residue codes are not in the CCD. Atom names, residue names, and
+    residue numbers come from the records; **bonds come only from the
+    file's CONECT records**, so the file must list them (no bonds are
+    guessed from distances). Elements come from the element column.
+
+    Parameters
+    ----------
+    filename : str
+        Path of the fragment PDB file.
+
+    Returns
+    -------
+    mbuild.Compound
+        A compound whose children are ``Residue`` objects (hetatm=True),
+        ready to pass to ``Protein.attach``.
+    """
+    with open(filename) as handle:
+        text = handle.read()
+    groups, conects, _ = _parse_pdb(text)
+    if not conects:
+        raise MBuildError(
+            f"{filename} has no CONECT records. fragment_from_pdb takes "
+            "connectivity only from CONECT records; add them or load the "
+            "fragment from SMILES instead."
+        )
+    fragment = Compound(name="fragment")
+    serial_to_particle = {}
+    for group in groups:
+        residue = Residue(
+            resname=group.resname,
+            resnum=group.resnum,
+            icode=group.icode,
+            hetatm=True,
+        )
+        particles = []
+        for record in group.records:
+            if not record.element:
+                raise MBuildError(
+                    f"Atom {record.name!r} of {group.label} has no element "
+                    "column; fragment_from_pdb needs elements."
+                )
+            particle = Compound(
+                name=record.name,
+                element=record.element.capitalize(),
+                pos=record.pos,
+            )
+            particles.append(particle)
+            serial_to_particle[record.serial] = particle
+        residue.add(particles)
+        fragment.add(residue)
+    for pair in conects:
+        serials = tuple(pair)
+        if len(serials) != 2:
+            continue
+        particles = [serial_to_particle.get(serial) for serial in serials]
+        if None in particles:
+            raise MBuildError(
+                f"CONECT record references unknown atom serial in {serials}."
+            )
+        if not fragment.bond_graph.has_edge(*particles):
+            fragment.add_bond(particles, bond_order=1.0)
+    return fragment
 
 
 def _atom_in_residue(residue, atom_name):
@@ -940,7 +1048,14 @@ class Protein(Polymer):
         residue_order = {}
         for chain in self.chains:
             residue = None
-            for residue in self.residues(chain.chain_id):
+            # Residues are written sorted by number: OpenFF Pablo forms
+            # polymer links only between record-adjacent residues, so
+            # backbone order in the file must follow residue numbers,
+            # not attachment order.
+            for residue in sorted(
+                self.residues(chain.chain_id),
+                key=lambda res: (res.resnum, res.icode),
+            ):
                 residue_order[id(residue)] = len(residue_order)
                 if residue.resnum > 9999:
                     raise MBuildError(

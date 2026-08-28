@@ -6,7 +6,13 @@ from mbuild.biopolymers.ccd import (
     CCDLibrary,
     ResidueTemplate,
 )
-from mbuild.biopolymers.protein import Chain, Protein, Residue
+from mbuild.biopolymers.protein import (
+    Chain,
+    Protein,
+    Residue,
+    fragment_from_pdb,
+    prepare_fragment,
+)
 
 __all__ = [
     "AtomTemplate",
@@ -16,4 +22,6 @@ __all__ = [
     "Protein",
     "Residue",
     "ResidueTemplate",
+    "fragment_from_pdb",
+    "prepare_fragment",
 ]

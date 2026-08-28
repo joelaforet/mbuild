@@ -430,6 +430,107 @@ class TestCCDLibrary(BaseTest):
         ][0]
         assert "CH3" in {neighbor.name for neighbor in nz.bonded_atoms}
 
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_prepare_fragment(self):
+        # Tests that prepare_fragment returns a named Residue whose atom
+        # names are final: the same names appear in the protein after
+        # attach(). This is needed because callers must know the names
+        # to pick the attachment atom and to build an external (Pablo)
+        # residue definition, and attach() would otherwise rename atoms
+        # invisibly inside its clone. The test prepares a fragment,
+        # attaches it, and compares the name lists.
+        from mbuild.biopolymers import prepare_fragment
+
+        fragment = prepare_fragment(mb.load("CC(C)=O", smiles=True), "ACT")
+        names = [particle.name for particle in fragment.particles()]
+        assert fragment.name == "ACT"
+        assert len(set(names)) == len(names)
+        assert "C1" in names
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein.attach(fragment, "C1", resnum=5, atom_name="NZ", chain_id="A")
+        attached = protein.get_residue(307, chain_id="A")
+        assert [p.name for p in attached.particles()] == [
+            name
+            for name in names
+            if name != "H1"  # the leaving hydrogen
+        ]
+
+    def test_fragment_from_pdb(self, tmp_path):
+        # Tests that a fragment PDB with CONECT records loads into
+        # Residue objects with names, numbers, elements, and bonds taken
+        # only from the file. This is needed because glycan fragments
+        # (e.g. GLYCAM output) use residue codes outside the CCD, so the
+        # template-matching Protein loader cannot read them, and
+        # distance-guessed bonds are not acceptable. The test writes a
+        # two-residue ethane-like fragment and checks the structure and
+        # the no-CONECT error.
+        from mbuild.biopolymers import fragment_from_pdb
+
+        pdb = "\n".join(
+            [
+                "HETATM    1  C1  AAA A   1       0.000   0.000   0.000  1.00  0.00           C",
+                "HETATM    2  H1  AAA A   1       0.000   0.000   1.090  1.00  0.00           H",
+                "HETATM    3  C1  BBB A   2       1.540   0.000   0.000  1.00  0.00           C",
+                "CONECT    1    2",
+                "CONECT    1    3",
+                "END",
+            ]
+        )
+        path = tmp_path / "frag.pdb"
+        path.write_text(pdb + "\n")
+        fragment = fragment_from_pdb(str(path))
+        residues = [c for c in fragment.children if c.name in ("AAA", "BBB")]
+        assert [r.name for r in residues] == ["AAA", "BBB"]
+        assert fragment.n_particles == 3 and fragment.n_bonds == 2
+
+        bare = tmp_path / "noconect.pdb"
+        bare.write_text(
+            pdb.replace("CONECT    1    2\n", "").replace("CONECT    1    3\n", "")
+        )
+        with pytest.raises(MBuildError, match="CONECT"):
+            fragment_from_pdb(str(bare))
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_save_pdb_orders_residues_by_number(self, tmp_path):
+        # Tests that save_pdb writes residues sorted by residue number
+        # inside each chain, even when attachments happened in a
+        # different order. This is needed because Pablo forms polymer
+        # links only between record-adjacent residues, so a fragment
+        # chain built middle-first (like an NHS trimer reactive at the
+        # middle monomer) must still export in backbone order. The test
+        # attaches two fragments, swaps their numbers, and checks the
+        # file order.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        fragment = mb.load("CC(C)=O", smiles=True)
+        first = protein.attach(
+            fragment,
+            "C1",
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="AC1",
+        ).residue2
+        second = protein.attach(
+            fragment,
+            "C1",
+            resnum=307,
+            atom_name="C3",
+            chain_id="A",
+            fragment_resname="AC2",
+        ).residue2
+        first.resnum, second.resnum = 308, 307
+
+        out = tmp_path / "ordered.pdb"
+        protein.save_pdb(str(out))
+        hetero_resnames = []
+        for line in out.read_text().splitlines():
+            if line.startswith("HETATM"):
+                name = line[17:20]
+                if name not in hetero_resnames:
+                    hetero_resnames.append(name)
+        assert hetero_resnames == ["AC2", "AC1"]
+
     def test_unknown_residue_raises(self):
         # Tests that an unknown residue code raises a KeyError that names
         # the code and the download option. This is needed because the
