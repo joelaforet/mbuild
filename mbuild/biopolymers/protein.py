@@ -25,6 +25,7 @@ example with pdbfixer or reduce) at the desired pH.
 """
 
 import logging
+from collections import deque
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -1113,13 +1114,13 @@ class Protein(Compound):
         for chain in self.chains:
             if chain_id is not None and chain.chain_id != chain_id:
                 continue
-            stack = list(chain.children)
+            stack = deque(chain.children)
             while stack:
-                child = stack.pop(0)
+                child = stack.popleft()
                 if isinstance(child, Residue):
                     yield child
                 elif child.children:
-                    stack = list(child.children) + stack
+                    stack.extendleft(reversed(child.children))
 
     def get_residue(self, resnum, chain_id=None, icode=""):
         """Return the residue with the given number (and chain/icode)."""
