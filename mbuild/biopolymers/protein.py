@@ -272,8 +272,9 @@ def _matches_agree(matches, group):
             match.expects_crosslink,
         )
 
+    reference_fingerprint = fingerprint(reference)
     for match in matches[1:]:
-        if fingerprint(match) != fingerprint(reference):
+        if fingerprint(match) != reference_fingerprint:
             raise MBuildError(
                 f"Residue {group.label} matches multiple template variants "
                 "that disagree on chemistry. This usually means the "
