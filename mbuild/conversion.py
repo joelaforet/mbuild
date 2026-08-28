@@ -845,11 +845,23 @@ def from_rdkit(rdkit_mol, compound=None, coords_only=False, smiles_seed=0):
 
     mymol = Chem.AddHs(rdkit_mol)
     if AllChem.EmbedMolecule(mymol, randomSeed=smiles_seed) != 0:
-        raise MBuildError(
-            f"RDKit was unable to generate 3D coordinates for {mymol}. Refer "
-            "to the RDKit error messages for possible fixes. You can also "
-            "install openbabel and use the backend='pybel' instead"
+        # Default ETKDG embedding gives up on some large or highly
+        # branched molecules (e.g. glycans); random initial coordinates
+        # followed by the same distance-geometry cleanup usually succeed.
+        params = AllChem.ETKDGv3()
+        params.useRandomCoords = True
+        params.randomSeed = smiles_seed
+        logger.info(
+            "Default RDKit embedding failed; retrying with random "
+            "initial coordinates."
         )
+        if AllChem.EmbedMolecule(mymol, params) != 0:
+            raise MBuildError(
+                f"RDKit was unable to generate 3D coordinates for {mymol}. "
+                "Refer to the RDKit error messages for possible fixes. You "
+                "can also install openbabel and use the backend='pybel' "
+                "instead"
+            )
     # AllChem.EmbedMolecule(mymol, useExpTorsionAnglePrefs=True, useBasicKnowledge=True)
     AllChem.UFFOptimizeMolecule(mymol)
     single_mol = mymol.GetConformer(0)

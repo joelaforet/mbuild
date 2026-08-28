@@ -373,6 +373,29 @@ class TestCompound(BaseTest):
         captured = capsys.readouterr()
         assert captured.out.strip() == ""
 
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_load_smiles_embed_fallback(self):
+        # Tests that SMILES loading falls back to random initial
+        # coordinates when RDKit's default embedding fails. This is
+        # needed because default ETKDG gives up on some large branched
+        # molecules (e.g. glycans), and loading used to raise instead of
+        # retrying. The test loads a three-branch oligosaccharide that
+        # fails default embedding and checks the compound is built.
+        smiles = (
+            "CC(=O)N[C@@H]1[C@H]([C@@H]([C@H](O[CH2]1)CO)"
+            "O[C@H]2[C@@H]([C@H]([C@@H]([C@H](O2)CO)"
+            "O[C@H]3[C@H]([C@H]([C@@H]([C@H](O3)CO[C@@H]4[C@H]([C@H]("
+            "[C@@H]([C@H](O4)CO[C@@H]5[C@H]([C@H]([C@@H]([C@H](O5)CO)O)"
+            "O)O)O)O[C@@H]6[C@H]([C@H]([C@@H]([C@H](O6)CO)O)O)"
+            "O[C@@H]7[C@H]([C@H]([C@@H]([C@H](O7)CO)O)O)O)O)O)"
+            "O[C@@H]8[C@H]([C@H]([C@@H]([C@H](O8)CO)O)O)"
+            "O[C@@H]9[C@H]([C@H]([C@@H]([C@H](O9)CO)O)O)"
+            "O[C@@H]1[C@H]([C@H]([C@@H]([C@H](O1)CO)O)O)O)O)O)NC(=O)C)O"
+        )
+        glycan = mb.load(smiles, smiles=True)
+        assert glycan.n_particles > 116  # heavy atoms plus hydrogens
+        assert glycan.n_bonds > 0
+
     def test_load_protein(self):
         # Testing the loading function with complicated protein,
         # The protein file is taken from RCSB protein data bank
