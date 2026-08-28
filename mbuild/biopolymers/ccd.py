@@ -33,6 +33,7 @@ replaced by it. ``test_biopolymers.py`` contains a parity test that runs
 whenever openff-pablo is importable, to catch drift between the two.
 """
 
+import functools
 import itertools
 import logging
 import re
@@ -174,12 +175,33 @@ class ResidueTemplate:
     linking: str = None
     crosslink: tuple = None
 
-    @property
+    # The lookup maps below are cached: templates are frozen, and the
+    # matcher touches every map once per residue x per variant, so
+    # rebuilding them there dominated loading time. cached_property
+    # writes to the instance __dict__ directly, which a frozen
+    # dataclass permits; dataclasses.replace() makes a new instance,
+    # so a patched copy never sees a stale cache. Callers must not
+    # mutate the returned sets and dicts.
+    @functools.cached_property
     def atom_names(self):
         """Return the set of canonical atom names."""
         return {atom.name for atom in self.atoms}
 
-    @property
+    @functools.cached_property
+    def _atom_by_name(self):
+        """Return a dict mapping each canonical name to its atom."""
+        return {atom.name: atom for atom in self.atoms}
+
+    @functools.cached_property
+    def _neighbors(self):
+        """Return a dict mapping each atom name to its bonded names."""
+        neighbors = {atom.name: set() for atom in self.atoms}
+        for bond in self.bonds:
+            neighbors.setdefault(bond.atom1, set()).add(bond.atom2)
+            neighbors.setdefault(bond.atom2, set()).add(bond.atom1)
+        return neighbors
+
+    @functools.cached_property
     def name_to_atom(self):
         """Return a dict mapping canonical names and synonyms to atoms.
 
@@ -201,13 +223,7 @@ class ResidueTemplate:
 
     def bonded_names(self, name):
         """Return the canonical names bonded to the named atom."""
-        neighbors = set()
-        for bond in self.bonds:
-            if bond.atom1 == name:
-                neighbors.add(bond.atom2)
-            elif bond.atom2 == name:
-                neighbors.add(bond.atom1)
-        return neighbors
+        return self._neighbors.get(name, set())
 
     def leaving_fragment_of(self, name):
         """Return the leaving atoms connected to the named atom.
@@ -217,7 +233,7 @@ class ResidueTemplate:
         atoms that must be absent from a PDB file for a bond formed at the
         named atom, and it matches Pablo's leaving-fragment semantics.
         """
-        atom_by_name = {atom.name: atom for atom in self.atoms}
+        atom_by_name = self._atom_by_name
         fragment = set()
         stack = [
             neighbor
@@ -236,7 +252,7 @@ class ResidueTemplate:
             )
         return fragment
 
-    @property
+    @functools.cached_property
     def prior_fragment(self):
         """Return leaving atoms absent when bonded to a preceding residue.
 
@@ -246,7 +262,7 @@ class ResidueTemplate:
             return set()
         return self.leaving_fragment_of("N")
 
-    @property
+    @functools.cached_property
     def posterior_fragment(self):
         """Return leaving atoms absent when bonded to a following residue.
 
@@ -263,7 +279,7 @@ class ResidueTemplate:
         The formal charge of the atom bonded to the proton is decremented,
         following Pablo's ``ResidueDefinition.deprotonated_at``.
         """
-        atom = {a.name: a for a in self.atoms}.get(name)
+        atom = self._atom_by_name.get(name)
         if atom is None or atom.element != "H":
             raise MBuildError(
                 f"Cannot deprotonate {self.name} at {name}: "
@@ -275,7 +291,7 @@ class ResidueTemplate:
                 f"Cannot deprotonate {self.name} at {name}: "
                 f"bonded to {len(neighbors)} atoms."
             )
-        heavy = neighbors.pop()
+        heavy = next(iter(neighbors))
         return replace(
             self,
             atoms=tuple(
@@ -296,7 +312,7 @@ class ResidueTemplate:
         inherits its ``leaving`` flag, following Pablo's
         ``ResidueDefinition.protonated_at``.
         """
-        heavy = {a.name: a for a in self.atoms}.get(heavy_name)
+        heavy = self._atom_by_name.get(heavy_name)
         if heavy is None:
             raise MBuildError(
                 f"Cannot protonate {self.name} at missing atom {heavy_name}."
