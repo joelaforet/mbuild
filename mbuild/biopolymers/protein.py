@@ -920,9 +920,8 @@ class Protein(Compound):
 
         for hydrogen in site_hydrogens:
             self.remove(hydrogen)
-        frag_root = added if added.parent is None else added.root
         for hydrogen in frag_hydrogens:
-            frag_root.remove(hydrogen)
+            added.remove(hydrogen)
 
         # Renumber fragment residues into the site's chain.
         chain = next(c for c in site_residue.ancestors() if isinstance(c, Chain))
