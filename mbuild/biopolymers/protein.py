@@ -202,7 +202,7 @@ def prepare_fragment(compound, resname):
     return residue
 
 
-def fragment_from_pdb(filename):
+def fragment_from_pdb(filename, bond_orders=None):
     """Load a fragment PDB file into Residue compounds for ``attach()``.
 
     Unlike ``Protein``, this loader matches no templates and stamps no
@@ -212,10 +212,19 @@ def fragment_from_pdb(filename):
     file's CONECT records**, so the file must list them (no bonds are
     guessed from distances). Elements come from the element column.
 
+    CONECT records carry no bond orders, and no order is guessed:
+    every bond defaults to a single bond, and multiple bonds (e.g. the
+    C=O of an N-acetyl sugar) must be declared through ``bond_orders``.
+
     Parameters
     ----------
     filename : str
         Path of the fragment PDB file.
+    bond_orders : dict, optional
+        Bond orders for the bonds that are not single. Keys are pairs
+        of (residue number, atom name) tuples; values are the orders.
+        Example: ``{((2, "C2N"), (2, "O2N")): 2}``. An entry whose
+        atoms match no CONECT bond raises an error.
 
     Returns
     -------
@@ -232,8 +241,13 @@ def fragment_from_pdb(filename):
             "connectivity only from CONECT records; add them or load the "
             "fragment from SMILES instead."
         )
+    orders = {}
+    for key, order in (bond_orders or {}).items():
+        orders[frozenset(key)] = float(order)
+
     fragment = Compound(name="fragment")
     serial_to_particle = {}
+    serial_key = {}
     for group in groups:
         residue = Residue(
             resname=group.resname,
@@ -255,8 +269,10 @@ def fragment_from_pdb(filename):
             )
             particles.append(particle)
             serial_to_particle[record.serial] = particle
+            serial_key[record.serial] = (group.resnum, record.name)
         residue.add(particles)
         fragment.add(residue)
+    used_orders = set()
     for pair in conects:
         serials = tuple(pair)
         if len(serials) != 2:
@@ -267,7 +283,22 @@ def fragment_from_pdb(filename):
                 f"CONECT record references unknown atom serial in {serials}."
             )
         if not fragment.bond_graph.has_edge(*particles):
-            fragment.add_bond(particles, bond_order=1.0)
+            key = frozenset(serial_key[serial] for serial in serials)
+            order = orders.get(key, 1.0)
+            if key in orders:
+                used_orders.add(key)
+            fragment.add_bond(particles, bond_order=order)
+    unused = set(orders) - used_orders
+    if unused:
+        raise MBuildError(
+            "bond_orders entries match no CONECT bond: "
+            f"{sorted(tuple(sorted(key)) for key in unused)}."
+        )
+    if not orders:
+        logger.info(
+            f"All CONECT bonds of {filename} default to single bonds. "
+            "Pass bond_orders={...} to declare multiple bonds."
+        )
     return fragment
 
 

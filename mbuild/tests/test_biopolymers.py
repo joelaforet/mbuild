@@ -479,10 +479,17 @@ class TestCCDLibrary(BaseTest):
         )
         path = tmp_path / "frag.pdb"
         path.write_text(pdb + "\n")
-        fragment = fragment_from_pdb(str(path))
+        fragment = fragment_from_pdb(str(path), bond_orders={((1, "C1"), (2, "C1")): 2})
         residues = [c for c in fragment.children if c.name in ("AAA", "BBB")]
         assert [r.name for r in residues] == ["AAA", "BBB"]
         assert fragment.n_particles == 3 and fragment.n_bonds == 2
+        orders = {
+            bond[2]["bond_order"] for bond in fragment.bonds(return_bond_order=True)
+        }
+        assert orders == {1.0, 2.0}
+
+        with pytest.raises(MBuildError, match="match no CONECT"):
+            fragment_from_pdb(str(path), bond_orders={((1, "C1"), (2, "XX")): 2})
 
         bare = tmp_path / "noconect.pdb"
         bare.write_text(
