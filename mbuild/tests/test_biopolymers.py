@@ -101,7 +101,8 @@ class TestCCDLibrary(BaseTest):
         library = CCDLibrary()
         for resname in (
             "ALA ARG ASN ASP CYS GLN GLU GLY HIS ILE LEU LYS "
-            "MET PHE PRO SER THR TRP TYR VAL".split()
+            "MET PHE PRO SER THR TRP TYR VAL "
+            "ACE NME HOH NA CL".split()
         ):
             ours = library[resname][0]
             theirs = pablo.STD_CCD_CACHE[resname][0]
@@ -120,6 +121,16 @@ class TestCCDLibrary(BaseTest):
             }
             for bond in ours.bonds:
                 assert their_orders[frozenset((bond.atom1, bond.atom2))] == bond.order
+            # Every name our matcher accepts, pablo's must accept too
+            # (in any of its variants); otherwise a file mBuild loads
+            # could fail downstream.
+            their_names = {
+                name
+                for variant in pablo.STD_CCD_CACHE[resname]
+                for name in variant.name_to_atom
+            }
+            unmatched = set(ours.name_to_atom) - their_names
+            assert not unmatched, f"{resname}: {unmatched}"
 
     def test_load_protonated_protein(self):
         # Tests that a pdbfixer-protonated protein PDB loads by template

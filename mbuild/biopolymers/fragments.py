@@ -118,12 +118,11 @@ def fragment_from_sdf(filename, resname):
 
     SDF is the preferred rich fragment format: unlike PDB, it encodes
     explicit bond orders and formal charges, together with coordinates.
-    Prefer it (or SMILES) over ``fragment_from_pdb`` when you control
-    the fragment source. Atom names are assigned as element+index
-    (the SDF format has no atom names); read them from the returned
-    residue. Formal charges from the SDF are kept on the residue's
-    ``atom_formal_charges`` map, so exports carry them; the external
-    (Pablo) residue definition is still best built from the same file.
+    Atom names are assigned as element+index (the SDF format has no
+    atom names); read them from the returned residue. Formal charges
+    from the SDF are kept on the residue's ``atom_formal_charges`` map,
+    so exports carry them; an external residue definition for a
+    downstream loader is still best built from the same file.
 
     Parameters
     ----------
