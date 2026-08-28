@@ -287,13 +287,13 @@ class TestCCDLibrary(BaseTest):
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_modified_protein_export(self, tmp_path):
         # Tests that an attached fragment exports as HETATM records with
-        # exactly one CONECT pair for the new bond, and that
-        # crosslink_specs() returns the with_crosslink kwargs for it.
-        # This is needed because Pablo requires the crosslink CONECT,
-        # fails on unexplained CONECTs (so peptide bonds must not get
-        # them), and takes the spec verbatim. The test attaches a
-        # fragment at LYS 5 NZ, writes the file, and checks records and
-        # spec.
+        # a CONECT for the new bond, and that bond_records() describes
+        # the modification completely and neutrally. This is needed
+        # because strict template loaders require the cross-residue
+        # CONECT, fail on unexplained CONECTs (so peptide bonds must
+        # not get them), and downstream tools format the records into
+        # their own vocabulary. The test attaches a fragment at LYS 5
+        # NZ, writes the file, and checks records.
         protein = Protein(get_fn("6m03_protonated.pdb"))
         fragment = mb.load("CC(C)=O", smiles=True)
         protein.attach(
@@ -344,61 +344,15 @@ class TestCCDLibrary(BaseTest):
             for owner, partner in pairs
         )
 
-        assert protein.crosslink_specs() == [
+        assert protein.bond_records() == [
             {
-                "residues": ["LYS", "XCT"],
-                "linking_atoms": ["NZ", "C1"],
-                "leaving_atoms": [["HZ1"], ["H1"]],
+                "residue_names": ("LYS", "XCT"),
+                "residue_numbers": (5, 307),
+                "atom_names": ("NZ", "C1"),
+                "leaving_atoms": (["HZ1"], ["H1"]),
                 "bond_order": 1,
             }
         ]
-
-    def test_crosslink_specs_symmetric_and_multilink(self, caplog):
-        # Tests that a symmetric bond (disulfide-like) collapses to the
-        # one-element homodimer form of with_crosslink, and that a
-        # residue with two recorded bonds logs the Pablo one-crosslink
-        # limit warning. This is needed because Pablo's homodimer API
-        # takes 1-tuples, and silently emitting specs Pablo cannot load
-        # would break the handoff. The test appends two records over
-        # real cysteine residues and inspects specs and the log.
-        import logging
-
-        from mbuild.biopolymers.protein import InterResidueBond
-
-        protein = Protein(get_fn("6m03_protonated.pdb"))
-        cysteines = [r for r in protein.residues() if r.name == "CYS"][:2]
-        protein.cross_bonds.append(
-            InterResidueBond(
-                residue1=cysteines[0],
-                residue2=cysteines[1],
-                atom1_name="SG",
-                atom2_name="SG",
-                leaving1=("HG",),
-                leaving2=("HG",),
-            )
-        )
-        assert protein.crosslink_specs() == [
-            {
-                "residues": ["CYS"],
-                "linking_atoms": ["SG"],
-                "leaving_atoms": [["HG"]],
-                "bond_order": 1,
-            }
-        ]
-
-        protein.cross_bonds.append(
-            InterResidueBond(
-                residue1=cysteines[0],
-                residue2=cysteines[1],
-                atom1_name="CB",
-                atom2_name="CB",
-                leaving1=("HB2",),
-                leaving2=("HB2",),
-            )
-        )
-        with caplog.at_level(logging.WARNING, logger="mbuild"):
-            protein.crosslink_specs()
-        assert "one crosslink per residue definition" in caplog.text
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_pablo_pipeline_integration(self, tmp_path):
@@ -440,7 +394,16 @@ class TestCCDLibrary(BaseTest):
         out = tmp_path / "acetylated.pdb"
         protein.save_pdb(str(out))
 
-        (spec,) = protein.crosslink_specs()
+        # Downstream glue: format the neutral record into pablo's
+        # with_crosslink vocabulary (this formatting lives outside
+        # mBuild by design).
+        (record,) = protein.bond_records()
+        spec = {
+            "residues": list(record["residue_names"]),
+            "linking_atoms": list(record["atom_names"]),
+            "leaving_atoms": [list(side) for side in record["leaving_atoms"]],
+            "bond_order": record["bond_order"],
+        }
         topology = pablo.topology_from_pdb(
             str(out),
             residue_library=pablo.STD_CCD_CACHE.with_crosslink(**spec),

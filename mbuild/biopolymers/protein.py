@@ -1,8 +1,10 @@
 """Protein recipe: load protonated protein PDB files by template matching.
 
-The loader mirrors the matching model of the OpenFF Pablo PDB reader so
-that a protein loaded (and later modified) with mBuild round-trips
-through Pablo's ``topology_from_pdb``:
+The loader matches residues against chemical templates, in the same
+way modern residue-template PDB readers do, so a protein loaded (and
+later modified) with mBuild round-trips through such tools. (The
+matching model is verified compatible with the OpenFF Pablo reader by
+a parity test that runs wherever openff-pablo is installed.)
 
 - Residues are matched against CCD templates **by atom name**; chemistry
   (bonds, bond orders, formal charges) comes from the matched template,
@@ -127,8 +129,9 @@ class InterResidueBond:
 
     ``leaving1``/``leaving2`` are the atom names that were absent from
     (or removed from) each residue because this bond exists. Together
-    with the residue names, linking atom names, and bond order, they are
-    exactly the information Pablo's ``with_crosslink`` needs.
+    with the residue names, linking atom names, and bond order, they
+    describe the covalent modification completely; see
+    ``Protein.bond_records``.
     """
 
     residue1: Residue
@@ -188,7 +191,7 @@ def prepare_fragment(compound, resname):
     the Residue, so the caller can (1) read the names to pick the
     attachment atom, (2) pass the same object to ``attach()``, and
     (3) reuse the names when building an external residue definition
-    (e.g. an OpenFF Pablo ``ResidueDefinition``) for the fragment.
+    (e.g. a residue template for a downstream loader) for the fragment.
 
     Parameters
     ----------
@@ -382,7 +385,7 @@ def fragment_from_sdf(filename, resname):
     (the SDF format has no atom names); read them from the returned
     residue. Formal charges from the SDF are kept on the residue's
     ``atom_formal_charges`` map, so exports carry them; the external
-    (Pablo) residue definition is still best built from the same file.
+    residue definition is still best built from the same file.
 
     Parameters
     ----------
@@ -1169,8 +1172,8 @@ class Protein(Compound):
         (``force_overlap``), a bond with ``bond_order`` forms between
         the two named atoms, and the new inter-residue bond is recorded
         in ``cross_bonds`` together with the removed (leaving) hydrogen
-        names — exactly the information Pablo's ``with_crosslink``
-        needs to parameterize the product.
+        names — everything a downstream tool needs to describe the
+        modification (see ``bond_records``).
 
         The fragment is cloned; the original is not changed. Fragment
         residues keep their identity: a fragment whose children are
@@ -1180,9 +1183,7 @@ class Protein(Compound):
         To build branched, multiply-linked structures, call ``attach``
         repeatedly — an attached residue is addressable like any other,
         so a later call can target it. Every call records its bond, so
-        residues may carry any number of links inside mBuild (note that
-        Pablo 0.2.2 supports at most one crosslink per residue
-        definition when loading the result).
+        residues may carry any number of links inside mBuild.
 
         Parameters
         ----------
@@ -1613,7 +1614,7 @@ class Protein(Compound):
     def _ensure_unique_atom_names(residue):
         """Rename particles element+index when names repeat in a residue.
 
-        The PDB export and Pablo's matching need atom names that are
+        The PDB export and template matching need atom names that are
         unique within each residue; fragments from SMILES usually name
         every carbon "C".
         """
@@ -1727,7 +1728,7 @@ class Protein(Compound):
     # Export
     # ------------------------------------------------------------------
     def save_pdb(self, filename, overwrite=False):
-        """Write a prepared PDB file that OpenFF Pablo can load.
+        """Write a prepared PDB file for downstream residue-template loaders.
 
         Bonds made through ``add_port_at`` + ``force_overlap`` get
         CONECT records but no ``cross_bonds`` record, so downstream
@@ -1736,14 +1737,15 @@ class Protein(Compound):
         mBuild's generic PDB writer (ParmEd via ``save``) cannot express
         residue numbers, chain identifiers, HETATM records, or a
         selective CONECT policy, so this recipe has its own writer. The
-        conventions follow Pablo's reader: ``ATOM`` for residues loaded
+        conventions follow the RCSB standard and residue-template
+        readers: ``ATOM`` for residues loaded
         from ATOM records, ``HETATM`` for attached fragments and
         heteroatoms, ``TER`` after every chain, ``CRYST1`` when a box is
         set, and ``CONECT`` records **only** for bonds between
         non-adjacent residues (disulfides, attached fragments, branch
         links) — peptide bonds are implied by residue adjacency, and a
-        CONECT that the residue templates cannot explain makes Pablo
-        fail.
+        CONECT that the residue templates cannot explain makes strict
+        loaders fail.
 
         Parameters
         ----------
@@ -1772,7 +1774,7 @@ class Protein(Compound):
         residue_order = {}
         for chain in self.chains:
             residue = None
-            # Residues are written sorted by number: OpenFF Pablo forms
+            # Residues are written sorted by number: template readers form
             # polymer links only between record-adjacent residues, so
             # backbone order in the file must follow residue numbers,
             # not attachment order.
@@ -1837,8 +1839,8 @@ class Protein(Compound):
         list for HETATM atoms and skip distance-based perception for
         them. Bonds between different ATOM residues are listed too
         (disulfides), except peptide bonds, which residue adjacency
-        implies. Pablo accepts these records because its residue
-        definitions predict all of them.
+        implies. Strict template readers accept these records because
+        their residue definitions predict all of them.
         """
         partners = {}
         for particle1, particle2 in self.bonds():
@@ -1869,58 +1871,26 @@ class Protein(Compound):
                     + "".join(f"{other:5d}" for other in chunk)
                 )
 
-    def crosslink_specs(self):
-        """Return Pablo ``with_crosslink`` kwargs for each recorded bond.
+    def bond_records(self):
+        """Return one plain dict per recorded inter-residue bond.
 
-        Each element of the returned list is a dict with the keys
-        ``residues``, ``linking_atoms``, ``leaving_atoms``, and
-        ``bond_order``, matching the signature of
-        ``openff.pablo.ccd.CcdCache.with_crosslink``. A symmetric bond
-        (same residue name, atom, and leaving atoms on both sides, like
-        a disulfide) collapses to the one-element homodimer form.
+        Each dict describes a covalent modification completely: which
+        residues bond through which atoms, which leaving atoms were
+        removed on each side, and the bond order. Downstream tools
+        format these records into their own vocabulary (residue
+        definitions, crosslink declarations, templates).
 
-        A warning is logged when one residue takes part in more than one
-        recorded bond: Pablo 0.2.2 supports at most one crosslink per
-        residue definition, so loading such a structure needs Pablo-side
-        support (or custom residue definitions).
+        Keys per record: ``residue_names``, ``residue_numbers``,
+        ``atom_names``, ``leaving_atoms`` (one list per side), and
+        ``bond_order``.
         """
-        link_counts = {}
-        for bond in self.cross_bonds:
-            for residue in (bond.residue1, bond.residue2):
-                link_counts[id(residue)] = link_counts.get(id(residue), 0) + 1
-                if link_counts[id(residue)] == 2:
-                    logger.warning(
-                        f"Residue {residue.name} {residue.resnum} takes part "
-                        "in more than one inter-residue bond. Pablo 0.2.2 "
-                        "supports one crosslink per residue definition; this "
-                        "structure needs custom definitions to load there."
-                    )
-        specs = []
-        for bond in self.cross_bonds:
-            symmetric = (
-                bond.residue1.name == bond.residue2.name
-                and bond.atom1_name == bond.atom2_name
-                and bond.leaving1 == bond.leaving2
-            )
-            if symmetric:
-                specs.append(
-                    {
-                        "residues": [bond.residue1.name],
-                        "linking_atoms": [bond.atom1_name],
-                        "leaving_atoms": [list(bond.leaving1)],
-                        "bond_order": bond.order,
-                    }
-                )
-            else:
-                specs.append(
-                    {
-                        "residues": [bond.residue1.name, bond.residue2.name],
-                        "linking_atoms": [bond.atom1_name, bond.atom2_name],
-                        "leaving_atoms": [
-                            list(bond.leaving1),
-                            list(bond.leaving2),
-                        ],
-                        "bond_order": bond.order,
-                    }
-                )
-        return specs
+        return [
+            {
+                "residue_names": (bond.residue1.name, bond.residue2.name),
+                "residue_numbers": (bond.residue1.resnum, bond.residue2.resnum),
+                "atom_names": (bond.atom1_name, bond.atom2_name),
+                "leaving_atoms": (list(bond.leaving1), list(bond.leaving2)),
+                "bond_order": bond.order,
+            }
+            for bond in self.cross_bonds
+        ]
