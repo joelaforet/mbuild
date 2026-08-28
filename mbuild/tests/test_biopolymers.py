@@ -374,6 +374,62 @@ class TestCCDLibrary(BaseTest):
             protein.crosslink_specs()
         assert "one crosslink per residue definition" in caplog.text
 
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_pablo_pipeline_integration(self, tmp_path):
+        # Tests the full handoff: attach a CCD-named fragment, write the
+        # prepared PDB, and load it through openff-pablo with the
+        # crosslink spec mBuild recorded. This is needed because the
+        # whole recipe exists so that Pablo can parameterize the
+        # modified protein; the test proves the artifact and spec are
+        # sufficient, with no adapter code in between. It builds an
+        # acetaldehyde fragment with CCD ACE atom names, bonds it to
+        # LYS 5 NZ, and asserts pablo returns one whole molecule with
+        # the expected charge and connectivity. Runs only where a pablo
+        # version with with_crosslink (>= 0.2) is installed.
+        pablo = pytest.importorskip("openff.pablo")
+        if not hasattr(pablo, "STD_CCD_CACHE"):
+            pytest.skip("openff-pablo >= 0.2 is required")
+
+        fragment = mb.load("CC=O", smiles=True)
+        carbons = [p for p in fragment.particles() if p.element.symbol == "C"]
+        oxygen = [p for p in fragment.particles() if p.element.symbol == "O"][0]
+        carbonyl = [c for c in carbons if oxygen in c.direct_bonds()][0]
+        methyl = [c for c in carbons if c is not carbonyl][0]
+        carbonyl.name, methyl.name, oxygen.name = "C", "CH3", "O"
+        aldehyde_h = [h for h in carbonyl.direct_bonds() if h.element.symbol == "H"][0]
+        aldehyde_h.name = "H"
+        methyl_hydrogens = [p for p in methyl.direct_bonds() if p.element.symbol == "H"]
+        for index, hydrogen in enumerate(methyl_hydrogens, 1):
+            hydrogen.name = f"H{index}"
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein.attach(
+            fragment,
+            "CH3",
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="ACE",
+        )
+        out = tmp_path / "acetylated.pdb"
+        protein.save_pdb(str(out))
+
+        (spec,) = protein.crosslink_specs()
+        topology = pablo.topology_from_pdb(
+            str(out),
+            residue_library=pablo.STD_CCD_CACHE.with_crosslink(**spec),
+        )
+        assert topology.n_molecules == 1
+        molecule = topology.molecule(0)
+        assert molecule.n_atoms == protein.n_particles
+        assert molecule.total_charge.m == protein.net_formal_charge
+        nz = [
+            atom
+            for atom in molecule.atoms
+            if atom.name == "NZ" and atom.metadata.get("residue_number") == 5
+        ][0]
+        assert "CH3" in {neighbor.name for neighbor in nz.bonded_atoms}
+
     def test_unknown_residue_raises(self):
         # Tests that an unknown residue code raises a KeyError that names
         # the code and the download option. This is needed because the
