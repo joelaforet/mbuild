@@ -11,6 +11,7 @@ from mbuild.biopolymers.protein import (
     Protein,
     Residue,
     fragment_from_pdb,
+    fragment_from_sdf,
     prepare_fragment,
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     "Residue",
     "ResidueTemplate",
     "fragment_from_pdb",
+    "fragment_from_sdf",
     "prepare_fragment",
 ]

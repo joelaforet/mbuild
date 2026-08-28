@@ -42,6 +42,7 @@ __all__ = [
     "Chain",
     "Residue",
     "fragment_from_pdb",
+    "fragment_from_sdf",
     "prepare_fragment",
 ]
 
@@ -300,6 +301,84 @@ def fragment_from_pdb(filename, bond_orders=None):
             "Pass bond_orders={...} to declare multiple bonds."
         )
     return fragment
+
+
+def fragment_from_sdf(filename, resname):
+    """Load one molecule from an SDF file as a named Residue fragment.
+
+    SDF is the preferred rich fragment format: unlike PDB, it encodes
+    explicit bond orders and formal charges, together with coordinates.
+    Prefer it (or SMILES) over ``fragment_from_pdb`` when you control
+    the fragment source. Atom names are assigned as element+index
+    (the SDF format has no atom names); read them from the returned
+    residue. Formal charges stay in the SDF file — build the external
+    (Pablo) residue definition from the same file so the charges reach
+    parameterization.
+
+    Parameters
+    ----------
+    filename : str
+        Path of an SDF file holding exactly one molecule with explicit
+        hydrogens and coordinates.
+    resname : str
+        The residue name (up to 3 characters).
+
+    Returns
+    -------
+    Residue
+        A detached residue ready to pass to ``Protein.attach``.
+    """
+    from mbuild.utils.io import import_
+
+    import_("rdkit")
+    from rdkit import Chem
+
+    supplier = Chem.SDMolSupplier(str(filename), removeHs=False, sanitize=True)
+    molecules = [molecule for molecule in supplier if molecule is not None]
+    if len(molecules) != 1:
+        raise MBuildError(
+            f"{filename} holds {len(molecules)} readable molecules; "
+            "fragment_from_sdf takes exactly one."
+        )
+    molecule = molecules[0]
+    if molecule.GetNumConformers() == 0:
+        raise MBuildError(f"{filename} has no coordinates.")
+    if any(atom.GetNumImplicitHs() for atom in molecule.GetAtoms()):
+        raise MBuildError(
+            f"{filename} has implicit hydrogens; write the SDF with all "
+            "hydrogens explicit."
+        )
+    orders = {
+        Chem.BondType.SINGLE: 1.0,
+        Chem.BondType.DOUBLE: 2.0,
+        Chem.BondType.TRIPLE: 3.0,
+        Chem.BondType.AROMATIC: 1.5,
+    }
+    conformer = molecule.GetConformer()
+    residue = Residue(resname=(resname or "LIG")[:3].upper(), hetatm=True)
+    particles = []
+    for atom in molecule.GetAtoms():
+        position = conformer.GetAtomPosition(atom.GetIdx())
+        particles.append(
+            Compound(
+                name=atom.GetSymbol(),
+                element=atom.GetSymbol(),
+                pos=np.array([position.x, position.y, position.z]) / 10.0,
+            )
+        )
+    residue.add(particles)
+    for bond in molecule.GetBonds():
+        order = orders.get(bond.GetBondType())
+        if order is None:
+            raise MBuildError(
+                f"Unsupported SDF bond type {bond.GetBondType()} in {filename}."
+            )
+        residue.add_bond(
+            (particles[bond.GetBeginAtomIdx()], particles[bond.GetEndAtomIdx()]),
+            bond_order=order,
+        )
+    Protein._ensure_unique_atom_names(residue)
+    return residue
 
 
 def _atom_in_residue(residue, atom_name):

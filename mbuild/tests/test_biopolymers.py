@@ -499,6 +499,34 @@ class TestCCDLibrary(BaseTest):
             fragment_from_pdb(str(bare))
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_fragment_from_sdf(self, tmp_path):
+        # Tests that an SDF fragment loads with explicit bond orders,
+        # elements, and coordinates, as a named Residue. This is needed
+        # because SDF is the rich fragment format that, unlike PDB,
+        # carries bond orders and formal charges, and workflows (e.g.
+        # PolyzyMD) hand fragments off as charged SDF files. The test
+        # writes an acetone SDF via RDKit and checks the loaded residue.
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+
+        from mbuild.biopolymers import fragment_from_sdf
+
+        rdmol = Chem.AddHs(Chem.MolFromSmiles("CC(C)=O"))
+        AllChem.EmbedMolecule(rdmol, randomSeed=3)
+        path = tmp_path / "acetone.sdf"
+        Chem.SDWriter(str(path)).write(rdmol)
+
+        residue = fragment_from_sdf(str(path), "ACT")
+        assert residue.name == "ACT" and residue.hetatm
+        assert residue.n_particles == 10
+        orders = {
+            bond[2]["bond_order"] for bond in residue.bonds(return_bond_order=True)
+        }
+        assert orders == {1.0, 2.0}
+        names = [p.name for p in residue.particles()]
+        assert len(set(names)) == len(names) and "O1" in names
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_save_pdb_orders_residues_by_number(self, tmp_path):
         # Tests that save_pdb writes residues sorted by residue number
         # inside each chain, even when attachments happened in a
