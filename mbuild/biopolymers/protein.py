@@ -395,7 +395,6 @@ class Protein(Compound):
         chains = {}
         chain_order = []
         serial_to_particle = {}
-        serial_info = {}
         residues = []
         for group, match in zip(groups, matches):
             residue = Residue(
@@ -423,7 +422,6 @@ class Protein(Compound):
                 )
                 particles[atom.name] = particle
                 serial_to_particle[record.serial] = particle
-                serial_info[record.serial] = (residue, match, atom)
             residue.add([particles[name] for name in particles])
             for bond in match.variant.bonds:
                 if bond.atom1 in particles and bond.atom2 in particles:
@@ -443,7 +441,7 @@ class Protein(Compound):
             self.add(chain)
 
         self._bond_backbone(groups, matches, residues)
-        self._bond_crosslinks(groups, matches, residues, conects, serial_info)
+        self._bond_crosslinks(groups, matches, residues, conects)
         self._check_conects(conects, serial_to_particle)
 
     def _bond_backbone(self, groups, matches, residues):
@@ -476,7 +474,7 @@ class Protein(Compound):
                 )
             self.add_bond((carbon, nitrogen), bond_order=1.0)
 
-    def _bond_crosslinks(self, groups, matches, residues, conects, serial_info):
+    def _bond_crosslinks(self, groups, matches, residues, conects):
         expecting = {}
         for group, match, residue in zip(groups, matches, residues):
             if match.expects_crosslink:
