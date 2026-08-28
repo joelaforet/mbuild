@@ -894,3 +894,175 @@ class Protein(Polymer):
     def net_formal_charge(self):
         """Return the summed formal charge of all residues."""
         return sum(residue.formal_charge for residue in self.residues())
+
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
+    def save_pdb(self, filename, overwrite=False):
+        """Write a prepared PDB file that OpenFF Pablo can load.
+
+        mBuild's generic PDB writer (ParmEd via ``save``) cannot express
+        residue numbers, chain identifiers, HETATM records, or a
+        selective CONECT policy, so this recipe has its own writer. The
+        conventions follow Pablo's reader: ``ATOM`` for residues loaded
+        from ATOM records, ``HETATM`` for attached fragments and
+        heteroatoms, ``TER`` after every chain, ``CRYST1`` when a box is
+        set, and ``CONECT`` records **only** for bonds between
+        non-adjacent residues (disulfides, attached fragments, branch
+        links) — peptide bonds are implied by residue adjacency, and a
+        CONECT that the residue templates cannot explain makes Pablo
+        fail.
+
+        Parameters
+        ----------
+        filename : str
+            Path of the PDB file to write.
+        overwrite : bool, optional, default=False
+            Overwrite the file if it exists.
+        """
+        import os
+
+        if os.path.exists(filename) and not overwrite:
+            raise IOError(f"{filename} exists; not overwriting")
+
+        lines = []
+        if self.box is not None:
+            a, b, c = (length * 10.0 for length in self.box.lengths)
+            alpha, beta, gamma = self.box.angles
+            lines.append(
+                f"CRYST1{a:9.3f}{b:9.3f}{c:9.3f}"
+                f"{alpha:7.2f}{beta:7.2f}{gamma:7.2f} P 1           1"
+            )
+
+        serial = 0
+        particle_serial = {}
+        particle_residue = {}
+        residue_order = {}
+        for chain in self.chains:
+            residue = None
+            for residue in self.residues(chain.chain_id):
+                residue_order[id(residue)] = len(residue_order)
+                if residue.resnum > 9999:
+                    raise MBuildError(
+                        "PDB residue numbers larger than 9999 are not supported."
+                    )
+                for particle in residue.particles():
+                    serial += 1
+                    if serial > 99999:
+                        raise MBuildError(
+                            "PDB atom serials larger than 99999 are not supported."
+                        )
+                    particle_serial[particle] = serial
+                    particle_residue[particle] = residue
+                    lines.append(
+                        self._pdb_atom_line(serial, particle, residue, chain.chain_id)
+                    )
+            if residue is not None:
+                serial += 1
+                lines.append(
+                    f"TER   {serial:5d}      {residue.name:<3s} "
+                    f"{chain.chain_id or ' ':1s}{residue.resnum:4d}"
+                    f"{residue.icode or ' ':1s}"
+                )
+
+        for line in self._conect_lines(
+            particle_serial, particle_residue, residue_order
+        ):
+            lines.append(line)
+        lines.append("END")
+
+        with open(filename, "w") as handle:
+            handle.write("\n".join(lines) + "\n")
+
+    @staticmethod
+    def _pdb_atom_line(serial, particle, residue, chain_id):
+        record = "HETATM" if residue.hetatm else "ATOM  "
+        name = particle.name
+        # PDB alignment: names shorter than 4 characters are right-shifted
+        # by one column (element starts in column 14).
+        name_field = name.center(4) if len(name) >= 4 else f" {name:<3s}"
+        x, y, z = particle.pos * 10.0
+        element = particle.element.symbol.upper() if particle.element else ""
+        return (
+            f"{record}{serial:5d} {name_field[:4]} {residue.name:<3.3s} "
+            f"{chain_id or ' ':1.1s}{residue.resnum:4d}{residue.icode or ' ':1.1s}"
+            f"   {x:8.3f}{y:8.3f}{z:8.3f}{1.0:6.2f}{0.0:6.2f}"
+            f"          {element:>2.2s}"
+        )
+
+    def _conect_lines(self, particle_serial, particle_residue, residue_order):
+        """Yield CONECT lines for bonds residue adjacency does not imply."""
+        pairs = []
+        for particle1, particle2 in self.bonds():
+            residue1 = particle_residue.get(particle1)
+            residue2 = particle_residue.get(particle2)
+            if residue1 is None or residue2 is None or residue1 is residue2:
+                continue
+            adjacent = (
+                abs(residue_order[id(residue1)] - residue_order[id(residue2)]) == 1
+            )
+            backbone = {particle1.name, particle2.name} == {"C", "N"}
+            if adjacent and backbone:
+                continue  # implied peptide bond
+            pairs.append(
+                tuple(sorted((particle_serial[particle1], particle_serial[particle2])))
+            )
+        for serial1, serial2 in sorted(set(pairs)):
+            yield f"CONECT{serial1:5d}{serial2:5d}"
+            yield f"CONECT{serial2:5d}{serial1:5d}"
+
+    def crosslink_specs(self):
+        """Return Pablo ``with_crosslink`` kwargs for each recorded bond.
+
+        Each element of the returned list is a dict with the keys
+        ``residues``, ``linking_atoms``, ``leaving_atoms``, and
+        ``bond_order``, matching the signature of
+        ``openff.pablo.ccd.CcdCache.with_crosslink``. A symmetric bond
+        (same residue name, atom, and leaving atoms on both sides, like
+        a disulfide) collapses to the one-element homodimer form.
+
+        A warning is logged when one residue takes part in more than one
+        recorded bond: Pablo 0.2.2 supports at most one crosslink per
+        residue definition, so loading such a structure needs Pablo-side
+        support (or custom residue definitions).
+        """
+        link_counts = {}
+        for bond in self.cross_bonds:
+            for residue in (bond.residue1, bond.residue2):
+                link_counts[id(residue)] = link_counts.get(id(residue), 0) + 1
+                if link_counts[id(residue)] == 2:
+                    logger.warning(
+                        f"Residue {residue.name} {residue.resnum} takes part "
+                        "in more than one inter-residue bond. Pablo 0.2.2 "
+                        "supports one crosslink per residue definition; this "
+                        "structure needs custom definitions to load there."
+                    )
+        specs = []
+        for bond in self.cross_bonds:
+            symmetric = (
+                bond.residue1.name == bond.residue2.name
+                and bond.atom1_name == bond.atom2_name
+                and bond.leaving1 == bond.leaving2
+            )
+            if symmetric:
+                specs.append(
+                    {
+                        "residues": [bond.residue1.name],
+                        "linking_atoms": [bond.atom1_name],
+                        "leaving_atoms": [list(bond.leaving1)],
+                        "bond_order": bond.order,
+                    }
+                )
+            else:
+                specs.append(
+                    {
+                        "residues": [bond.residue1.name, bond.residue2.name],
+                        "linking_atoms": [bond.atom1_name, bond.atom2_name],
+                        "leaving_atoms": [
+                            list(bond.leaving1),
+                            list(bond.leaving2),
+                        ],
+                        "bond_order": bond.order,
+                    }
+                )
+        return specs

@@ -255,6 +255,125 @@ class TestCCDLibrary(BaseTest):
         second = protein.get_atom(308, "C1", chain_id="A")
         assert protein.bond_graph.has_edge(first, second)
 
+    def test_save_pdb_roundtrip(self, tmp_path):
+        # Tests that save_pdb writes a PDB that the strict loader reads
+        # back with identical structure and chemistry. This is needed
+        # because the written file is the handoff artifact to OpenFF
+        # Pablo, whose reader shares this loader's matching rules. The
+        # test writes and reloads the protein, compares counts and net
+        # charge, and checks the fixed-column layout of one atom line.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        out = tmp_path / "roundtrip.pdb"
+        protein.save_pdb(str(out))
+        reloaded = Protein(str(out))
+        assert reloaded.n_particles == protein.n_particles
+        assert reloaded.net_formal_charge == protein.net_formal_charge
+        assert len(list(reloaded.residues())) == 306
+
+        lines = out.read_text().splitlines()
+        first = next(line for line in lines if line.startswith("ATOM"))
+        assert first[6:11] == "    1"
+        assert first[12:16].strip() == "N"
+        assert first[17:20] == "SER"
+        assert first[21] == "A"
+        assert first[22:26] == "   1"
+        assert first[76:78].strip() == "N"
+        assert sum(line.startswith("TER") for line in lines) == 1
+
+        with pytest.raises(IOError, match="not overwriting"):
+            protein.save_pdb(str(out))
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_modified_protein_export(self, tmp_path):
+        # Tests that an attached fragment exports as HETATM records with
+        # exactly one CONECT pair for the new bond, and that
+        # crosslink_specs() returns the with_crosslink kwargs for it.
+        # This is needed because Pablo requires the crosslink CONECT,
+        # fails on unexplained CONECTs (so peptide bonds must not get
+        # them), and takes the spec verbatim. The test attaches a
+        # fragment at LYS 5 NZ, writes the file, and checks records and
+        # spec.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        fragment = mb.load("CC(C)=O", smiles=True)
+        protein.attach(
+            fragment,
+            "C1",
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="XCT",
+        )
+        out = tmp_path / "modified.pdb"
+        protein.save_pdb(str(out))
+
+        lines = out.read_text().splitlines()
+        conects = [line for line in lines if line.startswith("CONECT")]
+        assert len(conects) == 2  # one bond, written from both atoms
+        serials = {int(part) for line in conects for part in line[6:].split()}
+        named = {
+            line[12:16].strip()
+            for line in lines
+            if line.startswith(("ATOM", "HETATM")) and int(line[6:11]) in serials
+        }
+        assert named == {"NZ", "C1"}
+        assert sum(line.startswith("HETATM") for line in lines) == 9
+
+        assert protein.crosslink_specs() == [
+            {
+                "residues": ["LYS", "XCT"],
+                "linking_atoms": ["NZ", "C1"],
+                "leaving_atoms": [["HZ1"], ["H1"]],
+                "bond_order": 1,
+            }
+        ]
+
+    def test_crosslink_specs_symmetric_and_multilink(self, caplog):
+        # Tests that a symmetric bond (disulfide-like) collapses to the
+        # one-element homodimer form of with_crosslink, and that a
+        # residue with two recorded bonds logs the Pablo one-crosslink
+        # limit warning. This is needed because Pablo's homodimer API
+        # takes 1-tuples, and silently emitting specs Pablo cannot load
+        # would break the handoff. The test appends two records over
+        # real cysteine residues and inspects specs and the log.
+        import logging
+
+        from mbuild.biopolymers.protein import InterResidueBond
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        cysteines = [r for r in protein.residues() if r.name == "CYS"][:2]
+        protein.cross_bonds.append(
+            InterResidueBond(
+                residue1=cysteines[0],
+                residue2=cysteines[1],
+                atom1_name="SG",
+                atom2_name="SG",
+                leaving1=("HG",),
+                leaving2=("HG",),
+            )
+        )
+        assert protein.crosslink_specs() == [
+            {
+                "residues": ["CYS"],
+                "linking_atoms": ["SG"],
+                "leaving_atoms": [["HG"]],
+                "bond_order": 1,
+            }
+        ]
+
+        protein.cross_bonds.append(
+            InterResidueBond(
+                residue1=cysteines[0],
+                residue2=cysteines[1],
+                atom1_name="CB",
+                atom2_name="CB",
+                leaving1=("HB2",),
+                leaving2=("HB2",),
+            )
+        )
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein.crosslink_specs()
+        assert "one crosslink per residue definition" in caplog.text
+
     def test_unknown_residue_raises(self):
         # Tests that an unknown residue code raises a KeyError that names
         # the code and the download option. This is needed because the
