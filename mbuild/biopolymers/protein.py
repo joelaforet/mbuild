@@ -872,17 +872,15 @@ class Protein(Compound):
         )
 
         added = clone(fragment)
-        if not isinstance(added, Residue):
-            fragment_residues = [
+        if isinstance(added, Residue):
+            frag_residues = [added]
+        else:
+            frag_residues = [
                 child for child in added.successors() if isinstance(child, Residue)
             ]
-            if not fragment_residues:
+            if not frag_residues:
                 added = self._wrap_in_residue(added, fragment_resname)
-        frag_residues = (
-            [added]
-            if isinstance(added, Residue)
-            else [c for c in added.successors() if isinstance(c, Residue)]
-        )
+                frag_residues = [added]
         for residue in frag_residues:
             self._ensure_unique_atom_names(residue)
 
