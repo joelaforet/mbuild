@@ -599,7 +599,7 @@ class Protein(Compound):
 
         topology = super().to_gmso(**kwargs)
         particle_residue = self._particle_residues()
-        particles = [p for p in self.particles() if not p.port_particle]
+        particles = list(self.particles())
         sites = list(topology.sites)
         if len(sites) != len(particles) or any(
             site.name != particle.name for site, particle in zip(sites, particles)
@@ -631,7 +631,7 @@ class Protein(Compound):
         editable = Chem.RWMol()
         particle_index = {}
         particle_residue = self._particle_residues()
-        particles = [p for p in self.particles() if not p.port_particle]
+        particles = list(self.particles())
         orphans = [p for p in particles if p not in particle_residue]
         if orphans:
             raise MBuildError(
@@ -1014,11 +1014,9 @@ class Protein(Compound):
         """
         from scipy.spatial import cKDTree
 
-        added_particles = [p for p in added.particles() if not p.port_particle]
+        added_particles = list(added.particles())
         added_set = set(added_particles) | {site_atom}
-        others = [
-            p for p in self.particles() if p not in added_set and not p.port_particle
-        ]
+        others = [p for p in self.particles() if p not in added_set]
         if not others or not added_particles:
             return
         tree = cKDTree([p.pos for p in others])
