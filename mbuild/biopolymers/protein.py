@@ -786,8 +786,7 @@ class Protein(Compound):
         orientation = sum(h.pos - atom.pos for h in hydrogens)
         if np.linalg.norm(orientation) < 1e-8:
             orientation = hydrogens[0].pos - atom.pos
-        for hydrogen in hydrogens:
-            self.remove(hydrogen)
+        self.remove(hydrogens)
         port = Port(anchor=atom, orientation=orientation, separation=separation / 2)
         residue.add(port, label="port[$]")
         return port
@@ -918,10 +917,8 @@ class Protein(Compound):
         if np.linalg.norm(frag_orientation) < 1e-8:
             frag_orientation = frag_hydrogens[0].pos - frag_atom.pos
 
-        for hydrogen in site_hydrogens:
-            self.remove(hydrogen)
-        for hydrogen in frag_hydrogens:
-            added.remove(hydrogen)
+        self.remove(site_hydrogens)
+        added.remove(frag_hydrogens)
 
         # Renumber fragment residues into the site's chain.
         chain = next(c for c in site_residue.ancestors() if isinstance(c, Chain))
