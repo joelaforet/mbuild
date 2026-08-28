@@ -721,7 +721,7 @@ class Protein(Compound):
         UFF-style parameters (``OpenMMSimulation`` with
         ``forcefield=None``). The force field does not matter here: the
         goal is only to pull a rigidly placed fragment out of steric
-        overlap so a downstream simulation does not blow up. Every atom
+        overlap so a downstream simulation stays stable. Every atom
         outside the given residues gets zero mass, which OpenMM treats
         as immobile, so the protein coordinates do not change.
 
@@ -775,7 +775,7 @@ class Protein(Compound):
         the named atom loses ``bond_order`` hydrogens, and a ``Port``
         pointing along the removed hydrogens is added to the residue.
         Use it with ``force_overlap`` for placements ``attach()`` does
-        not cover. Note that bonds formed this way are not recorded in
+        not cover. Bonds formed this way are not recorded in
         ``cross_bonds``.
         """
         residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
@@ -1109,12 +1109,13 @@ class Protein(Compound):
     def residues(self, chain_id=None):
         """Yield Residue compounds, optionally restricted to one chain.
 
-        The traversal is recursive because attached fragments may sit in
-        a grouping compound under a chain. It is a hand-rolled walk, not
-        ``chain.successors()``, on purpose: this walk stops at each
-        Residue, while successors() would descend into every particle —
-        thousands of nodes instead of hundreds of residues, in a method
-        that backs get_residue, net_formal_charge, and the exports.
+        The traversal is recursive because attached fragments can be
+        inside a grouping compound under a chain. The loop below stops
+        at each Residue and does not enter it. ``chain.successors()``
+        is not used here, because it visits every particle: thousands
+        of nodes instead of hundreds of residues. This method backs
+        ``get_residue``, ``net_formal_charge``, and the exports, so it
+        must stay fast.
         """
         for chain in self.chains:
             if chain_id is not None and chain.chain_id != chain_id:

@@ -666,7 +666,7 @@ class TestCCDLibrary(BaseTest):
         # Tests that attaching a bulky fragment into a crowded site logs
         # a clash warning. This is needed because port alignment is
         # rigid and a fragment placed inside the protein would otherwise
-        # fail silently until MD blows up. The test attaches
+        # fail silently until the MD run fails. The test attaches
         # triphenylmethane at a buried lysine and checks the log.
         import logging
 
