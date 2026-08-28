@@ -445,48 +445,6 @@ class TestCCDLibrary(BaseTest):
             if name != "H1"  # the leaving hydrogen
         ]
 
-    def test_fragment_from_pdb(self, tmp_path):
-        # Tests that a fragment PDB with CONECT records loads into
-        # Residue objects with names, numbers, elements, and bonds taken
-        # only from the file. This is needed because glycan fragments
-        # (e.g. GLYCAM output) use residue codes outside the CCD, so the
-        # template-matching Protein loader cannot read them, and
-        # distance-guessed bonds are not acceptable. The test writes a
-        # two-residue ethane-like fragment and checks the structure and
-        # the no-CONECT error.
-        from mbuild.biopolymers import fragment_from_pdb
-
-        pdb = "\n".join(
-            [
-                "HETATM    1  C1  AAA A   1       0.000   0.000   0.000  1.00  0.00           C",
-                "HETATM    2  H1  AAA A   1       0.000   0.000   1.090  1.00  0.00           H",
-                "HETATM    3  C1  BBB A   2       1.540   0.000   0.000  1.00  0.00           C",
-                "CONECT    1    2",
-                "CONECT    1    3",
-                "END",
-            ]
-        )
-        path = tmp_path / "frag.pdb"
-        path.write_text(pdb + "\n")
-        fragment = fragment_from_pdb(str(path), bond_orders={((1, "C1"), (2, "C1")): 2})
-        residues = [c for c in fragment.children if c.name in ("AAA", "BBB")]
-        assert [r.name for r in residues] == ["AAA", "BBB"]
-        assert fragment.n_particles == 3 and fragment.n_bonds == 2
-        orders = {
-            bond[2]["bond_order"] for bond in fragment.bonds(return_bond_order=True)
-        }
-        assert orders == {1.0, 2.0}
-
-        with pytest.raises(MBuildError, match="match no CONECT"):
-            fragment_from_pdb(str(path), bond_orders={((1, "C1"), (2, "XX")): 2})
-
-        bare = tmp_path / "noconect.pdb"
-        bare.write_text(
-            pdb.replace("CONECT    1    2\n", "").replace("CONECT    1    3\n", "")
-        )
-        with pytest.raises(MBuildError, match="CONECT"):
-            fragment_from_pdb(str(bare))
-
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_fragment_from_sdf(self, tmp_path):
         # Tests that an SDF fragment loads with explicit bond orders,
@@ -737,56 +695,8 @@ class TestCCDLibrary(BaseTest):
         with pytest.raises(MBuildError, match="distinct labels"):
             prepare_fragment("*CC*", "BAD")
         two_sites = prepare_fragment("[*:1]CC[*:2]", "TWO")
-        with pytest.raises(MBuildError, match="attach_multi"):
+        with pytest.raises(MBuildError, match="attachment points"):
             protein.attach(two_sites, resnum=90, atom_name="NZ", chain_id="A")
-
-    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_attach_multi_double_tether(self):
-        # Tests that one fragment tethers to two protein sites with
-        # realistic geometry and an unmoved protein: the first site by
-        # rigid alignment, the second by rotate-shear placement plus a
-        # protein-fixed relaxation. This is needed for polymers tethered
-        # at two residues, where one rigid placement cannot satisfy both
-        # sites, and the user expects coordinates that just work. The
-        # test tethers a PEG chain between two lysines and checks both
-        # bond lengths, the records, and protein immobility.
-        import numpy as np
-
-        protein = Protein(get_fn("6m03_protonated.pdb"))
-        before = {
-            id(p): p.pos.copy()
-            for r in protein.residues()
-            if not r.hetatm
-            for p in r.particles()
-        }
-        records = protein.attach_multi(
-            "[*:1]CCOCCOCCOCCOCCOCCOCCOCC[*:2]",
-            sites={
-                "1": dict(resnum=5, atom_name="NZ", chain_id="A"),
-                "2": dict(resnum=12, atom_name="NZ", chain_id="A"),
-            },
-            fragment_resname="PEG",
-        )
-        assert len(records) == 2 and len(protein.cross_bonds) == 2
-        from mbuild.biopolymers.protein import _atom_in_residue
-
-        for record in records:
-            atom1 = _atom_in_residue(record.residue1, record.atom1_name)
-            atom2 = _atom_in_residue(record.residue2, record.atom2_name)
-            assert np.linalg.norm(atom1.pos - atom2.pos) < 0.25
-        moved = max(
-            float(np.linalg.norm(p.pos - before[id(p)]))
-            for r in protein.residues()
-            if not r.hetatm
-            for p in r.particles()
-            if id(p) in before
-        )
-        assert moved == 0.0
-
-        with pytest.raises(MBuildError, match="no attachment points labeled"):
-            protein.attach_multi(
-                "[*:1]CC", sites={"9": dict(resnum=90, atom_name="NZ")}
-            )
 
     def test_unknown_residue_raises(self):
         # Tests that an unknown residue code raises a KeyError that names

@@ -42,7 +42,6 @@ __all__ = [
     "Protein",
     "Chain",
     "Residue",
-    "fragment_from_pdb",
     "fragment_from_sdf",
     "prepare_fragment",
 ]
@@ -103,8 +102,7 @@ class Residue(Compound):
         #: Map of site label -> atom name for the fragment's covalent
         #: bond sites, set by attachment points in the SMILES (* or
         #: [*:n]) or by particle tags. attach() uses a lone entry when
-        #: no fragment atom name is given; attach_multi() maps each
-        #: label to a protein site.
+        #: no fragment atom name is given.
         self.link_atoms = {}
 
     def _clone(self, clone_of=None, root_container=None):
@@ -275,106 +273,6 @@ def prepare_fragment(compound, resname):
     return residue
 
 
-def fragment_from_pdb(filename, bond_orders=None):
-    """Load a fragment PDB file into Residue compounds for ``attach()``.
-
-    Unlike ``Protein``, this loader matches no templates and stamps no
-    chemistry: it is for fragment files (e.g. GLYCAM glycans) whose
-    residue codes are not in the CCD. Atom names, residue names, and
-    residue numbers come from the records; **bonds come only from the
-    file's CONECT records**, so the file must list them (no bonds are
-    guessed from distances). Elements come from the element column.
-
-    CONECT records carry no bond orders, and no order is guessed:
-    every bond defaults to a single bond, and multiple bonds (e.g. the
-    C=O of an N-acetyl sugar) must be declared through ``bond_orders``.
-
-    Parameters
-    ----------
-    filename : str
-        Path of the fragment PDB file.
-    bond_orders : dict, optional
-        Bond orders for the bonds that are not single. Keys are pairs
-        of (residue number, atom name) tuples; values are the orders.
-        Example: ``{((2, "C2N"), (2, "O2N")): 2}``. An entry whose
-        atoms match no CONECT bond raises an error.
-
-    Returns
-    -------
-    mbuild.Compound
-        A compound whose children are ``Residue`` objects (hetatm=True),
-        ready to pass to ``Protein.attach``.
-    """
-    with open(filename) as handle:
-        text = handle.read()
-    groups, conects, _ = _parse_pdb(text)
-    if not conects:
-        raise MBuildError(
-            f"{filename} has no CONECT records. fragment_from_pdb takes "
-            "connectivity only from CONECT records; add them or load the "
-            "fragment from SMILES instead."
-        )
-    orders = {}
-    for key, order in (bond_orders or {}).items():
-        orders[frozenset(key)] = float(order)
-
-    fragment = Compound(name="fragment")
-    serial_to_particle = {}
-    serial_key = {}
-    for group in groups:
-        residue = Residue(
-            resname=group.resname,
-            resnum=group.resnum,
-            icode=group.icode,
-            hetatm=True,
-        )
-        particles = []
-        for record in group.records:
-            if not record.element:
-                raise MBuildError(
-                    f"Atom {record.name!r} of {group.label} has no element "
-                    "column; fragment_from_pdb needs elements."
-                )
-            particle = Compound(
-                name=record.name,
-                element=record.element.capitalize(),
-                pos=record.pos,
-            )
-            particles.append(particle)
-            serial_to_particle[record.serial] = particle
-            serial_key[record.serial] = (group.resnum, record.name)
-        residue.add(particles)
-        fragment.add(residue)
-    used_orders = set()
-    for pair in conects:
-        serials = tuple(pair)
-        if len(serials) != 2:
-            continue
-        particles = [serial_to_particle.get(serial) for serial in serials]
-        if None in particles:
-            raise MBuildError(
-                f"CONECT record references unknown atom serial in {serials}."
-            )
-        if not fragment.bond_graph.has_edge(*particles):
-            key = frozenset(serial_key[serial] for serial in serials)
-            order = orders.get(key, 1.0)
-            if key in orders:
-                used_orders.add(key)
-            fragment.add_bond(particles, bond_order=order)
-    unused = set(orders) - used_orders
-    if unused:
-        raise MBuildError(
-            "bond_orders entries match no CONECT bond: "
-            f"{sorted(tuple(sorted(key)) for key in unused)}."
-        )
-    if not orders:
-        logger.info(
-            f"All CONECT bonds of {filename} default to single bonds. "
-            "Pass bond_orders={...} to declare multiple bonds."
-        )
-    return fragment
-
-
 def fragment_from_sdf(filename, resname):
     """Load one molecule from an SDF file as a named Residue fragment.
 
@@ -385,7 +283,7 @@ def fragment_from_sdf(filename, resname):
     (the SDF format has no atom names); read them from the returned
     residue. Formal charges from the SDF are kept on the residue's
     ``atom_formal_charges`` map, so exports carry them; the external
-    residue definition is still best built from the same file.
+    (Pablo) residue definition is still best built from the same file.
 
     Parameters
     ----------
@@ -1251,8 +1149,8 @@ class Protein(Compound):
                 raise MBuildError(
                     "attach() bonds one site, but the fragment carries "
                     f"{len(linked)} attachment points. Pass "
-                    "fragment_atom_name, mark one site (* in the SMILES), "
-                    "or use attach_multi() for several labeled sites."
+                    "fragment_atom_name or mark exactly one site with * "
+                    "in the SMILES."
                 )
             label, link_residue = linked[0]
             fragment_atom_name = link_residue.link_atoms[label]
@@ -1331,214 +1229,6 @@ class Protein(Compound):
         )
         self.cross_bonds.append(record)
         return record
-
-    def attach_multi(
-        self, fragment, sites, fragment_resname=None, separation=0.15, relax=True
-    ):
-        """Tether one fragment to several protein sites at once.
-
-        ``sites`` maps each attachment-point label of the fragment
-        (``[*:1]``, ``[*:2]`` in its SMILES, or particle tags) to the
-        protein site that label bonds, given as keyword arguments::
-
-            protein.attach_multi(
-                "[*:1]OCCOCCOCC[*:2]",
-                sites={
-                    "1": dict(resnum=63, atom_name="NZ", chain_id="A"),
-                    "2": dict(resnum=27, atom_name="NZ", chain_id="A"),
-                },
-                fragment_resname="PEG",
-            )
-
-        The first site is placed by rigid port alignment, exactly like
-        ``attach``. Each further tether is placed geometrically: the
-        fragment rotates about its first bond and shears along its own
-        axis until the link atom reaches the site, then a short
-        protein-fixed minimization (``relax_fragments``) removes the
-        strain. A warning appears only when the fragment cannot span
-        its sites. All bonds are recorded in ``cross_bonds``.
-
-        Returns
-        -------
-        list of InterResidueBond
-            One record per site, in ``sites`` order.
-        """
-        if isinstance(fragment, str):
-            fragment = prepare_fragment(fragment, fragment_resname or "LIG")
-        probe_residues = (
-            [fragment]
-            if isinstance(fragment, Residue)
-            else [c for c in fragment.successors() if isinstance(c, Residue)]
-        )
-        available = {
-            label: (residue.resnum, residue.link_atoms[label])
-            for residue in probe_residues
-            for label in residue.link_atoms
-        }
-        missing = set(sites) - set(available)
-        if missing:
-            raise MBuildError(
-                f"The fragment has no attachment points labeled "
-                f"{sorted(missing)}; it has {sorted(available)}."
-            )
-
-        labels = list(sites)
-        first_resnum, first_atom = available[labels[0]]
-        records = [
-            self.attach(
-                fragment,
-                first_atom,
-                fragment_resnum=first_resnum,
-                fragment_resname=fragment_resname,
-                separation=separation,
-                relax=False,  # relax once, after every tether is formed
-                **sites[labels[0]],
-            )
-        ]
-        for label in labels[1:]:
-            candidates = [
-                residue
-                for residue in self.residues()
-                if label in residue.link_atoms and residue.hetatm
-            ]
-            if len(candidates) != 1:
-                raise MBuildError(
-                    f"Attachment label {label!r} matches {len(candidates)} "
-                    "residues in the protein; attach_multi supports one "
-                    "fragment instance per label at a time."
-                )
-            site = dict(sites[label])
-            bond_order = int(site.pop("bond_order", 1))
-            site_residue = self.get_residue(
-                site["resnum"],
-                chain_id=site.get("chain_id"),
-                icode=site.get("icode", ""),
-            )
-            site_atom = self.get_atom(
-                site["resnum"],
-                site["atom_name"],
-                chain_id=site.get("chain_id"),
-                icode=site.get("icode", ""),
-            )
-            frag_residue = candidates[0]
-            frag_atom = _atom_in_residue(frag_residue, frag_residue.link_atoms[label])
-            # Rigidly rotate the fragment about its first-bond atom so
-            # this link atom points at its site: geometry is preserved,
-            # and the remaining gap is only the slack of the fragment,
-            # which minimization can close.
-            pivot = _atom_in_residue(records[0].residue2, records[0].atom2_name)
-            fragment_particles = [
-                particle
-                for residue in self.residues()
-                if residue.hetatm and set(residue.link_atoms) & set(available)
-                for particle in residue.particles()
-            ]
-            self._rotate_about(
-                fragment_particles,
-                pivot.pos,
-                frag_atom.pos - pivot.pos,
-                site_atom.pos - pivot.pos,
-            )
-            # Then shear the fragment along the pivot->link axis so the
-            # link atom reaches the site. Bonds stretch a little
-            # everywhere (local strain), which minimization fixes; it
-            # cannot fix a fragment that has to travel.
-            approach = frag_atom.pos - site_atom.pos
-            approach_norm = float(np.linalg.norm(approach))
-            if approach_norm > 1e-8:
-                target = site_atom.pos + separation * approach / approach_norm
-            else:
-                target = site_atom.pos + np.array([separation, 0.0, 0.0])
-            self._stretch_along(fragment_particles, pivot.pos, frag_atom, target)
-            site_hydrogens = self._bonded_hydrogens(
-                site_atom, site_residue.name, bond_order
-            )
-            frag_hydrogens = self._bonded_hydrogens(
-                frag_atom, frag_residue.name, bond_order
-            )
-            for hydrogen in (*site_hydrogens, *frag_hydrogens):
-                self.remove(hydrogen)
-            self.add_bond((site_atom, frag_atom), bond_order=float(bond_order))
-            distance = float(np.linalg.norm(site_atom.pos - frag_atom.pos))
-            message = (
-                f"Tether {label!r} formed at {distance * 10:.1f} A between "
-                f"{site_residue.name} {site_residue.resnum} {site_atom.name} "
-                f"and {frag_residue.name} {frag_residue.resnum} "
-                f"{frag_atom.name}."
-            )
-            if distance > 0.2:
-                logger.warning(
-                    message + " The fragment cannot reach this site with "
-                    "realistic geometry; relax and inspect the structure."
-                )
-            else:
-                logger.info(message)
-            record = InterResidueBond(
-                residue1=site_residue,
-                residue2=frag_residue,
-                atom1_name=site_atom.name,
-                atom2_name=frag_atom.name,
-                order=bond_order,
-                leaving1=tuple(sorted(h.name for h in site_hydrogens)),
-                leaving2=tuple(sorted(h.name for h in frag_hydrogens)),
-            )
-            self.cross_bonds.append(record)
-            records.append(record)
-        if relax:
-            logger.info("Relaxing tethered fragments with the protein held fixed.")
-            self.relax_fragments(n_steps=2000)
-            for label, record in zip(labels[1:], records[1:]):
-                atom1 = _atom_in_residue(record.residue1, record.atom1_name)
-                atom2 = _atom_in_residue(record.residue2, record.atom2_name)
-                distance = float(np.linalg.norm(atom1.pos - atom2.pos))
-                logger.info(
-                    f"Tether {label!r} after relaxation: {distance * 10:.1f} A."
-                )
-        return records
-
-    @staticmethod
-    def _rotate_about(particles, pivot, from_vector, to_vector):
-        """Rigidly rotate particles about a pivot, aligning two vectors."""
-        norm_from = np.linalg.norm(from_vector)
-        norm_to = np.linalg.norm(to_vector)
-        if norm_from < 1e-8 or norm_to < 1e-8:
-            return
-        unit_from = from_vector / norm_from
-        unit_to = to_vector / norm_to
-        axis = np.cross(unit_from, unit_to)
-        sine = np.linalg.norm(axis)
-        cosine = float(np.dot(unit_from, unit_to))
-        if sine < 1e-8:
-            return  # already aligned (or exactly opposite: leave as is)
-        axis = axis / sine
-        skew = np.array(
-            [
-                [0.0, -axis[2], axis[1]],
-                [axis[2], 0.0, -axis[0]],
-                [-axis[1], axis[0], 0.0],
-            ]
-        )
-        rotation = np.eye(3) + sine * skew + (1.0 - cosine) * (skew @ skew)
-        for particle in particles:
-            particle.pos = pivot + rotation @ (particle.pos - pivot)
-
-    @staticmethod
-    def _stretch_along(particles, pivot, link_atom, target):
-        """Shear particles along pivot->link so the link atom hits target.
-
-        Every particle moves by a fraction of the needed displacement,
-        proportional to its projection onto the pivot->link axis, so the
-        strain spreads over the whole fragment.
-        """
-        axis = link_atom.pos - pivot
-        length = float(np.linalg.norm(axis))
-        if length < 1e-8:
-            return
-        unit = axis / length
-        displacement = target - link_atom.pos
-        for particle in particles:
-            weight = float(np.dot(particle.pos - pivot, unit)) / length
-            particle.pos = particle.pos + np.clip(weight, 0.0, 1.0) * displacement
 
     @staticmethod
     def _bonded_hydrogens(atom, residue_name, count):
