@@ -771,7 +771,7 @@ class Protein(Compound):
     ):
         """Create and return a real Port at the named atom.
 
-        This is the canonical-mBuild escape hatch under ``attach()``:
+        This is the low-level alternative under ``attach()``:
         the named atom loses ``bond_order`` hydrogens, and a ``Port``
         pointing along the removed hydrogens is added to the residue.
         Use it with ``force_overlap`` for placements ``attach()`` does

@@ -642,12 +642,12 @@ class TestCCDLibrary(BaseTest):
         assert len(parmed.load_file(str(mol2), structure=True).residues) == 306
 
     def test_add_port_at(self):
-        # Tests the canonical-port escape hatch: a real Port anchored at
-        # the named atom, pointing along the removed hydrogen. This is
-        # needed so power users can run force_overlap themselves for
-        # placements attach() does not cover, keeping the recipe on
-        # mBuild's standard linking machinery. The test creates a port
-        # at LYS 12 NZ and checks anchor and hydrogen accounting.
+        # Tests add_port_at, the low-level alternative to attach(): it
+        # removes bond_order hydrogens from the named atom and returns
+        # a standard mBuild Port there, so a user can place a compound
+        # with force_overlap directly when attach() does not cover the
+        # placement. The test creates a port at LYS 12 NZ and checks
+        # the anchor and the number of remaining hydrogens.
         from mbuild.port import Port
 
         protein = Protein(get_fn("6m03_protonated.pdb"))
