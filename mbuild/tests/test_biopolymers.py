@@ -709,6 +709,30 @@ class TestCCDLibrary(BaseTest):
         with pytest.raises(MBuildError, match="attachment points"):
             protein.attach(two_sites, resnum=90, atom_name="NZ", chain_id="A")
 
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_to_gmso_keeps_residue_identity(self):
+        # Tests that the GMSO export keeps real PDB residue numbers and
+        # the residue names of attached fragments. This is needed
+        # because the generic converter renumbers residues per name and
+        # misses fragment residues nested below a wrapper Compound, and
+        # GMSO-side workflows (per-molecule force field application,
+        # template mapping) key on this metadata. The test attaches a
+        # fragment, exports, and checks numbers, the fragment residue,
+        # and the chain label.
+        from mbuild.biopolymers import prepare_fragment
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        fragment = prepare_fragment("*C(=O)C", "ACY")
+        protein.attach(fragment, resnum=5, atom_name="NZ", chain_id="A", relax=False)
+
+        topology = protein.to_gmso()
+        assert topology.n_sites == protein.n_particles
+        residues = {(site.residue.name, site.residue.number) for site in topology.sites}
+        assert ("LYS", 5) in residues and ("ACY", 307) in residues
+        assert ("SER", 1) in residues  # real numbering, not per-name 0..N
+        first = next(iter(topology.sites))
+        assert first.molecule.name == "Chain_A"
+
     def test_unknown_residue_raises(self):
         # Tests that an unknown residue code raises a KeyError that names
         # the code and the download option. This is needed because the

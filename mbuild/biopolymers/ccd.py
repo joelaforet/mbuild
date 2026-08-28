@@ -5,16 +5,16 @@ objects that the ``Protein`` recipe uses to match PDB residues by atom
 name and to stamp chemistry (bonds, bond orders, formal charges) onto
 mBuild Compounds.
 
-The data model deliberately mirrors the residue definitions of the
-OpenFF Pablo PDB loader (``openff.pablo.ResidueDefinition``), so that a
-protein loaded and modified with mBuild round-trips through Pablo's
-``topology_from_pdb`` without translation. See
-https://github.com/openforcefield/openff-pablo. In particular:
+The data model follows the practice of residue-template readers,
+inspired by and verified to be compatible with openff-pablo
+(https://github.com/openforcefield/openff-pablo), so that a protein
+loaded and modified with mBuild round-trips through such tools without
+translation. In particular:
 
 - Each atom carries a ``leaving`` flag. Leaving atoms are the atoms that
   are absent from a PDB file when the corresponding inter-residue bond
   (peptide bond, crosslink) exists.
-- Protonation variants are generated the same way Pablo generates them:
+- Protonation variants are generated the way such readers expect:
   removing an acidic proton decrements the formal charge of its heavy
   atom; adding a proton to a basic atom increments it.
 

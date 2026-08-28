@@ -577,6 +577,45 @@ class Protein(Compound):
             kwargs["residues"] = sorted({residue.name for residue in self.residues()})
         return super().to_parmed(**kwargs)
 
+    def to_gmso(self, **kwargs):
+        """Create a GMSO topology that keeps residue identity.
+
+        The generic converter derives each site's residue from the
+        particle's direct parent, which renumbers residues per name
+        and misses fragment residues whose particles sit one level
+        deeper in the hierarchy. This override rewrites every site's
+        residue with the hierarchy's residue name and real PDB number,
+        so GMSO's residue metadata matches the structure. Chains stay
+        available through each site's molecule/group labels.
+
+        Not carried over, because GMSO's data model has no slot for
+        them: formal charges (a GMSO site charge is a partial charge,
+        so it stays unset for a typing engine to fill), bond orders,
+        insertion codes, and the HETATM flag.
+        """
+        from gmso.abc.abstract_site import Residue as GMSOResidue
+
+        topology = super().to_gmso(**kwargs)
+        particle_residue = {}
+        for chain in self.chains:
+            for residue in self.residues(chain.chain_id):
+                for particle in residue.particles():
+                    particle_residue[particle] = residue
+        particles = [p for p in self.particles() if not p.port_particle]
+        sites = list(topology.sites)
+        if len(sites) != len(particles) or any(
+            site.name != particle.name for site, particle in zip(sites, particles)
+        ):
+            raise MBuildError(
+                "Site order of the GMSO topology does not match the "
+                "protein's particles; cannot restore residue identity."
+            )
+        for site, particle in zip(sites, particles):
+            residue = particle_residue.get(particle)
+            if residue is not None:
+                site.residue = GMSOResidue(name=residue.name, number=residue.resnum)
+        return topology
+
     def to_rdkit(self):
         """Create a sanitized RDKit molecule of the (modified) protein.
 
