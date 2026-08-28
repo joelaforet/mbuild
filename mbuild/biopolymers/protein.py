@@ -1060,6 +1060,58 @@ class Protein(Compound):
         return mol
 
     # ------------------------------------------------------------------
+    # Geometry
+    # ------------------------------------------------------------------
+    def relax_fragments(
+        self,
+        residues=None,
+        n_steps=500,
+        tolerance=50.0,
+        platform="CPU",
+    ):
+        """Relax attached fragments while the protein stays fixed.
+
+        Runs a short energy minimization with mBuild's generic
+        UFF-style parameters (``OpenMMSimulation`` with
+        ``forcefield=None``). The force field does not matter here: the
+        goal is only to pull a rigidly placed fragment out of steric
+        overlap so a downstream simulation does not blow up. Every atom
+        outside the given residues gets zero mass, which OpenMM treats
+        as immobile, so the protein coordinates do not change.
+
+        Parameters
+        ----------
+        residues : iterable of Residue, optional
+            The residues allowed to move. Default: every HETATM
+            residue (i.e. all attached fragments).
+        n_steps : int, optional, default=500
+            Maximum minimization iterations.
+        tolerance : float, optional, default=50.0
+            Energy tolerance in kJ/mol/nm.
+        platform : str, optional, default="CPU"
+            OpenMM platform name.
+        """
+        from mbuild.simulation import OpenMMSimulation
+
+        targets = (
+            list(residues)
+            if residues is not None
+            else [residue for residue in self.residues() if residue.hetatm]
+        )
+        if not targets:
+            return
+        mobile = set()
+        for residue in targets:
+            mobile.update(residue.particles())
+        simulation = OpenMMSimulation(
+            self, forcefield=None, kick=False, platform=platform
+        )
+        for index, particle in enumerate(self.particles()):
+            if particle not in mobile:
+                simulation.system.setParticleMass(index, 0.0)
+        simulation.minimize(n_steps=n_steps, tolerance=tolerance)
+
+    # ------------------------------------------------------------------
     # Functionalization
     # ------------------------------------------------------------------
     def add_port_at(
@@ -1105,6 +1157,7 @@ class Protein(Compound):
         fragment_resname=None,
         bond_order=1,
         separation=0.15,
+        relax=True,
     ):
         """Bond a fragment Compound onto a residue of this protein.
 
@@ -1258,7 +1311,13 @@ class Protein(Compound):
             bond_order=float(bond_order),
         )
 
-        self._warn_on_clashes(added, site_atom, frag_atom)
+        clashes = self._warn_on_clashes(added, site_atom, frag_atom)
+        if clashes and relax:
+            logger.info("Relaxing the placed fragment with the protein held fixed.")
+            self.relax_fragments(residues=frag_residues)
+            clashes = self._warn_on_clashes(added, site_atom, frag_atom)
+            if not clashes:
+                logger.info("Fragment overlaps resolved by relaxation.")
 
         record = InterResidueBond(
             residue1=site_residue,
@@ -1272,7 +1331,9 @@ class Protein(Compound):
         self.cross_bonds.append(record)
         return record
 
-    def attach_multi(self, fragment, sites, fragment_resname=None, separation=0.15):
+    def attach_multi(
+        self, fragment, sites, fragment_resname=None, separation=0.15, relax=True
+    ):
         """Tether one fragment to several protein sites at once.
 
         ``sites`` maps each attachment-point label of the fragment
@@ -1289,11 +1350,12 @@ class Protein(Compound):
             )
 
         The first site is placed by rigid port alignment, exactly like
-        ``attach``. Every further tether is formed topologically: the
-        hydrogens leave and the bond is recorded, but its length stays
-        wrong until the structure is relaxed, because one rigid fragment
-        cannot satisfy two sites at once. A warning reports each long
-        bond. All bonds are recorded in ``cross_bonds``.
+        ``attach``. Each further tether is placed geometrically: the
+        fragment rotates about its first bond and shears along its own
+        axis until the link atom reaches the site, then a short
+        protein-fixed minimization (``relax_fragments``) removes the
+        strain. A warning appears only when the fragment cannot span
+        its sites. All bonds are recorded in ``cross_bonds``.
 
         Returns
         -------
@@ -1328,6 +1390,7 @@ class Protein(Compound):
                 fragment_resnum=first_resnum,
                 fragment_resname=fragment_resname,
                 separation=separation,
+                relax=False,  # relax once, after every tether is formed
                 **sites[labels[0]],
             )
         ]
@@ -1358,6 +1421,34 @@ class Protein(Compound):
             )
             frag_residue = candidates[0]
             frag_atom = _atom_in_residue(frag_residue, frag_residue.link_atoms[label])
+            # Rigidly rotate the fragment about its first-bond atom so
+            # this link atom points at its site: geometry is preserved,
+            # and the remaining gap is only the slack of the fragment,
+            # which minimization can close.
+            pivot = _atom_in_residue(records[0].residue2, records[0].atom2_name)
+            fragment_particles = [
+                particle
+                for residue in self.residues()
+                if residue.hetatm and set(residue.link_atoms) & set(available)
+                for particle in residue.particles()
+            ]
+            self._rotate_about(
+                fragment_particles,
+                pivot.pos,
+                frag_atom.pos - pivot.pos,
+                site_atom.pos - pivot.pos,
+            )
+            # Then shear the fragment along the pivot->link axis so the
+            # link atom reaches the site. Bonds stretch a little
+            # everywhere (local strain), which minimization fixes; it
+            # cannot fix a fragment that has to travel.
+            approach = frag_atom.pos - site_atom.pos
+            approach_norm = float(np.linalg.norm(approach))
+            if approach_norm > 1e-8:
+                target = site_atom.pos + separation * approach / approach_norm
+            else:
+                target = site_atom.pos + np.array([separation, 0.0, 0.0])
+            self._stretch_along(fragment_particles, pivot.pos, frag_atom, target)
             site_hydrogens = self._bonded_hydrogens(
                 site_atom, site_residue.name, bond_order
             )
@@ -1368,13 +1459,19 @@ class Protein(Compound):
                 self.remove(hydrogen)
             self.add_bond((site_atom, frag_atom), bond_order=float(bond_order))
             distance = float(np.linalg.norm(site_atom.pos - frag_atom.pos))
-            logger.warning(
-                f"Tether {label!r} formed topologically at "
-                f"{distance * 10:.1f} A between {site_residue.name} "
-                f"{site_residue.resnum} {site_atom.name} and "
-                f"{frag_residue.name} {frag_residue.resnum} "
-                f"{frag_atom.name}. Relax the structure before simulating."
+            message = (
+                f"Tether {label!r} formed at {distance * 10:.1f} A between "
+                f"{site_residue.name} {site_residue.resnum} {site_atom.name} "
+                f"and {frag_residue.name} {frag_residue.resnum} "
+                f"{frag_atom.name}."
             )
+            if distance > 0.2:
+                logger.warning(
+                    message + " The fragment cannot reach this site with "
+                    "realistic geometry; relax and inspect the structure."
+                )
+            else:
+                logger.info(message)
             record = InterResidueBond(
                 residue1=site_residue,
                 residue2=frag_residue,
@@ -1386,7 +1483,61 @@ class Protein(Compound):
             )
             self.cross_bonds.append(record)
             records.append(record)
+        if relax:
+            logger.info("Relaxing tethered fragments with the protein held fixed.")
+            self.relax_fragments(n_steps=2000)
+            for label, record in zip(labels[1:], records[1:]):
+                atom1 = _atom_in_residue(record.residue1, record.atom1_name)
+                atom2 = _atom_in_residue(record.residue2, record.atom2_name)
+                distance = float(np.linalg.norm(atom1.pos - atom2.pos))
+                logger.info(
+                    f"Tether {label!r} after relaxation: {distance * 10:.1f} A."
+                )
         return records
+
+    @staticmethod
+    def _rotate_about(particles, pivot, from_vector, to_vector):
+        """Rigidly rotate particles about a pivot, aligning two vectors."""
+        norm_from = np.linalg.norm(from_vector)
+        norm_to = np.linalg.norm(to_vector)
+        if norm_from < 1e-8 or norm_to < 1e-8:
+            return
+        unit_from = from_vector / norm_from
+        unit_to = to_vector / norm_to
+        axis = np.cross(unit_from, unit_to)
+        sine = np.linalg.norm(axis)
+        cosine = float(np.dot(unit_from, unit_to))
+        if sine < 1e-8:
+            return  # already aligned (or exactly opposite: leave as is)
+        axis = axis / sine
+        skew = np.array(
+            [
+                [0.0, -axis[2], axis[1]],
+                [axis[2], 0.0, -axis[0]],
+                [-axis[1], axis[0], 0.0],
+            ]
+        )
+        rotation = np.eye(3) + sine * skew + (1.0 - cosine) * (skew @ skew)
+        for particle in particles:
+            particle.pos = pivot + rotation @ (particle.pos - pivot)
+
+    @staticmethod
+    def _stretch_along(particles, pivot, link_atom, target):
+        """Shear particles along pivot->link so the link atom hits target.
+
+        Every particle moves by a fraction of the needed displacement,
+        proportional to its projection onto the pivot->link axis, so the
+        strain spreads over the whole fragment.
+        """
+        axis = link_atom.pos - pivot
+        length = float(np.linalg.norm(axis))
+        if length < 1e-8:
+            return
+        unit = axis / length
+        displacement = target - link_atom.pos
+        for particle in particles:
+            weight = float(np.dot(particle.pos - pivot, unit)) / length
+            particle.pos = particle.pos + np.clip(weight, 0.0, 1.0) * displacement
 
     @staticmethod
     def _bonded_hydrogens(atom, residue_name, count):
@@ -1442,9 +1593,10 @@ class Protein(Compound):
                 f"{n_clashes} atoms of the attached fragment sit within "
                 f"{cutoff * 10:.1f} A of existing atoms (closest: "
                 f"{distances.min() * 10:.2f} A). Relax the structure before "
-                "simulating (e.g. energy minimization with the protein held "
-                "fixed)."
+                "simulating (e.g. relax_fragments(), which holds the "
+                "protein fixed)."
             )
+        return n_clashes
 
     @staticmethod
     def _wrap_in_residue(compound, fragment_resname):

@@ -207,6 +207,7 @@ class TestCCDLibrary(BaseTest):
             atom_name="NZ",
             chain_id="A",
             fragment_resname="ACT",
+            relax=False,  # test the raw port placement deterministically
         )
         assert (record.atom1_name, record.atom2_name) == ("NZ", "C1")
         assert record.leaving1 == ("HZ1",) and record.leaving2 == ("H1",)
@@ -777,32 +778,47 @@ class TestCCDLibrary(BaseTest):
             protein.attach(two_sites, resnum=90, atom_name="NZ", chain_id="A")
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_attach_multi_double_tether(self, caplog):
-        # Tests that one fragment tethers to two protein sites: the
-        # first by rigid alignment, the second topologically with a
-        # warning, both recorded in cross_bonds. This is needed for
-        # polymers tethered at two residues, where one rigid placement
-        # cannot satisfy both sites and relaxation must follow. The
-        # test tethers a PEG-like chain between two lysines and checks
-        # both bonds, the records, and the warning.
-        import logging
+    def test_attach_multi_double_tether(self):
+        # Tests that one fragment tethers to two protein sites with
+        # realistic geometry and an unmoved protein: the first site by
+        # rigid alignment, the second by rotate-shear placement plus a
+        # protein-fixed relaxation. This is needed for polymers tethered
+        # at two residues, where one rigid placement cannot satisfy both
+        # sites, and the user expects coordinates that just work. The
+        # test tethers a PEG chain between two lysines and checks both
+        # bond lengths, the records, and protein immobility.
+        import numpy as np
 
         protein = Protein(get_fn("6m03_protonated.pdb"))
-        with caplog.at_level(logging.WARNING, logger="mbuild"):
-            records = protein.attach_multi(
-                "[*:1]CCOCCOCCOCC[*:2]",
-                sites={
-                    "1": dict(resnum=5, atom_name="NZ", chain_id="A"),
-                    "2": dict(resnum=12, atom_name="NZ", chain_id="A"),
-                },
-                fragment_resname="PEG",
-            )
+        before = {
+            id(p): p.pos.copy()
+            for r in protein.residues()
+            if not r.hetatm
+            for p in r.particles()
+        }
+        records = protein.attach_multi(
+            "[*:1]CCOCCOCCOCCOCCOCCOCCOCC[*:2]",
+            sites={
+                "1": dict(resnum=5, atom_name="NZ", chain_id="A"),
+                "2": dict(resnum=12, atom_name="NZ", chain_id="A"),
+            },
+            fragment_resname="PEG",
+        )
         assert len(records) == 2 and len(protein.cross_bonds) == 2
-        assert "formed topologically" in caplog.text
-        for record, resnum in zip(records, (5, 12)):
-            site_atom = protein.get_atom(resnum, "NZ", chain_id="A")
-            bonded = {p.name for p in site_atom.direct_bonds()}
-            assert record.atom2_name in bonded
+        from mbuild.biopolymers.protein import _atom_in_residue
+
+        for record in records:
+            atom1 = _atom_in_residue(record.residue1, record.atom1_name)
+            atom2 = _atom_in_residue(record.residue2, record.atom2_name)
+            assert np.linalg.norm(atom1.pos - atom2.pos) < 0.25
+        moved = max(
+            float(np.linalg.norm(p.pos - before[id(p)]))
+            for r in protein.residues()
+            if not r.hetatm
+            for p in r.particles()
+            if id(p) in before
+        )
+        assert moved == 0.0
 
         with pytest.raises(MBuildError, match="no attachment points labeled"):
             protein.attach_multi(
