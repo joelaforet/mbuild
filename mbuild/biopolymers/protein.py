@@ -98,6 +98,12 @@ class Residue(Compound):
         #: Sparse map of atom name -> integer formal charge, filled by
         #: the loader (from the matched template) and fragment loaders.
         self.atom_formal_charges = {}
+        #: Map of site label -> atom name for the fragment's covalent
+        #: bond sites, set by attachment points in the SMILES (* or
+        #: [*:n]) or by particle tags. attach() uses a lone entry when
+        #: no fragment atom name is given; attach_multi() maps each
+        #: label to a protein site.
+        self.link_atoms = {}
 
     def _clone(self, clone_of=None, root_container=None):
         newone = super()._clone(clone_of, root_container)
@@ -111,6 +117,7 @@ class Residue(Compound):
         ):
             setattr(newone, attribute, getattr(self, attribute))
         newone.atom_formal_charges = dict(self.atom_formal_charges)
+        newone.link_atoms = dict(self.link_atoms)
         return newone
 
 
@@ -196,20 +203,41 @@ def prepare_fragment(compound, resname):
         A detached residue with unique, stable atom names.
     """
     charges = None
+    link_index = None
     if isinstance(compound, str):
         # A SMILES string: load it and keep its formal charges, which
-        # an mbuild Compound cannot store.
+        # an mbuild Compound cannot store. One dummy atom (*) marks the
+        # attachment site: it is replaced by a hydrogen (the leaving
+        # atom), and its neighbor becomes the fragment's link atom.
         from rdkit import Chem
 
-        from mbuild import load
+        from mbuild.conversion import from_rdkit
 
-        rdmol = Chem.MolFromSmiles(compound)
-        if rdmol is None:
+        parsed = Chem.MolFromSmiles(compound)
+        if parsed is None:
             raise MBuildError(f"Could not parse SMILES {compound!r}.")
-        rdmol = Chem.AddHs(rdmol)
-        charges = [atom.GetFormalCharge() for atom in rdmol.GetAtoms()]
-        elements = [atom.GetSymbol() for atom in rdmol.GetAtoms()]
-        copied = load(compound, smiles=True)
+        editable = Chem.RWMol(parsed)
+        dummies = [atom for atom in editable.GetAtoms() if atom.GetAtomicNum() == 0]
+        link_index = {}
+        for dummy in dummies:
+            label = str(dummy.GetAtomMapNum() or 1)
+            if label in link_index:
+                raise MBuildError(
+                    "Attachment points must carry distinct labels: write "
+                    "them as [*:1], [*:2], ... when a fragment has more "
+                    "than one."
+                )
+            neighbors = dummy.GetNeighbors()
+            if len(neighbors) != 1:
+                raise MBuildError("An attachment point (*) must bond exactly one atom.")
+            link_index[label] = neighbors[0].GetIdx()
+            dummy.SetAtomicNum(1)
+        mol = editable.GetMol()
+        Chem.SanitizeMol(mol)
+        explicit = Chem.AddHs(mol)
+        charges = [atom.GetFormalCharge() for atom in explicit.GetAtoms()]
+        elements = [atom.GetSymbol() for atom in explicit.GetAtoms()]
+        copied = from_rdkit(rdkit_mol=mol)
     else:
         copied = clone(compound)
     if isinstance(copied, Residue):
@@ -233,6 +261,14 @@ def prepare_fragment(compound, resname):
             if charge
         }
         residue.formal_charge = sum(charges)
+        residue.link_atoms = {
+            label: particles[index].name for label, index in link_index.items()
+        }
+    if not residue.link_atoms:
+        # mBuild's tagged-SMILES idiom: particle tags mark the sites.
+        for particle in residue.particles():
+            if particle.particle_tag:
+                residue.link_atoms[str(particle.particle_tag)] = particle.name
     return residue
 
 
@@ -1059,7 +1095,8 @@ class Protein(Compound):
     def attach(
         self,
         fragment,
-        fragment_atom_name,
+        fragment_atom_name=None,
+        *,
         resnum,
         atom_name,
         chain_id=None,
@@ -1150,6 +1187,23 @@ class Protein(Compound):
         for residue in frag_residues:
             self._ensure_unique_atom_names(residue)
 
+        if fragment_atom_name is None:
+            linked = [
+                (label, residue)
+                for residue in frag_residues
+                for label in residue.link_atoms
+            ]
+            if len(linked) != 1:
+                raise MBuildError(
+                    "attach() bonds one site, but the fragment carries "
+                    f"{len(linked)} attachment points. Pass "
+                    "fragment_atom_name, mark one site (* in the SMILES), "
+                    "or use attach_multi() for several labeled sites."
+                )
+            label, link_residue = linked[0]
+            fragment_atom_name = link_residue.link_atoms[label]
+            fragment_resnum = link_residue.resnum
+
         frag_atom, frag_residue = self._find_fragment_atom(
             frag_residues, fragment_atom_name, fragment_resnum
         )
@@ -1217,6 +1271,122 @@ class Protein(Compound):
         )
         self.cross_bonds.append(record)
         return record
+
+    def attach_multi(self, fragment, sites, fragment_resname=None, separation=0.15):
+        """Tether one fragment to several protein sites at once.
+
+        ``sites`` maps each attachment-point label of the fragment
+        (``[*:1]``, ``[*:2]`` in its SMILES, or particle tags) to the
+        protein site that label bonds, given as keyword arguments::
+
+            protein.attach_multi(
+                "[*:1]OCCOCCOCC[*:2]",
+                sites={
+                    "1": dict(resnum=63, atom_name="NZ", chain_id="A"),
+                    "2": dict(resnum=27, atom_name="NZ", chain_id="A"),
+                },
+                fragment_resname="PEG",
+            )
+
+        The first site is placed by rigid port alignment, exactly like
+        ``attach``. Every further tether is formed topologically: the
+        hydrogens leave and the bond is recorded, but its length stays
+        wrong until the structure is relaxed, because one rigid fragment
+        cannot satisfy two sites at once. A warning reports each long
+        bond. All bonds are recorded in ``cross_bonds``.
+
+        Returns
+        -------
+        list of InterResidueBond
+            One record per site, in ``sites`` order.
+        """
+        if isinstance(fragment, str):
+            fragment = prepare_fragment(fragment, fragment_resname or "LIG")
+        probe_residues = (
+            [fragment]
+            if isinstance(fragment, Residue)
+            else [c for c in fragment.successors() if isinstance(c, Residue)]
+        )
+        available = {
+            label: (residue.resnum, residue.link_atoms[label])
+            for residue in probe_residues
+            for label in residue.link_atoms
+        }
+        missing = set(sites) - set(available)
+        if missing:
+            raise MBuildError(
+                f"The fragment has no attachment points labeled "
+                f"{sorted(missing)}; it has {sorted(available)}."
+            )
+
+        labels = list(sites)
+        first_resnum, first_atom = available[labels[0]]
+        records = [
+            self.attach(
+                fragment,
+                first_atom,
+                fragment_resnum=first_resnum,
+                fragment_resname=fragment_resname,
+                separation=separation,
+                **sites[labels[0]],
+            )
+        ]
+        for label in labels[1:]:
+            candidates = [
+                residue
+                for residue in self.residues()
+                if label in residue.link_atoms and residue.hetatm
+            ]
+            if len(candidates) != 1:
+                raise MBuildError(
+                    f"Attachment label {label!r} matches {len(candidates)} "
+                    "residues in the protein; attach_multi supports one "
+                    "fragment instance per label at a time."
+                )
+            site = dict(sites[label])
+            bond_order = int(site.pop("bond_order", 1))
+            site_residue = self.get_residue(
+                site["resnum"],
+                chain_id=site.get("chain_id"),
+                icode=site.get("icode", ""),
+            )
+            site_atom = self.get_atom(
+                site["resnum"],
+                site["atom_name"],
+                chain_id=site.get("chain_id"),
+                icode=site.get("icode", ""),
+            )
+            frag_residue = candidates[0]
+            frag_atom = _atom_in_residue(frag_residue, frag_residue.link_atoms[label])
+            site_hydrogens = self._bonded_hydrogens(
+                site_atom, site_residue.name, bond_order
+            )
+            frag_hydrogens = self._bonded_hydrogens(
+                frag_atom, frag_residue.name, bond_order
+            )
+            for hydrogen in (*site_hydrogens, *frag_hydrogens):
+                self.remove(hydrogen)
+            self.add_bond((site_atom, frag_atom), bond_order=float(bond_order))
+            distance = float(np.linalg.norm(site_atom.pos - frag_atom.pos))
+            logger.warning(
+                f"Tether {label!r} formed topologically at "
+                f"{distance * 10:.1f} A between {site_residue.name} "
+                f"{site_residue.resnum} {site_atom.name} and "
+                f"{frag_residue.name} {frag_residue.resnum} "
+                f"{frag_atom.name}. Relax the structure before simulating."
+            )
+            record = InterResidueBond(
+                residue1=site_residue,
+                residue2=frag_residue,
+                atom1_name=site_atom.name,
+                atom2_name=frag_atom.name,
+                order=bond_order,
+                leaving1=tuple(sorted(h.name for h in site_hydrogens)),
+                leaving2=tuple(sorted(h.name for h in frag_hydrogens)),
+            )
+            self.cross_bonds.append(record)
+            records.append(record)
+        return records
 
     @staticmethod
     def _bonded_hydrogens(atom, residue_name, count):

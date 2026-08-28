@@ -750,6 +750,65 @@ class TestCCDLibrary(BaseTest):
             )
         assert "Relax the structure" in caplog.text
 
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_star_sited_fragment(self):
+        # Tests that a SMILES attachment point (*) marks the fragment's
+        # bond site, so attach() needs no fragment atom name, and that
+        # unlabeled multiple stars are rejected. This is needed because
+        # star-sited fragments are the standard way chemists write
+        # "link here", and reading auto-generated atom names is the
+        # main UX friction otherwise. The test attaches an octanoyl
+        # fragment written with a star and checks the bond and record.
+        from mbuild.biopolymers import prepare_fragment
+
+        fragment = prepare_fragment("*C(=O)CCCCCCC", "OCT")
+        assert fragment.link_atoms == {"1": "C1"}
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        record = protein.attach(fragment, resnum=5, atom_name="NZ", chain_id="A")
+        assert record.atom2_name == "C1"
+        nz = protein.get_atom(5, "NZ", chain_id="A")
+        assert "C1" in {p.name for p in nz.direct_bonds()}
+
+        with pytest.raises(MBuildError, match="distinct labels"):
+            prepare_fragment("*CC*", "BAD")
+        two_sites = prepare_fragment("[*:1]CC[*:2]", "TWO")
+        with pytest.raises(MBuildError, match="attach_multi"):
+            protein.attach(two_sites, resnum=90, atom_name="NZ", chain_id="A")
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach_multi_double_tether(self, caplog):
+        # Tests that one fragment tethers to two protein sites: the
+        # first by rigid alignment, the second topologically with a
+        # warning, both recorded in cross_bonds. This is needed for
+        # polymers tethered at two residues, where one rigid placement
+        # cannot satisfy both sites and relaxation must follow. The
+        # test tethers a PEG-like chain between two lysines and checks
+        # both bonds, the records, and the warning.
+        import logging
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            records = protein.attach_multi(
+                "[*:1]CCOCCOCCOCC[*:2]",
+                sites={
+                    "1": dict(resnum=5, atom_name="NZ", chain_id="A"),
+                    "2": dict(resnum=12, atom_name="NZ", chain_id="A"),
+                },
+                fragment_resname="PEG",
+            )
+        assert len(records) == 2 and len(protein.cross_bonds) == 2
+        assert "formed topologically" in caplog.text
+        for record, resnum in zip(records, (5, 12)):
+            site_atom = protein.get_atom(resnum, "NZ", chain_id="A")
+            bonded = {p.name for p in site_atom.direct_bonds()}
+            assert record.atom2_name in bonded
+
+        with pytest.raises(MBuildError, match="no attachment points labeled"):
+            protein.attach_multi(
+                "[*:1]CC", sites={"9": dict(resnum=90, atom_name="NZ")}
+            )
+
     def test_unknown_residue_raises(self):
         # Tests that an unknown residue code raises a KeyError that names
         # the code and the download option. This is needed because the
