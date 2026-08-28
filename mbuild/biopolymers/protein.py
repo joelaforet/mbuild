@@ -482,17 +482,20 @@ class Protein(Compound):
                 for record in group.records:
                     if match.record_atoms[id(record)].name == link_name:
                         expecting[record.serial] = (group, match, residue, record)
+        pairs_of = {}
+        for pair in conects:
+            for serial in pair:
+                pairs_of.setdefault(serial, []).append(pair)
         satisfied = set()
         for serial, (group, match, residue, record) in expecting.items():
             if serial in satisfied:
                 continue
             partner_serial = None
-            for pair in conects:
-                if serial in pair:
-                    other = next(iter(pair - {serial}))
-                    if other in expecting:
-                        partner_serial = other
-                        break
+            for pair in pairs_of.get(serial, ()):
+                other = next(iter(pair - {serial}))
+                if other in expecting:
+                    partner_serial = other
+                    break
             if partner_serial is None:
                 raise MBuildError(
                     f"Residue {group.label} is missing its "
