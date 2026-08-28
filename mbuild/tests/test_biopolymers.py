@@ -308,15 +308,40 @@ class TestCCDLibrary(BaseTest):
 
         lines = out.read_text().splitlines()
         conects = [line for line in lines if line.startswith("CONECT")]
-        assert len(conects) == 2  # one bond, written from both atoms
-        serials = {int(part) for line in conects for part in line[6:].split()}
-        named = {
-            line[12:16].strip()
-            for line in lines
-            if line.startswith(("ATOM", "HETATM")) and int(line[6:11]) in serials
+        hetatm_serials = {
+            int(line[6:11]) for line in lines if line.startswith("HETATM")
         }
-        assert named == {"NZ", "C1"}
-        assert sum(line.startswith("HETATM") for line in lines) == 9
+        assert len(hetatm_serials) == 9
+        # RCSB convention: every HETATM atom lists its bonds in CONECT,
+        # so viewers that trust CONECT for HETATM records draw the
+        # fragment. The crosslink pair must appear from both sides.
+        conect_owners = {int(line[6:11]) for line in conects}
+        assert hetatm_serials <= conect_owners
+        serial_of = {
+            line[12:16].strip(): int(line[6:11])
+            for line in lines
+            if line.startswith(("ATOM", "HETATM"))
+            and line[17:20] in ("LYS", "XCT")
+            and int(line[22:26]) in (5, 307)
+        }
+        nz, c1 = serial_of["NZ"], serial_of["C1"]
+        pairs = {
+            (int(line[6:11]), partner)
+            for line in conects
+            for partner in map(int, line[11:].split())
+        }
+        assert (nz, c1) in pairs and (c1, nz) in pairs
+        # Protein backbone bonds stay implied by adjacency: no CONECT
+        # between two ATOM-record backbone atoms.
+        atom_serials = {
+            int(line[6:11])
+            for line in lines
+            if line.startswith("ATOM") and line[12:16].strip() in ("C", "N")
+        }
+        assert not any(
+            owner in atom_serials and partner in atom_serials
+            for owner, partner in pairs
+        )
 
         assert protein.crosslink_specs() == [
             {

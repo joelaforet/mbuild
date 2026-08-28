@@ -1216,25 +1216,44 @@ class Protein(Polymer):
         )
 
     def _conect_lines(self, particle_serial, particle_residue, residue_order):
-        """Yield CONECT lines for bonds residue adjacency does not imply."""
-        pairs = []
+        """Yield CONECT lines, following the RCSB convention.
+
+        Every bond that touches a HETATM residue is listed, because PDB
+        viewers (e.g. PyMOL) treat CONECT records as the complete bond
+        list for HETATM atoms and skip distance-based perception for
+        them. Bonds between different ATOM residues are listed too
+        (disulfides), except peptide bonds, which residue adjacency
+        implies. Pablo accepts these records because its residue
+        definitions predict all of them.
+        """
+        partners = {}
         for particle1, particle2 in self.bonds():
             residue1 = particle_residue.get(particle1)
             residue2 = particle_residue.get(particle2)
-            if residue1 is None or residue2 is None or residue1 is residue2:
+            if residue1 is None or residue2 is None:
                 continue
-            adjacent = (
-                abs(residue_order[id(residue1)] - residue_order[id(residue2)]) == 1
-            )
-            backbone = {particle1.name, particle2.name} == {"C", "N"}
-            if adjacent and backbone:
-                continue  # implied peptide bond
-            pairs.append(
-                tuple(sorted((particle_serial[particle1], particle_serial[particle2])))
-            )
-        for serial1, serial2 in sorted(set(pairs)):
-            yield f"CONECT{serial1:5d}{serial2:5d}"
-            yield f"CONECT{serial2:5d}{serial1:5d}"
+            if residue1 is residue2:
+                if not residue1.hetatm:
+                    continue
+            elif not (residue1.hetatm or residue2.hetatm):
+                adjacent = (
+                    abs(residue_order[id(residue1)] - residue_order[id(residue2)]) == 1
+                )
+                if adjacent and {particle1.name, particle2.name} == {"C", "N"}:
+                    continue  # implied peptide bond
+            serial1 = particle_serial[particle1]
+            serial2 = particle_serial[particle2]
+            partners.setdefault(serial1, []).append(serial2)
+            partners.setdefault(serial2, []).append(serial1)
+        for serial in sorted(partners):
+            bonded = sorted(partners[serial])
+            for start in range(0, len(bonded), 4):
+                chunk = bonded[start : start + 4]
+                yield (
+                    "CONECT"
+                    + f"{serial:5d}"
+                    + "".join(f"{other:5d}" for other in chunk)
+                )
 
     def crosslink_specs(self):
         """Return Pablo ``with_crosslink`` kwargs for each recorded bond.
