@@ -25,26 +25,20 @@ example with pdbfixer or reduce) at the desired pH.
 """
 
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from mbuild import clone
 from mbuild.biopolymers.ccd import CCDLibrary
-from mbuild.box import Box
+from mbuild.biopolymers.protein_pdb_io import _parse_pdb
 from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
 from mbuild.port import Port
 
 logger = logging.getLogger(__name__)
 
-__all__ = [
-    "Protein",
-    "Chain",
-    "Residue",
-    "fragment_from_sdf",
-    "prepare_fragment",
-]
+__all__ = ["Protein", "Chain", "Residue"]
 
 
 class Chain(Compound):
@@ -142,35 +136,6 @@ class InterResidueBond:
 
 
 @dataclass
-class _PdbRecord:
-    serial: int
-    name: str
-    alt_loc: str
-    resname: str
-    chain_id: str
-    resnum: int
-    icode: str
-    pos: np.ndarray
-    element: str
-    hetatm: bool
-    line_no: int
-
-
-@dataclass
-class _PdbResidue:
-    resname: str
-    chain_id: str
-    resnum: int
-    icode: str
-    records: list = field(default_factory=list)
-    ter_after: bool = False
-
-    @property
-    def label(self):
-        return f"{self.resname} {self.chain_id}:{self.resnum}{self.icode}"
-
-
-@dataclass
 class _Match:
     variant: object
     record_atoms: dict  # id(record) -> AtomTemplate
@@ -178,183 +143,6 @@ class _Match:
     expects_prior: bool
     expects_posterior: bool
     expects_crosslink: bool
-
-
-def prepare_fragment(compound, resname):
-    """Return a fragment as a named Residue with final atom names.
-
-    ``attach()`` wraps and renames fragments internally, so a caller who
-    passes a plain Compound cannot know the atom names in advance. This
-    helper applies the same wrapping and renaming up front and returns
-    the Residue, so the caller can (1) read the names to pick the
-    attachment atom, (2) pass the same object to ``attach()``, and
-    (3) reuse the names when building an external residue definition
-    (e.g. a residue template for a downstream loader) for the fragment.
-
-    Parameters
-    ----------
-    compound : mbuild.Compound
-        The fragment. Cloned; the input is not changed.
-    resname : str
-        The residue name (up to 3 characters, e.g. "MYR").
-
-    Returns
-    -------
-    Residue
-        A detached residue with unique, stable atom names.
-    """
-    charges = None
-    link_index = None
-    if isinstance(compound, str):
-        # A SMILES string: load it and keep its formal charges, which
-        # an mbuild Compound cannot store. One dummy atom (*) marks the
-        # attachment site: it is replaced by a hydrogen (the leaving
-        # atom), and its neighbor becomes the fragment's link atom.
-        from rdkit import Chem
-
-        from mbuild.conversion import from_rdkit
-
-        parsed = Chem.MolFromSmiles(compound)
-        if parsed is None:
-            raise MBuildError(f"Could not parse SMILES {compound!r}.")
-        editable = Chem.RWMol(parsed)
-        dummies = [atom for atom in editable.GetAtoms() if atom.GetAtomicNum() == 0]
-        link_index = {}
-        for dummy in dummies:
-            label = str(dummy.GetAtomMapNum() or 1)
-            if label in link_index:
-                raise MBuildError(
-                    "Attachment points must carry distinct labels: write "
-                    "them as [*:1], [*:2], ... when a fragment has more "
-                    "than one."
-                )
-            neighbors = dummy.GetNeighbors()
-            if len(neighbors) != 1:
-                raise MBuildError("An attachment point (*) must bond exactly one atom.")
-            link_index[label] = neighbors[0].GetIdx()
-            dummy.SetAtomicNum(1)
-        mol = editable.GetMol()
-        Chem.SanitizeMol(mol)
-        explicit = Chem.AddHs(mol)
-        charges = [atom.GetFormalCharge() for atom in explicit.GetAtoms()]
-        elements = [atom.GetSymbol() for atom in explicit.GetAtoms()]
-        copied = from_rdkit(rdkit_mol=mol)
-    else:
-        copied = clone(compound)
-    if isinstance(copied, Residue):
-        residue = copied
-        residue.name = (resname or residue.name)[:3].upper()
-    else:
-        residue = Protein._wrap_in_residue(copied, resname)
-    Protein._ensure_unique_atom_names(residue)
-    if charges is not None:
-        particles = list(residue.particles())
-        symbols = [particle.element.symbol for particle in particles]
-        if len(particles) != len(charges) or symbols != elements:
-            raise MBuildError(
-                "Atom order of the loaded fragment does not match the "
-                "SMILES, so formal charges cannot be mapped onto atoms. "
-                "This is a bug in the loading path; please report it."
-            )
-        residue.atom_formal_charges = {
-            particle.name: charge
-            for particle, charge in zip(particles, charges)
-            if charge
-        }
-        residue.formal_charge = sum(charges)
-        residue.link_atoms = {
-            label: particles[index].name for label, index in link_index.items()
-        }
-    if not residue.link_atoms:
-        # mBuild's tagged-SMILES idiom: particle tags mark the sites.
-        for particle in residue.particles():
-            if particle.particle_tag:
-                residue.link_atoms[str(particle.particle_tag)] = particle.name
-    return residue
-
-
-def fragment_from_sdf(filename, resname):
-    """Load one molecule from an SDF file as a named Residue fragment.
-
-    SDF is the preferred rich fragment format: unlike PDB, it encodes
-    explicit bond orders and formal charges, together with coordinates.
-    Prefer it (or SMILES) over ``fragment_from_pdb`` when you control
-    the fragment source. Atom names are assigned as element+index
-    (the SDF format has no atom names); read them from the returned
-    residue. Formal charges from the SDF are kept on the residue's
-    ``atom_formal_charges`` map, so exports carry them; the external
-    (Pablo) residue definition is still best built from the same file.
-
-    Parameters
-    ----------
-    filename : str
-        Path of an SDF file holding exactly one molecule with explicit
-        hydrogens and coordinates.
-    resname : str
-        The residue name (up to 3 characters).
-
-    Returns
-    -------
-    Residue
-        A detached residue ready to pass to ``Protein.attach``.
-    """
-    from mbuild.utils.io import import_
-
-    import_("rdkit")
-    from rdkit import Chem
-
-    supplier = Chem.SDMolSupplier(str(filename), removeHs=False, sanitize=True)
-    molecules = [molecule for molecule in supplier if molecule is not None]
-    if len(molecules) != 1:
-        raise MBuildError(
-            f"{filename} holds {len(molecules)} readable molecules; "
-            "fragment_from_sdf takes exactly one."
-        )
-    molecule = molecules[0]
-    if molecule.GetNumConformers() == 0:
-        raise MBuildError(f"{filename} has no coordinates.")
-    if any(atom.GetNumImplicitHs() for atom in molecule.GetAtoms()):
-        raise MBuildError(
-            f"{filename} has implicit hydrogens; write the SDF with all "
-            "hydrogens explicit."
-        )
-    orders = {
-        Chem.BondType.SINGLE: 1.0,
-        Chem.BondType.DOUBLE: 2.0,
-        Chem.BondType.TRIPLE: 3.0,
-        Chem.BondType.AROMATIC: 1.5,
-    }
-    conformer = molecule.GetConformer()
-    residue = Residue(resname=(resname or "LIG")[:3].upper(), hetatm=True)
-    particles = []
-    for atom in molecule.GetAtoms():
-        position = conformer.GetAtomPosition(atom.GetIdx())
-        particles.append(
-            Compound(
-                name=atom.GetSymbol(),
-                element=atom.GetSymbol(),
-                pos=np.array([position.x, position.y, position.z]) / 10.0,
-            )
-        )
-    residue.add(particles)
-    for bond in molecule.GetBonds():
-        order = orders.get(bond.GetBondType())
-        if order is None:
-            raise MBuildError(
-                f"Unsupported SDF bond type {bond.GetBondType()} in {filename}."
-            )
-        residue.add_bond(
-            (particles[bond.GetBeginAtomIdx()], particles[bond.GetEndAtomIdx()]),
-            bond_order=order,
-        )
-    Protein._ensure_unique_atom_names(residue)
-    residue.atom_formal_charges = {
-        particles[atom.GetIdx()].name: atom.GetFormalCharge()
-        for atom in molecule.GetAtoms()
-        if atom.GetFormalCharge()
-    }
-    residue.formal_charge = sum(residue.atom_formal_charges.values())
-    return residue
 
 
 def _atom_in_residue(residue, atom_name):
@@ -367,82 +155,6 @@ def _atom_in_residue(residue, atom_name):
         if particle.name == atom_name:
             return particle
     return None
-
-
-def _parse_pdb(text):
-    """Parse ATOM/HETATM/TER/CONECT/CRYST1 records of the first model."""
-    residues = []
-    conects = set()
-    box = None
-    seen_altloc_a = False
-    in_extra_model = False
-    for line_no, line in enumerate(text.splitlines(), start=1):
-        record_type = line[:6]
-        if record_type == "ENDMDL":
-            in_extra_model = True
-        elif record_type.startswith("MODEL") and in_extra_model:
-            logger.warning("PDB file has multiple models; only model 1 is read.")
-        elif record_type in ("ATOM  ", "HETATM") and not in_extra_model:
-            alt_loc = line[16].strip()
-            if alt_loc not in ("", "A"):
-                raise MBuildError(
-                    f"Alternate location {alt_loc!r} on line {line_no} is not "
-                    "supported. Keep only one location (altLoc blank or 'A')."
-                )
-            if alt_loc == "A" and not seen_altloc_a:
-                logger.warning("Using alternate location 'A' atoms only.")
-                seen_altloc_a = True
-            record = _PdbRecord(
-                serial=int(line[6:11]),
-                name=line[12:16].strip(),
-                alt_loc=alt_loc,
-                resname=line[17:20].strip(),
-                chain_id=line[21].strip(),
-                resnum=int(line[22:26]),
-                icode=line[26].strip(),
-                pos=np.array(
-                    [float(line[30:38]), float(line[38:46]), float(line[46:54])]
-                )
-                / 10.0,
-                element=line[76:78].strip(),
-                hetatm=record_type == "HETATM",
-                line_no=line_no,
-            )
-            key = (record.resname, record.chain_id, record.resnum, record.icode)
-            if not residues or key != (
-                residues[-1].resname,
-                residues[-1].chain_id,
-                residues[-1].resnum,
-                residues[-1].icode,
-            ):
-                residues.append(
-                    _PdbResidue(
-                        resname=record.resname,
-                        chain_id=record.chain_id,
-                        resnum=record.resnum,
-                        icode=record.icode,
-                    )
-                )
-            residues[-1].records.append(record)
-        elif record_type.startswith("TER") and residues:
-            residues[-1].ter_after = True
-        elif record_type == "CONECT":
-            fields = [line[start : start + 5].strip() for start in (6, 11, 16, 21, 26)]
-            serials = [int(value) for value in fields if value]
-            for partner in serials[1:]:
-                conects.add(frozenset((serials[0], partner)))
-        elif record_type == "CRYST1":
-            lengths = (
-                float(line[6:15]) / 10.0,
-                float(line[15:24]) / 10.0,
-                float(line[24:33]) / 10.0,
-            )
-            angles = (float(line[33:40]), float(line[40:47]), float(line[47:54]))
-            if any(length > 0.2 for length in lengths):
-                box = Box(lengths=lengths, angles=angles)
-    if not residues:
-        raise MBuildError("No ATOM or HETATM records found in the PDB file.")
-    return residues, conects, box
 
 
 def _match_residue(group, variants, prior_possible, posterior_possible):
@@ -1444,122 +1156,9 @@ class Protein(Compound):
         overwrite : bool, optional, default=False
             Overwrite the file if it exists.
         """
-        import os
+        from mbuild.biopolymers.protein_pdb_io import write_pdb
 
-        if os.path.exists(filename) and not overwrite:
-            raise IOError(f"{filename} exists; not overwriting")
-
-        lines = []
-        if self.box is not None:
-            a, b, c = (length * 10.0 for length in self.box.lengths)
-            alpha, beta, gamma = self.box.angles
-            lines.append(
-                f"CRYST1{a:9.3f}{b:9.3f}{c:9.3f}"
-                f"{alpha:7.2f}{beta:7.2f}{gamma:7.2f} P 1           1"
-            )
-
-        serial = 0
-        particle_serial = {}
-        particle_residue = {}
-        residue_order = {}
-        for chain in self.chains:
-            residue = None
-            # Residues are written sorted by number: template readers form
-            # polymer links only between record-adjacent residues, so
-            # backbone order in the file must follow residue numbers,
-            # not attachment order.
-            for residue in sorted(
-                self.residues(chain.chain_id),
-                key=lambda res: (res.resnum, res.icode),
-            ):
-                residue_order[id(residue)] = len(residue_order)
-                if residue.resnum > 9999:
-                    raise MBuildError(
-                        "PDB residue numbers larger than 9999 are not supported."
-                    )
-                for particle in residue.particles():
-                    serial += 1
-                    if serial > 99999:
-                        raise MBuildError(
-                            "PDB atom serials larger than 99999 are not supported."
-                        )
-                    particle_serial[particle] = serial
-                    particle_residue[particle] = residue
-                    lines.append(
-                        self._pdb_atom_line(serial, particle, residue, chain.chain_id)
-                    )
-            if residue is not None:
-                serial += 1
-                lines.append(
-                    f"TER   {serial:5d}      {residue.name:<3s} "
-                    f"{chain.chain_id or ' ':1s}{residue.resnum:4d}"
-                    f"{residue.icode or ' ':1s}"
-                )
-
-        for line in self._conect_lines(
-            particle_serial, particle_residue, residue_order
-        ):
-            lines.append(line)
-        lines.append("END")
-
-        with open(filename, "w") as handle:
-            handle.write("\n".join(lines) + "\n")
-
-    @staticmethod
-    def _pdb_atom_line(serial, particle, residue, chain_id):
-        record = "HETATM" if residue.hetatm else "ATOM  "
-        name = particle.name
-        # PDB alignment: names shorter than 4 characters are right-shifted
-        # by one column (element starts in column 14).
-        name_field = name.center(4) if len(name) >= 4 else f" {name:<3s}"
-        x, y, z = particle.pos * 10.0
-        element = particle.element.symbol.upper() if particle.element else ""
-        return (
-            f"{record}{serial:5d} {name_field[:4]} {residue.name:<3.3s} "
-            f"{chain_id or ' ':1.1s}{residue.resnum:4d}{residue.icode or ' ':1.1s}"
-            f"   {x:8.3f}{y:8.3f}{z:8.3f}{1.0:6.2f}{0.0:6.2f}"
-            f"          {element:>2.2s}"
-        )
-
-    def _conect_lines(self, particle_serial, particle_residue, residue_order):
-        """Yield CONECT lines, following the RCSB convention.
-
-        Every bond that touches a HETATM residue is listed, because PDB
-        viewers (e.g. PyMOL) treat CONECT records as the complete bond
-        list for HETATM atoms and skip distance-based perception for
-        them. Bonds between different ATOM residues are listed too
-        (disulfides), except peptide bonds, which residue adjacency
-        implies. Strict template readers accept these records because
-        their residue definitions predict all of them.
-        """
-        partners = {}
-        for particle1, particle2 in self.bonds():
-            residue1 = particle_residue.get(particle1)
-            residue2 = particle_residue.get(particle2)
-            if residue1 is None or residue2 is None:
-                continue
-            if residue1 is residue2:
-                if not residue1.hetatm:
-                    continue
-            elif not (residue1.hetatm or residue2.hetatm):
-                adjacent = (
-                    abs(residue_order[id(residue1)] - residue_order[id(residue2)]) == 1
-                )
-                if adjacent and {particle1.name, particle2.name} == {"C", "N"}:
-                    continue  # implied peptide bond
-            serial1 = particle_serial[particle1]
-            serial2 = particle_serial[particle2]
-            partners.setdefault(serial1, []).append(serial2)
-            partners.setdefault(serial2, []).append(serial1)
-        for serial in sorted(partners):
-            bonded = sorted(partners[serial])
-            for start in range(0, len(bonded), 4):
-                chunk = bonded[start : start + 4]
-                yield (
-                    "CONECT"
-                    + f"{serial:5d}"
-                    + "".join(f"{other:5d}" for other in chunk)
-                )
+        write_pdb(self, filename, overwrite=overwrite)
 
     def bond_records(self):
         """Return one plain dict per recorded inter-residue bond.
