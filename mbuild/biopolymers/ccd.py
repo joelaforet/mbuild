@@ -8,8 +8,8 @@ mBuild Compounds.
 The data model follows the practice of residue-template readers,
 inspired by and verified to be compatible with openff-pablo
 (https://github.com/openforcefield/openff-pablo), so that a protein
-loaded and modified with mBuild round-trips through such tools without
-translation. In particular:
+loaded into and modified by mBuild can be exported to software that can
+assign parameters. In particular:
 
 - Each atom carries a ``leaving`` flag. Leaving atoms are the atoms that
   are absent from a PDB file when the corresponding inter-residue bond
@@ -27,9 +27,10 @@ Attribution: the ``_ACIDIC_PROTONS``, ``_BASIC_ATOMS``, and
 histidine-tautomer patch semantics are derived from openff-pablo
 (https://github.com/openforcefield/openff-pablo, MIT license, (c) Open
 Force Field Initiative). They are mirrored here, rather than imported,
-so that mBuild carries no OpenFF dependency. If a shared, dependency-free
-residue-definition package emerges upstream, this mirror should be
-replaced by it. ``test_biopolymers.py`` contains a parity test that runs
+so that mBuild carries no OpenFF dependency. 
+JRL: It may make sense for someone to make a small package for these "protein residue definitions"
+that are used broadly in the comp chem ecosystem. If such a thing were to exist, then
+this module should be replaced by it. ``test_biopolymers.py`` contains a parity test that runs
 whenever openff-pablo is importable, to catch drift between the two.
 """
 
