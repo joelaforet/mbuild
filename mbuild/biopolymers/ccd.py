@@ -25,13 +25,42 @@ openff-pablo vendors.
 Attribution: the ``_ACIDIC_PROTONS``, ``_BASIC_ATOMS``, and
 ``_ATOM_NAME_SYNONYMS`` tables and the protonation-variant, caps, and
 histidine-tautomer patch semantics are derived from openff-pablo
-(https://github.com/openforcefield/openff-pablo, MIT license, (c) Open
-Force Field Initiative). They are mirrored here, rather than imported,
-so that mBuild carries no OpenFF dependency. If a shared, dependency-free
-residue-definition package emerges upstream, this mirror should be
-replaced by it. ``test_biopolymers.py`` contains a parity test that runs
-whenever openff-pablo is importable, to catch drift between the two.
+(https://github.com/openforcefield/openff-pablo, MIT license,
+Copyright (c) 2025 Josh Mitchell). They are mirrored here, rather than
+imported, so that mBuild carries no OpenFF dependency. If a shared,
+dependency-free residue-definition package emerges upstream, this
+mirror should be replaced by it. ``test_biopolymers.py`` contains a
+parity test that runs whenever openff-pablo is importable, to catch
+drift between the two. The full openff-pablo license notice is below.
 """
+
+# Portions of this module are derived from openff-pablo
+# (https://github.com/openforcefield/openff-pablo), which carries this
+# license:
+#
+# MIT License
+#
+# Copyright (c) 2025 Josh Mitchell
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to
+# the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 import functools
 import itertools
