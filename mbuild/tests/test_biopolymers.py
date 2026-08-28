@@ -94,7 +94,9 @@ class TestCCDLibrary(BaseTest):
         # and bond orders. This is needed because the tables and patch
         # semantics in ccd.py are mirrored from pablo (see the module
         # docstring), and silent drift between the two would break the
-        # PDB round trip this recipe exists for. The test compares the
+        # handoff this recipe exists for: mBuild builds the modified
+        # coordinates, and a residue-template reader such as
+        # openff-pablo reads the written PDB. The test compares the
         # base variant of every bundled amino acid field by field, and
         # runs only where openff-pablo is installed.
         pablo = pytest.importorskip("openff.pablo")
@@ -268,12 +270,13 @@ class TestCCDLibrary(BaseTest):
         assert protein.bond_graph.has_edge(first, second)
 
     def test_save_pdb_roundtrip(self, tmp_path):
-        # Tests that save_pdb writes a PDB that the strict loader reads
-        # back with identical structure and chemistry. This is needed
-        # because the written file is the handoff artifact to OpenFF
-        # Pablo, whose reader shares this loader's matching rules. The
-        # test writes and reloads the protein, compares counts and net
-        # charge, and checks the fixed-column layout of one atom line.
+        # Tests that a PDB loaded into mBuild, written out by save_pdb,
+        # and read back into mBuild gives the same structure and
+        # chemistry. This is needed because the written file is the
+        # handoff artifact for residue-template readers, which apply
+        # the same matching rules as Protein. The test writes and
+        # reloads the protein, compares counts and net charge, and
+        # checks the fixed-column layout of one atom line.
         protein = Protein(get_fn("6m03_protonated.pdb"))
         out = tmp_path / "roundtrip.pdb"
         protein.save_pdb(str(out))
@@ -405,9 +408,11 @@ class TestCCDLibrary(BaseTest):
         out = tmp_path / "acetylated.pdb"
         protein.save_pdb(str(out))
 
-        # Downstream glue: format the neutral record into pablo's
-        # with_crosslink vocabulary (this formatting lives outside
-        # mBuild by design).
+        # bond_records() reports each attachment as residue names,
+        # atom names, removed (leaving) atoms, and bond order. The
+        # test reformats one record into the arguments of pablo's
+        # with_crosslink: the step a user performs to load the
+        # modified PDB with its full chemistry.
         (record,) = protein.bond_records()
         spec = {
             "residues": list(record["residue_names"]),
