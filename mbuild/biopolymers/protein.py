@@ -592,11 +592,7 @@ class Protein(Compound):
         from gmso.abc.abstract_site import Residue as GMSOResidue
 
         topology = super().to_gmso(**kwargs)
-        particle_residue = {}
-        for chain in self.chains:
-            for residue in self.residues(chain.chain_id):
-                for particle in residue.particles():
-                    particle_residue[particle] = residue
+        particle_residue = self._particle_residues()
         particles = [p for p in self.particles() if not p.port_particle]
         sites = list(topology.sites)
         if len(sites) != len(particles) or any(
@@ -607,8 +603,9 @@ class Protein(Compound):
                 "protein's particles; cannot restore residue identity."
             )
         for site, particle in zip(sites, particles):
-            residue = particle_residue.get(particle)
-            if residue is not None:
+            entry = particle_residue.get(particle)
+            if entry is not None:
+                _, residue = entry
                 site.residue = GMSOResidue(name=residue.name, number=residue.resnum)
         return topology
 
@@ -626,13 +623,7 @@ class Protein(Compound):
 
         editable = Chem.RWMol()
         particle_index = {}
-        particle_residue = {}
-        chain_of = {}
-        for chain in self.chains:
-            for residue in self.residues(chain.chain_id):
-                for particle in residue.particles():
-                    particle_residue[particle] = residue
-                    chain_of[particle] = chain.chain_id
+        particle_residue = self._particle_residues()
         particles = [p for p in self.particles() if not p.port_particle]
         orphans = [p for p in particles if p not in particle_residue]
         if orphans:
@@ -644,7 +635,7 @@ class Protein(Compound):
                 "onto the Protein."
             )
         for particle in particles:
-            residue = particle_residue[particle]
+            chain_id, residue = particle_residue[particle]
             atom = Chem.Atom(particle.element.atomic_number)
             atom.SetFormalCharge(residue.atom_formal_charges.get(particle.name, 0))
             atom.SetNoImplicit(True)
@@ -656,7 +647,7 @@ class Protein(Compound):
             )
             info.SetResidueName(residue.name)
             info.SetResidueNumber(residue.resnum)
-            info.SetChainId(chain_of[particle] or " ")
+            info.SetChainId(chain_id or " ")
             info.SetInsertionCode(residue.icode or " ")
             info.SetIsHeteroAtom(residue.hetatm)
             atom.SetPDBResidueInfo(info)
@@ -1162,6 +1153,20 @@ class Protein(Compound):
     def net_formal_charge(self):
         """Return the summed formal charge of all residues."""
         return sum(residue.formal_charge for residue in self.residues())
+
+    def _particle_residues(self):
+        """Return a map of particle -> (chain_id, residue).
+
+        The chemistry exports resolve each particle's residue through
+        this one map, so the traversal rules (recursive fragment
+        residues) stay in ``residues()`` alone.
+        """
+        mapping = {}
+        for chain in self.chains:
+            for residue in self.residues(chain.chain_id):
+                for particle in residue.particles():
+                    mapping[particle] = (chain.chain_id, residue)
+        return mapping
 
     # ------------------------------------------------------------------
     # Export
