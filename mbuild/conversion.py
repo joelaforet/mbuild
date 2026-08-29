@@ -852,8 +852,7 @@ def from_rdkit(rdkit_mol, compound=None, coords_only=False, smiles_seed=0):
         params.useRandomCoords = True
         params.randomSeed = smiles_seed
         logger.info(
-            "Default RDKit embedding failed; retrying with random "
-            "initial coordinates."
+            "Default RDKit embedding failed; retrying with random initial coordinates."
         )
         if AllChem.EmbedMolecule(mymol, params) != 0:
             raise MBuildError(

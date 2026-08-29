@@ -969,11 +969,7 @@ class Protein(Compound):
         old_ports = {p for p in residue.children if isinstance(p, Port)}
         root.remove(hydrogens)
         root.remove(
-            [
-                p
-                for p in residue.children
-                if isinstance(p, Port) and p not in old_ports
-            ]
+            [p for p in residue.children if isinstance(p, Port) and p not in old_ports]
         )
         return Port(anchor=atom, orientation=orientation, separation=separation / 2)
 
