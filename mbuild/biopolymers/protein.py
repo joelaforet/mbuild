@@ -1316,8 +1316,8 @@ class Protein(Compound):
         """Return ``count`` hydrogens bonded to the atom (sorted by name).
 
         One hydrogen leaves per unit of bond order. Reactions that
-        remove other leaving groups (e.g. condensations) are the domain
-        of future reaction recipes built on top of ``attach``.
+        remove other leaving groups (e.g. condensations) belong in
+        future reaction recipes that use ``attach``.
         """
         if not 1 <= count <= 3:
             raise MBuildError(f"bond_order must be 1, 2, or 3; you passed {count}.")
@@ -1500,7 +1500,7 @@ class Protein(Compound):
 
     @staticmethod
     def _atom_of(residue, atom_name):
-        """Return the named atom of a residue already in hand, or raise."""
+        """Return the named atom of the given residue, or raise."""
         particle = _atom_in_residue(residue, atom_name)
         if particle is None:
             raise MBuildError(

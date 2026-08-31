@@ -377,7 +377,7 @@ class TestCompound(BaseTest):
     def test_load_smiles_embed_fallback(self):
         # Tests that SMILES loading falls back to random initial
         # coordinates when RDKit's default embedding fails. This is
-        # needed because default ETKDG gives up on some large branched
+        # needed because default ETKDG fails for some large branched
         # molecules (e.g. glycans), and loading used to raise instead of
         # retrying. The test loads a three-branch oligosaccharide that
         # fails default embedding and checks the compound is built.
