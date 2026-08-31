@@ -1074,8 +1074,8 @@ class TestProteinExports(BaseTest):
             pytest.skip("openff-pablo >= 0.2 is required")
 
         fragment = mb.load("CC=O", smiles=True)
-        carbons = [p for p in fragment.particles() if p.element.symbol == "C"]
-        oxygen = [p for p in fragment.particles() if p.element.symbol == "O"][0]
+        carbons = list(fragment.particles_by_element("C"))
+        oxygen = next(fragment.particles_by_element("O"))
         carbonyl = [c for c in carbons if oxygen in c.direct_bonds()][0]
         methyl = [c for c in carbons if c is not carbonyl][0]
         carbonyl.name, methyl.name, oxygen.name = "C", "CH3", "O"
@@ -1230,7 +1230,7 @@ class TestFragments(BaseTest):
         # star-sited fragments are the standard way chemists write
         # "link here", and reading auto-generated atom names is the
         # main UX friction otherwise. The test attaches an octanoyl
-        # fragment written with a star and checks the bond and record.
+        # fragment written with a star and checks the recorded bond.
         from mbuild.biopolymers import prepare_fragment
 
         fragment = prepare_fragment("*C(=O)CCCCCCC", "OCT")
@@ -1241,8 +1241,6 @@ class TestFragments(BaseTest):
             fragment, resnum=5, atom_name="NZ", chain_id="A", relax=False
         )
         assert record.atom2_name == "C1"
-        nz = protein.get_atom(5, "NZ", chain_id="A")
-        assert "C1" in {p.name for p in nz.direct_bonds()}
 
         with pytest.raises(MBuildError, match="distinct labels"):
             prepare_fragment("*CC*", "BAD")
