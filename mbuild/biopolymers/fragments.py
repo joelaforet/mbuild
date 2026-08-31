@@ -205,6 +205,9 @@ def fragment_from_sdf(filename, resname):
             f"{filename} has implicit hydrogens; write the SDF with all "
             "hydrogens explicit."
         )
+    # Stricter than the map in conversion.py by intent: the core map
+    # accepts UNSPECIFIED as 0.0, but this loader needs real bond
+    # orders and raises on any other bond type below.
     orders = {
         Chem.BondType.SINGLE: 1.0,
         Chem.BondType.DOUBLE: 2.0,
