@@ -765,7 +765,7 @@ class Protein(Compound):
             box=box,
         )
 
-    def to_rdkit(self):
+    def to_rdkit(self, embed=False):
         """Create a sanitized RDKit molecule of the (modified) protein.
 
         Unlike the generic ``Compound.to_rdkit``, this export carries
@@ -774,7 +774,21 @@ class Protein(Compound):
         one conformer, and PDB residue info on every atom. The result
         sanitizes, so it is directly usable by RDKit and by tools that
         consume RDKit molecules.
+
+        Parameters
+        ----------
+        embed : bool, optional, default=False
+            Accepted for compatibility with ``Compound.to_rdkit``
+            (``Compound.volume`` passes ``embed=True``). The value is
+            ignored: the molecule always carries one conformer with the
+            protein's real coordinates, and a new embedding would
+            replace them with generated ones.
         """
+        if embed:
+            logger.debug(
+                "Protein.to_rdkit ignores embed=True: the export always "
+                "carries the protein's real coordinates."
+            )
         rdkit = import_("rdkit")  # noqa: F841
         from rdkit import Chem
 

@@ -922,3 +922,21 @@ class TestDisulfidesAndFixesA(BaseTest):
 
         topology = protein.to_trajectory().topology
         assert len(list(topology.residues)) == 306
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_volume_runs_through_to_rdkit(self):
+        # Tests that Compound.volume() works on a Protein and returns a
+        # positive float. This is needed because volume() calls
+        # to_rdkit(embed=True), and the Protein override did not accept
+        # the embed keyword, so volume() raised TypeError. The override
+        # must accept and ignore embed, because the export already
+        # carries the real coordinates. The test computes the volume of
+        # a small disulfide peptide. Compound.volume references
+        # Chem.AllChem without importing the submodule, so the test
+        # imports it first; a fix there belongs to core mBuild, which
+        # this recipe does not modify.
+        from rdkit.Chem import AllChem  # noqa: F401
+
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        volume = protein.volume()
+        assert isinstance(volume, float) and volume > 0.0
