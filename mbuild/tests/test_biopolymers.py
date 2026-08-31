@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 import mbuild as mb
@@ -269,7 +271,7 @@ class TestProtein(BaseTest):
         }
         assert orders == {1.0, 2.0}
 
-    def test_load_strict_errors(self, tmp_path):
+    def test_load_strict_errors(self):
         # Tests that the loader fails loudly, with the residue named in
         # the message, on a bad atom name and on an unknown residue code.
         # This is needed because the loader must never guess chemistry:
@@ -278,12 +280,12 @@ class TestProtein(BaseTest):
         # one residue name of the good asset and asserts on the errors.
         text = open(get_fn("6m03_protonated.pdb")).read()
 
-        bad_atom = tmp_path / "bad_atom.pdb"
+        bad_atom = Path("bad_atom.pdb")
         bad_atom.write_text(text.replace(" CB  SER A   1", " QQ  SER A   1", 1))
         with pytest.raises(MBuildError, match="SER A:1"):
             Protein(str(bad_atom))
 
-        bad_residue = tmp_path / "bad_residue.pdb"
+        bad_residue = Path("bad_residue.pdb")
         bad_residue.write_text(text.replace("SER A   1", "XYZ A   1"))
         with pytest.raises(MBuildError, match="download=True"):
             Protein(str(bad_residue))
@@ -616,7 +618,7 @@ class TestProtein(BaseTest):
         assert protein.bond_graph.has_edge(sg1, sg2)
         assert isinstance(record.residue1.parent, Chain)
 
-    def test_disulfides_8ciq(self, tmp_path):
+    def test_disulfides_8ciq(self):
         # Tests that a protein with three disulfides loads all three
         # cross bonds and keeps them through a save_pdb round trip. This
         # is needed because the written PDB is the handoff artifact for
@@ -626,12 +628,12 @@ class TestProtein(BaseTest):
         # cross-bond counts.
         protein = Protein(get_fn("8ciq.pdb"))
         assert len(protein.cross_bonds) == 3
-        out = tmp_path / "8ciq_roundtrip.pdb"
+        out = Path("8ciq_roundtrip.pdb")
         protein.save_pdb(str(out))
         reloaded = Protein(str(out))
         assert len(reloaded.cross_bonds) == 3
 
-    def test_bare_thiolate_loads_without_conect(self, tmp_path):
+    def test_bare_thiolate_loads_without_conect(self):
         # Tests that a cysteine without HG and without an SS CONECT
         # loads as a deprotonated thiolate, not as an error. This is
         # needed because the CONECT-aware filter must reject only the
@@ -641,7 +643,7 @@ class TestProtein(BaseTest):
         # carry no HG) and checks the charges and the empty cross-bond
         # list.
         text = open(get_fn("3cu9_vicinal_disulfide.pdb")).read()
-        stripped = tmp_path / "thiolate.pdb"
+        stripped = Path("thiolate.pdb")
         stripped.write_text(
             "\n".join(
                 line for line in text.splitlines() if not line.startswith("CONECT")
@@ -652,7 +654,7 @@ class TestProtein(BaseTest):
         for residue in protein.residues():
             assert residue.atom_formal_charges["SG"] == -1
 
-    def test_ss_conect_with_hg_present_errors(self, tmp_path):
+    def test_ss_conect_with_hg_present_errors(self):
         # Tests that an SS CONECT to a cysteine that still carries its
         # HG raises an error that names the disulfide conflict. This is
         # needed because the loader must never guess: the file claims a
@@ -670,7 +672,7 @@ class TestProtein(BaseTest):
             index for index, line in enumerate(lines) if line.startswith("CONECT")
         )
         lines.insert(insert_at, hg_line)
-        bad = tmp_path / "hg_present.pdb"
+        bad = Path("hg_present.pdb")
         bad.write_text("\n".join(lines))
         with pytest.raises(MBuildError, match="signals a disulfide"):
             Protein(str(bad))
@@ -716,7 +718,7 @@ class TestProtein(BaseTest):
 
 
 class TestProteinExports(BaseTest):
-    def test_save_pdb_roundtrip(self, protein_6m03, tmp_path):
+    def test_save_pdb_roundtrip(self, protein_6m03):
         # Tests that a PDB loaded into mBuild, written out by save_pdb,
         # and read back into mBuild gives the same structure and
         # chemistry. This is needed because the written file is the
@@ -725,7 +727,7 @@ class TestProteinExports(BaseTest):
         # reloads the protein, compares counts and net charge, and
         # checks the fixed-column layout of one atom line.
         protein = protein_6m03
-        out = tmp_path / "roundtrip.pdb"
+        out = Path("roundtrip.pdb")
         protein.save_pdb(str(out))
         reloaded = Protein(str(out))
         assert reloaded.n_particles == protein.n_particles
@@ -746,7 +748,7 @@ class TestProteinExports(BaseTest):
             protein.save_pdb(str(out))
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_save_pdb_orders_residues_by_number(self, protein_6m03, acetone, tmp_path):
+    def test_save_pdb_orders_residues_by_number(self, protein_6m03, acetone):
         # Tests that save_pdb writes residues sorted by residue number
         # inside each chain, even when attachments happened in a
         # different order. This is needed because Pablo forms polymer
@@ -777,7 +779,7 @@ class TestProteinExports(BaseTest):
         ).residue2
         first.resnum, second.resnum = 308, 307
 
-        out = tmp_path / "ordered.pdb"
+        out = Path("ordered.pdb")
         protein.save_pdb(str(out))
         hetero_resnames = []
         for line in out.read_text().splitlines():
@@ -787,7 +789,7 @@ class TestProteinExports(BaseTest):
                     hetero_resnames.append(name)
         assert hetero_resnames == ["AC2", "AC1"]
 
-    def test_save_pdb_rejects_orphan_atoms(self, protein_6m03, tmp_path):
+    def test_save_pdb_rejects_orphan_atoms(self, protein_6m03):
         # Tests that save_pdb raises on a particle outside a
         # Chain -> Residue path. This is needed because the writer walks
         # protein.chains, so such a particle and its bonds would be
@@ -800,10 +802,10 @@ class TestProteinExports(BaseTest):
         protein.add(carbon)
         protein.add_bond((carbon, protein.get_atom(5, "NZ", chain_id="A")))
         with pytest.raises(MBuildError, match="must belong to a Residue"):
-            protein.save_pdb(str(tmp_path / "orphan.pdb"))
+            protein.save_pdb("orphan.pdb")
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_modified_protein_export(self, protein_6m03, acetone, tmp_path):
+    def test_modified_protein_export(self, protein_6m03, acetone):
         # Tests that an attached fragment exports as HETATM records with
         # a CONECT for the new bond, and that bond_records() describes
         # the modification completely and neutrally. This is needed
@@ -823,7 +825,7 @@ class TestProteinExports(BaseTest):
             fragment_resname="XCT",
             relax=False,
         )
-        out = tmp_path / "modified.pdb"
+        out = Path("modified.pdb")
         protein.save_pdb(str(out))
 
         lines = out.read_text().splitlines()
@@ -873,7 +875,7 @@ class TestProteinExports(BaseTest):
             }
         ]
 
-    def test_reverse_nc_bond_gets_conect(self, protein_6m03, tmp_path):
+    def test_reverse_nc_bond_gets_conect(self, protein_6m03):
         # Tests that a bond from N of a residue to C of the next residue
         # gets a CONECT record. This is needed because the writer used
         # to suppress every C/N bond between order-adjacent residues,
@@ -887,7 +889,7 @@ class TestProteinExports(BaseTest):
         n10 = protein.get_atom(10, "N", chain_id="A")
         c11 = protein.get_atom(11, "C", chain_id="A")
         protein.add_bond((n10, c11))
-        out = tmp_path / "reverse.pdb"
+        out = Path("reverse.pdb")
         protein.save_pdb(str(out))
 
         lines = out.read_text().splitlines()
@@ -905,7 +907,7 @@ class TestProteinExports(BaseTest):
         expected = (serial_of[(10, "N")], serial_of[(11, "C")])
         assert expected in pairs and expected[::-1] in pairs
 
-    def test_peptide_bonds_write_no_conect(self, protein_6m03, tmp_path):
+    def test_peptide_bonds_write_no_conect(self, protein_6m03):
         # Tests that an unmodified protein writes zero CONECT records.
         # This is needed because strict template readers fail on a
         # CONECT their residue definitions cannot explain, so the
@@ -913,12 +915,12 @@ class TestProteinExports(BaseTest):
         # link after the direction-aware fix. The test writes the
         # loaded fixture and counts CONECT lines.
         protein = protein_6m03
-        out = tmp_path / "plain.pdb"
+        out = Path("plain.pdb")
         protein.save_pdb(str(out))
         lines = out.read_text().splitlines()
         assert sum(line.startswith("CONECT") for line in lines) == 0
 
-    def test_save_routes_pdb(self, protein_6m03, tmp_path):
+    def test_save_routes_pdb(self, protein_6m03):
         # Tests that the canonical save() verb writes a correct PDB via
         # save_pdb, and that to_parmed keeps the residue partitioning.
         # This is needed because the generic ParmEd path silently wrote
@@ -926,7 +928,7 @@ class TestProteinExports(BaseTest):
         # identity without any warning. The test saves through save()
         # and checks residue fields, then counts ParmEd residues.
         protein = protein_6m03
-        out = tmp_path / "routed.pdb"
+        out = Path("routed.pdb")
         protein.save(str(out))
         first = next(
             line for line in out.read_text().splitlines() if line.startswith("ATOM")
@@ -941,11 +943,11 @@ class TestProteinExports(BaseTest):
         # route must still carry the residue partitioning.
         import parmed
 
-        mol2 = tmp_path / "routed.mol2"
+        mol2 = Path("routed.mol2")
         protein.save(str(mol2), overwrite=True)
         assert len(parmed.load_file(str(mol2), structure=True).residues) == 306
 
-    def test_gmso_routed_save_and_trajectory_keep_residues(self, protein_6m03, tmp_path):
+    def test_gmso_routed_save_and_trajectory_keep_residues(self, protein_6m03):
         # Tests that a GMSO-routed save (.gro) and to_trajectory keep
         # the per-residue partitioning. This is needed because
         # conversion.save calls the module-level to_gmso and the generic
@@ -954,7 +956,7 @@ class TestProteinExports(BaseTest):
         # .gro file and checks the residue columns, then builds an
         # mdtraj topology and counts its residues.
         protein = protein_6m03
-        out = tmp_path / "identity.gro"
+        out = Path("identity.gro")
         protein.save(str(out))
         atom_lines = out.read_text().splitlines()[2 : 2 + protein.n_particles]
         first = atom_lines[0]
@@ -1055,7 +1057,7 @@ class TestProteinExports(BaseTest):
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     @pytest.mark.skipif(not has_openff_pablo, reason="openff-pablo is not installed")
-    def test_pablo_pipeline_integration(self, protein_6m03, tmp_path):
+    def test_pablo_pipeline_integration(self, protein_6m03):
         # Tests the full handoff: attach a CCD-named fragment, write the
         # prepared PDB, and load it through openff-pablo with the
         # crosslink spec mBuild recorded. This is needed because the
@@ -1093,7 +1095,7 @@ class TestProteinExports(BaseTest):
             fragment_resname="ACE",
             relax=False,
         )
-        out = tmp_path / "acetylated.pdb"
+        out = Path("acetylated.pdb")
         protein.save_pdb(str(out))
 
         # bond_records() reports each attachment as residue names,
@@ -1193,7 +1195,7 @@ class TestFragments(BaseTest):
         assert eth.link_atoms and set(eth.link_atoms.values()) <= eth_names
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_fragment_from_sdf(self, tmp_path):
+    def test_fragment_from_sdf(self):
         # Tests that an SDF fragment loads with explicit bond orders,
         # elements, and coordinates, as a named Residue. This is needed
         # because SDF is the rich fragment format that, unlike PDB,
@@ -1207,7 +1209,7 @@ class TestFragments(BaseTest):
 
         rdmol = Chem.AddHs(Chem.MolFromSmiles("CC(C)=O"))
         AllChem.EmbedMolecule(rdmol, randomSeed=3)
-        path = tmp_path / "acetone.sdf"
+        path = Path("acetone.sdf")
         Chem.SDWriter(str(path)).write(rdmol)
 
         residue = fragment_from_sdf(str(path), "ACT")
