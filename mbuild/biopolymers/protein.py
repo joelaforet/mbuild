@@ -147,6 +147,17 @@ class _Match:
     expects_crosslink: bool
 
 
+def _chain_of(residue):
+    """Return the Chain ancestor of a residue.
+
+    A fragment residue can sit under a wrapper Compound inside its
+    Chain, so the direct parent is not always the Chain.
+    """
+    return next(
+        ancestor for ancestor in residue.ancestors() if isinstance(ancestor, Chain)
+    )
+
+
 def _atom_in_residue(residue, atom_name):
     """Return the named particle of a residue, or None.
 
@@ -1086,7 +1097,7 @@ class Protein(Compound):
         added.add(frag_port, label="attach_frag")
 
         # Renumber fragment residues into the site's chain.
-        chain = next(c for c in site_residue.ancestors() if isinstance(c, Chain))
+        chain = _chain_of(site_residue)
         next_resnum = max(r.resnum for r in self.residues(chain.chain_id)) + 1
         for offset, residue in enumerate(frag_residues):
             residue.resnum = next_resnum + offset
@@ -1329,9 +1340,11 @@ class Protein(Compound):
                 + (f" in chain {chain_id}" if chain_id else "")
             )
         if len(found) > 1:
+            # _chain_of, not parent: a wrapped fragment residue's
+            # parent is its wrapper Compound, not the Chain.
             raise MBuildError(
                 f"Residue number {resnum} is ambiguous across chains "
-                f"{[r.parent.chain_id for r in found]}; pass chain_id."
+                f"{[_chain_of(r).chain_id for r in found]}; pass chain_id."
             )
         return found[0]
 

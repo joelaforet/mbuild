@@ -940,3 +940,24 @@ class TestDisulfidesAndFixesA(BaseTest):
         protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
         volume = protein.volume()
         assert isinstance(volume, float) and volume > 0.0
+
+    def test_get_residue_ambiguity_error_names_chains(self):
+        # Tests that get_residue raises an MBuildError that lists the
+        # candidate chains when a residue number repeats across chains,
+        # even when one residue sits under a wrapper Compound inside
+        # its chain. This is needed because the old error path read
+        # residue.parent.chain_id, and a wrapped fragment residue's
+        # parent is the wrapper, so the error report itself crashed
+        # with AttributeError. The test adds a wrapped residue with a
+        # duplicate number in a second chain and asserts on the
+        # message.
+        from mbuild.biopolymers.protein import Chain, Residue
+
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        wrapper = mb.Compound(name="wrapper")
+        wrapper.add(Residue(resname="LIG", resnum=221, hetatm=True))
+        chain = Chain(chain_id="B")
+        chain.add(wrapper)
+        protein.add(chain)
+        with pytest.raises(MBuildError, match=r"chains \['A', 'B'\]"):
+            protein.get_residue(221)
