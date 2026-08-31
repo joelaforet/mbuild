@@ -134,7 +134,7 @@ class TestCCDLibrary(BaseTest):
             unmatched = set(ours.name_to_atom) - their_names
             assert not unmatched, f"{resname}: {unmatched}"
 
-    def test_load_protonated_protein(self):
+    def test_load_protonated_protein(self, protein_6m03):
         # Tests that a pdbfixer-protonated protein PDB loads by template
         # matching with full chemistry: hierarchy, per-residue formal
         # charges from the matched variants, charged termini, and a bond
@@ -143,7 +143,7 @@ class TestCCDLibrary(BaseTest):
         # guessing from the file. The test loads the bundled protonated
         # SARS-CoV-2 main protease (306 residues, net charge -4 at pH 7)
         # and checks structure and chemistry counts.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         assert [chain.chain_id for chain in protein.chains] == ["A"]
         residues = list(protein.residues())
         assert len(residues) == 306
@@ -182,20 +182,20 @@ class TestCCDLibrary(BaseTest):
         with pytest.raises(MBuildError, match="download=True"):
             Protein(str(bad_residue))
 
-    def test_get_atom(self):
+    def test_get_atom(self, protein_6m03):
         # Tests that residues and atoms are addressable by residue number
         # and atom name. This is needed because functionalization
         # workflows pick attachment sites this way (e.g. lysine NZ). The
         # test fetches a known atom and asserts the not-found error names
         # the residue's atoms.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         nz = protein.get_atom(90, "NZ", chain_id="A")
         assert nz.name == "NZ" and nz.element.symbol == "N"
         with pytest.raises(MBuildError, match="no atom"):
             protein.get_atom(90, "XX", chain_id="A")
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_attach(self):
+    def test_attach(self, protein_6m03, acetone):
         # Tests that attach() substitutes one hydrogen on each side,
         # bonds the named atoms at the requested separation, adds the
         # fragment as its own HETATM residue, and records the bond with
@@ -206,9 +206,9 @@ class TestCCDLibrary(BaseTest):
         # it also checks that an atom without hydrogens is rejected.
         import numpy as np
 
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         n_before = protein.n_particles
-        fragment = mb.load("CC(C)=O", smiles=True)
+        fragment = acetone
 
         with pytest.raises(MBuildError, match="0 bonded hydrogens"):
             protein.attach(fragment, "C2", resnum=5, atom_name="NZ", chain_id="A")
@@ -235,7 +235,7 @@ class TestCCDLibrary(BaseTest):
         assert np.isclose(np.linalg.norm(carbon.pos - nz.pos), 0.15, atol=1e-3)
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_attach_chained(self):
+    def test_attach_chained(self, protein_6m03, acetone):
         # Tests that a residue added by attach() can itself be a later
         # attachment site. This is needed because multi-residue and
         # branched structures (polymer chains, Y-shaped glycans) are
@@ -243,8 +243,8 @@ class TestCCDLibrary(BaseTest):
         # recorded without any per-residue limit. The test attaches a
         # fragment to the protein and a second fragment to the first,
         # then checks both recorded bonds and the connectivity.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
-        fragment = mb.load("CC(C)=O", smiles=True)
+        protein = protein_6m03
+        fragment = acetone
 
         protein.attach(
             fragment,
@@ -271,7 +271,7 @@ class TestCCDLibrary(BaseTest):
         second = protein.get_atom(308, "C1", chain_id="A")
         assert protein.bond_graph.has_edge(first, second)
 
-    def test_save_pdb_roundtrip(self, tmp_path):
+    def test_save_pdb_roundtrip(self, protein_6m03, tmp_path):
         # Tests that a PDB loaded into mBuild, written out by save_pdb,
         # and read back into mBuild gives the same structure and
         # chemistry. This is needed because the written file is the
@@ -279,7 +279,7 @@ class TestCCDLibrary(BaseTest):
         # the same matching rules as Protein. The test writes and
         # reloads the protein, compares counts and net charge, and
         # checks the fixed-column layout of one atom line.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         out = tmp_path / "roundtrip.pdb"
         protein.save_pdb(str(out))
         reloaded = Protein(str(out))
@@ -301,7 +301,7 @@ class TestCCDLibrary(BaseTest):
             protein.save_pdb(str(out))
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_modified_protein_export(self, tmp_path):
+    def test_modified_protein_export(self, protein_6m03, acetone, tmp_path):
         # Tests that an attached fragment exports as HETATM records with
         # a CONECT for the new bond, and that bond_records() describes
         # the modification completely and neutrally. This is needed
@@ -310,8 +310,8 @@ class TestCCDLibrary(BaseTest):
         # not get them), and downstream tools format the records into
         # their own vocabulary. The test attaches a fragment at LYS 5
         # NZ, writes the file, and checks records.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
-        fragment = mb.load("CC(C)=O", smiles=True)
+        protein = protein_6m03
+        fragment = acetone
         protein.attach(
             fragment,
             "C1",
@@ -372,7 +372,7 @@ class TestCCDLibrary(BaseTest):
         ]
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_pablo_pipeline_integration(self, tmp_path):
+    def test_pablo_pipeline_integration(self, protein_6m03, tmp_path):
         # Tests the full handoff: attach a CCD-named fragment, write the
         # prepared PDB, and load it through openff-pablo with the
         # crosslink spec mBuild recorded. This is needed because the
@@ -399,7 +399,7 @@ class TestCCDLibrary(BaseTest):
         for index, hydrogen in enumerate(methyl_hydrogens, 1):
             hydrogen.name = f"H{index}"
 
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         protein.attach(
             fragment,
             "CH3",
@@ -440,7 +440,7 @@ class TestCCDLibrary(BaseTest):
         assert "CH3" in {neighbor.name for neighbor in nz.bonded_atoms}
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_prepare_fragment(self):
+    def test_prepare_fragment(self, protein_6m03, acetone):
         # Tests that prepare_fragment returns a named Residue whose atom
         # names are final: the same names appear in the protein after
         # attach(). This is needed because callers must know the names
@@ -450,13 +450,13 @@ class TestCCDLibrary(BaseTest):
         # attaches it, and compares the name lists.
         from mbuild.biopolymers import prepare_fragment
 
-        fragment = prepare_fragment(mb.load("CC(C)=O", smiles=True), "ACT")
+        fragment = prepare_fragment(acetone, "ACT")
         names = [particle.name for particle in fragment.particles()]
         assert fragment.name == "ACT"
         assert len(set(names)) == len(names)
         assert "C1" in names
 
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         protein.attach(
             fragment, "C1", resnum=5, atom_name="NZ", chain_id="A", relax=False
         )
@@ -468,7 +468,7 @@ class TestCCDLibrary(BaseTest):
         ]
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_fragment_from_sdf(self, tmp_path):
+    def test_fragment_from_sdf(self, acetone, tmp_path):
         # Tests that an SDF fragment loads with explicit bond orders,
         # elements, and coordinates, as a named Residue. This is needed
         # because SDF is the rich fragment format that, unlike PDB,
@@ -496,7 +496,7 @@ class TestCCDLibrary(BaseTest):
         assert len(set(names)) == len(names) and "O1" in names
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_save_pdb_orders_residues_by_number(self, tmp_path):
+    def test_save_pdb_orders_residues_by_number(self, protein_6m03, acetone, tmp_path):
         # Tests that save_pdb writes residues sorted by residue number
         # inside each chain, even when attachments happened in a
         # different order. This is needed because Pablo forms polymer
@@ -505,8 +505,8 @@ class TestCCDLibrary(BaseTest):
         # middle monomer) must still export in backbone order. The test
         # attaches two fragments, swaps their numbers, and checks the
         # file order.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
-        fragment = mb.load("CC(C)=O", smiles=True)
+        protein = protein_6m03
+        fragment = acetone
         first = protein.attach(
             fragment,
             "C1",
@@ -538,7 +538,7 @@ class TestCCDLibrary(BaseTest):
         assert hetero_resnames == ["AC2", "AC1"]
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_attach_bond_order_removes_matching_hydrogens(self):
+    def test_attach_bond_order_removes_matching_hydrogens(self, protein_6m03):
         # Tests that a higher-order attach removes one hydrogen per bond
         # order unit on each side, and rejects invalid orders. This is
         # needed because removing a single hydrogen while writing a
@@ -546,7 +546,7 @@ class TestCCDLibrary(BaseTest):
         # nitrogen), which review reproduced. The test forms an
         # imine-like double bond at LYS 5 NZ and checks the hydrogen
         # count, recorded leaving atoms, and the order guard.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         fragment = mb.load("CC=O", smiles=True)
         record = protein.attach(
             fragment,
@@ -574,15 +574,15 @@ class TestCCDLibrary(BaseTest):
             )
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_clone_preserves_protein_state(self):
+    def test_clone_preserves_protein_state(self, protein_6m03, acetone):
         # Tests that clone() returns a working Protein whose library and
         # cross-bond records survive, with the records pointing at the
         # cloned residues. This is needed because packing and solvation
         # workflows clone their inputs, and a clone that loses these
         # attributes crashes later calls. The test clones a modified
         # protein and checks identity and remapping.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
-        fragment = mb.load("CC(C)=O", smiles=True)
+        protein = protein_6m03
+        fragment = acetone
         protein.attach(
             fragment,
             "C1",
@@ -600,7 +600,7 @@ class TestCCDLibrary(BaseTest):
         assert copy.net_formal_charge == protein.net_formal_charge
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_to_rdkit_carries_chemistry(self):
+    def test_to_rdkit_carries_chemistry(self, protein_6m03):
         # Tests that Protein.to_rdkit returns a sanitized molecule with
         # the correct net formal charge and PDB residue info, including
         # charges of an attached zwitterionic fragment. This is needed
@@ -612,7 +612,7 @@ class TestCCDLibrary(BaseTest):
 
         from mbuild.biopolymers import prepare_fragment
 
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         mol = protein.to_rdkit()
         assert Chem.GetFormalCharge(mol) == protein.net_formal_charge == -4
         info = mol.GetAtomWithIdx(0).GetPDBResidueInfo()
@@ -631,14 +631,14 @@ class TestCCDLibrary(BaseTest):
         with pytest.raises(MBuildError, match="belong to a Residue"):
             protein.to_rdkit()
 
-    def test_save_routes_pdb(self, tmp_path):
+    def test_save_routes_pdb(self, protein_6m03, tmp_path):
         # Tests that the canonical save() verb writes a correct PDB via
         # save_pdb, and that to_parmed keeps the residue partitioning.
         # This is needed because the generic ParmEd path silently wrote
         # one residue named RES with no chains, which loses the protein's
         # identity without any warning. The test saves through save()
         # and checks residue fields, then counts ParmEd residues.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         out = tmp_path / "routed.pdb"
         protein.save(str(out))
         first = next(
@@ -658,7 +658,7 @@ class TestCCDLibrary(BaseTest):
         protein.save(str(mol2), overwrite=True)
         assert len(parmed.load_file(str(mol2), structure=True).residues) == 306
 
-    def test_add_port_at(self):
+    def test_add_port_at(self, protein_6m03):
         # Tests add_port_at, the low-level alternative to attach(): it
         # removes bond_order hydrogens from the named atom and returns
         # a standard mBuild Port there, so a user can place a compound
@@ -667,7 +667,7 @@ class TestCCDLibrary(BaseTest):
         # the anchor and the number of remaining hydrogens.
         from mbuild.port import Port
 
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         port = protein.add_port_at(12, "NZ", chain_id="A")
         assert isinstance(port, Port)
         assert port.anchor.name == "NZ"
@@ -679,7 +679,7 @@ class TestCCDLibrary(BaseTest):
             protein.add_port_at(5, "NZ", chain_id="A", bond_order=0)
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_attach_warns_on_clashes(self, caplog):
+    def test_attach_warns_on_clashes(self, protein_6m03, caplog):
         # Tests that attaching a bulky fragment into a crowded site logs
         # a clash warning. This is needed because port alignment is
         # rigid and a fragment placed inside the protein would otherwise
@@ -687,7 +687,7 @@ class TestCCDLibrary(BaseTest):
         # triphenylmethane at a buried lysine and checks the log.
         import logging
 
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         bulky = mb.load("C(c1ccccc1)(c1ccccc1)c1ccccc1", smiles=True)
         with caplog.at_level(logging.WARNING, logger="mbuild"):
             protein.attach(
@@ -706,7 +706,7 @@ class TestCCDLibrary(BaseTest):
         not (has_hoomd and has_openmm),
         reason="relax_fragments needs mbuild.simulation (hoomd) and openmm",
     )
-    def test_relax_fragments(self):
+    def test_relax_fragments(self, protein_6m03):
         # Tests that relax_fragments() pulls a clashing attached
         # fragment out of steric overlap while the protein stays fixed.
         # This is needed because attach() places fragments rigidly, and
@@ -719,7 +719,7 @@ class TestCCDLibrary(BaseTest):
         import numpy as np
         from scipy.spatial import cKDTree
 
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         bulky = mb.load("C(c1ccccc1)(c1ccccc1)c1ccccc1", smiles=True)
         protein.attach(
             bulky,
@@ -746,7 +746,7 @@ class TestCCDLibrary(BaseTest):
         assert np.allclose([p.pos for p in others], protein_positions)
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_star_sited_fragment(self):
+    def test_star_sited_fragment(self, protein_6m03):
         # Tests that a SMILES attachment point (*) marks the fragment's
         # bond site, so attach() needs no fragment atom name, and that
         # unlabeled multiple stars are rejected. This is needed because
@@ -759,7 +759,7 @@ class TestCCDLibrary(BaseTest):
         fragment = prepare_fragment("*C(=O)CCCCCCC", "OCT")
         assert fragment.link_atoms == {"1": "C1"}
 
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         record = protein.attach(
             fragment, resnum=5, atom_name="NZ", chain_id="A", relax=False
         )
@@ -774,7 +774,7 @@ class TestCCDLibrary(BaseTest):
             protein.attach(two_sites, resnum=90, atom_name="NZ", chain_id="A")
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_to_gmso_keeps_residue_identity(self):
+    def test_to_gmso_keeps_residue_identity(self, protein_6m03):
         # Tests that the GMSO export keeps real PDB residue numbers and
         # the residue names of attached fragments. This is needed
         # because the generic converter renumbers residues per name and
@@ -785,7 +785,7 @@ class TestCCDLibrary(BaseTest):
         # and the chain label.
         from mbuild.biopolymers import prepare_fragment
 
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         fragment = prepare_fragment("*C(=O)C", "ACY")
         protein.attach(fragment, resnum=5, atom_name="NZ", chain_id="A", relax=False)
 
@@ -809,7 +809,7 @@ class TestCCDLibrary(BaseTest):
 
 
 class TestPdbWriterFixesB(BaseTest):
-    def test_save_pdb_rejects_orphan_atoms(self, tmp_path):
+    def test_save_pdb_rejects_orphan_atoms(self, protein_6m03, tmp_path):
         # Tests that save_pdb raises on a particle outside a
         # Chain -> Residue path. This is needed because the writer walks
         # protein.chains, so such a particle and its bonds would be
@@ -817,14 +817,14 @@ class TestPdbWriterFixesB(BaseTest):
         # same condition and the two exports must agree. The test adds
         # a bonded carbon directly onto the Protein and asserts the
         # orphan error.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         carbon = mb.Compound(name="CX", element="C")
         protein.add(carbon)
         protein.add_bond((carbon, protein.get_atom(5, "NZ", chain_id="A")))
         with pytest.raises(MBuildError, match="must belong to a Residue"):
             protein.save_pdb(str(tmp_path / "orphan.pdb"))
 
-    def test_reverse_nc_bond_gets_conect(self, tmp_path):
+    def test_reverse_nc_bond_gets_conect(self, protein_6m03, tmp_path):
         # Tests that a bond from N of a residue to C of the next residue
         # gets a CONECT record. This is needed because the writer used
         # to suppress every C/N bond between order-adjacent residues,
@@ -834,7 +834,7 @@ class TestPdbWriterFixesB(BaseTest):
         # by record adjacency. The test adds the reverse bond between
         # residues 10 and 11, writes the file, and asserts the CONECT
         # pair from both sides.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         n10 = protein.get_atom(10, "N", chain_id="A")
         c11 = protein.get_atom(11, "C", chain_id="A")
         protein.add_bond((n10, c11))
@@ -856,14 +856,14 @@ class TestPdbWriterFixesB(BaseTest):
         expected = (serial_of[(10, "N")], serial_of[(11, "C")])
         assert expected in pairs and expected[::-1] in pairs
 
-    def test_peptide_bonds_write_no_conect(self, tmp_path):
+    def test_peptide_bonds_write_no_conect(self, protein_6m03, tmp_path):
         # Tests that an unmodified protein writes zero CONECT records.
         # This is needed because strict template readers fail on a
         # CONECT their residue definitions cannot explain, so the
         # peptide-bond suppression must still cover every backbone
         # link after the direction-aware fix. The test writes the
         # loaded fixture and counts CONECT lines.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         out = tmp_path / "plain.pdb"
         protein.save_pdb(str(out))
         lines = out.read_text().splitlines()
@@ -1033,7 +1033,7 @@ class TestDisulfidesAndFixesA(BaseTest):
         assert frozenset(("A", "C")) in cross_chain
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_attach_without_simulation_support(self, caplog, monkeypatch):
+    def test_attach_without_simulation_support(self, protein_6m03, caplog, monkeypatch):
         # Tests that attach() returns a complete recorded bond and only
         # warns when mbuild.simulation cannot import, and that a direct
         # relax_fragments() call raises a clear error instead. This is
@@ -1046,7 +1046,7 @@ class TestDisulfidesAndFixesA(BaseTest):
         import logging
         import sys
 
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         bulky = mb.load("C(c1ccccc1)(c1ccccc1)c1ccccc1", smiles=True)
         monkeypatch.setitem(sys.modules, "mbuild.simulation", None)
         with caplog.at_level(logging.WARNING, logger="mbuild"):
@@ -1064,7 +1064,7 @@ class TestDisulfidesAndFixesA(BaseTest):
         with pytest.raises(MBuildError, match="not importable"):
             protein.relax_fragments()
 
-    def test_gmso_routed_save_and_trajectory_keep_residues(self, tmp_path):
+    def test_gmso_routed_save_and_trajectory_keep_residues(self, protein_6m03, tmp_path):
         # Tests that a GMSO-routed save (.gro) and to_trajectory keep
         # the per-residue partitioning. This is needed because
         # conversion.save calls the module-level to_gmso and the generic
@@ -1072,7 +1072,7 @@ class TestDisulfidesAndFixesA(BaseTest):
         # collapsed the protein into a single residue. The test saves a
         # .gro file and checks the residue columns, then builds an
         # mdtraj topology and counts its residues.
-        protein = Protein(get_fn("6m03_protonated.pdb"))
+        protein = protein_6m03
         out = tmp_path / "identity.gro"
         protein.save(str(out))
         atom_lines = out.read_text().splitlines()[2 : 2 + protein.n_particles]
