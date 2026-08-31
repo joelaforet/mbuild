@@ -174,11 +174,15 @@ def write_pdb(protein, filename, overwrite=False):
         # polymer links only between record-adjacent residues, so
         # backbone order in the file must follow residue numbers,
         # not attachment order.
-        for residue in sorted(
-            protein.residues(chain.chain_id),
-            key=lambda res: (res.resnum, res.icode),
+        for index, residue in enumerate(
+            sorted(
+                protein.residues(chain.chain_id),
+                key=lambda res: (res.resnum, res.icode),
+            )
         ):
-            residue_order[id(residue)] = len(residue_order)
+            # The order key holds the chain, so the peptide-bond test
+            # in _conect_lines cannot pair residues across a TER.
+            residue_order[id(residue)] = (chain.chain_id, index)
             if residue.resnum > 9999:
                 raise MBuildError(
                     "PDB residue numbers larger than 9999 are not supported."
@@ -250,9 +254,12 @@ def _conect_lines(protein, particle_serial, particle_residue, residue_order):
     viewers (e.g. PyMOL) treat CONECT records as the complete bond
     list for HETATM atoms and skip distance-based perception for
     them. Bonds between different ATOM residues are listed too
-    (disulfides), except peptide bonds, which residue adjacency
-    implies. Strict template readers accept these records because
-    their residue definitions predict all of them.
+    (disulfides), except the peptide bond, which residue adjacency
+    implies. A bond is a peptide bond only when its C atom belongs to
+    a residue and its N atom belongs to the next residue of the same
+    chain; any other C-N bond gets a CONECT record. Strict template
+    readers accept these records because their residue definitions
+    predict all of them.
     """
     partners = {}
     for particle1, particle2 in protein.bonds():
@@ -264,10 +271,15 @@ def _conect_lines(protein, particle_serial, particle_residue, residue_order):
             if not residue1.hetatm:
                 continue
         elif not (residue1.hetatm or residue2.hetatm):
-            adjacent = (
-                abs(residue_order[id(residue1)] - residue_order[id(residue2)]) == 1
-            )
-            if adjacent and {particle1.name, particle2.name} == {"C", "N"}:
+            chain1, index1 = residue_order[id(residue1)]
+            chain2, index2 = residue_order[id(residue2)]
+            if chain1 == chain2 and index2 - index1 == 1:
+                earlier, later = particle1, particle2
+            elif chain1 == chain2 and index1 - index2 == 1:
+                earlier, later = particle2, particle1
+            else:
+                earlier = later = None
+            if earlier is not None and (earlier.name, later.name) == ("C", "N"):
                 continue  # implied peptide bond
         serial1 = particle_serial[particle1]
         serial2 = particle_serial[particle2]

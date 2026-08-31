@@ -764,3 +764,48 @@ class TestPdbWriterFixesB(BaseTest):
         protein.add_bond((carbon, protein.get_atom(5, "NZ", chain_id="A")))
         with pytest.raises(MBuildError, match="must belong to a Residue"):
             protein.save_pdb(str(tmp_path / "orphan.pdb"))
+
+    def test_reverse_nc_bond_gets_conect(self, tmp_path):
+        # Tests that a bond from N of a residue to C of the next residue
+        # gets a CONECT record. This is needed because the writer used
+        # to suppress every C/N bond between order-adjacent residues,
+        # so this non-peptide bond was dropped and a reader
+        # reconstructed the wrong molecule; only the true peptide link
+        # (C of the earlier residue to N of the later one) is implied
+        # by record adjacency. The test adds the reverse bond between
+        # residues 10 and 11, writes the file, and asserts the CONECT
+        # pair from both sides.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        n10 = protein.get_atom(10, "N", chain_id="A")
+        c11 = protein.get_atom(11, "C", chain_id="A")
+        protein.add_bond((n10, c11))
+        out = tmp_path / "reverse.pdb"
+        protein.save_pdb(str(out))
+
+        lines = out.read_text().splitlines()
+        serial_of = {
+            (int(line[22:26]), line[12:16].strip()): int(line[6:11])
+            for line in lines
+            if line.startswith("ATOM")
+        }
+        pairs = {
+            (int(line[6:11]), partner)
+            for line in lines
+            if line.startswith("CONECT")
+            for partner in map(int, line[11:].split())
+        }
+        expected = (serial_of[(10, "N")], serial_of[(11, "C")])
+        assert expected in pairs and expected[::-1] in pairs
+
+    def test_peptide_bonds_write_no_conect(self, tmp_path):
+        # Tests that an unmodified protein writes zero CONECT records.
+        # This is needed because strict template readers fail on a
+        # CONECT their residue definitions cannot explain, so the
+        # peptide-bond suppression must still cover every backbone
+        # link after the direction-aware fix. The test writes the
+        # loaded fixture and counts CONECT lines.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        out = tmp_path / "plain.pdb"
+        protein.save_pdb(str(out))
+        lines = out.read_text().splitlines()
+        assert sum(line.startswith("CONECT") for line in lines) == 0
