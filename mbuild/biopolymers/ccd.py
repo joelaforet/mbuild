@@ -26,7 +26,7 @@ Attribution: the ``_ACIDIC_PROTONS``, ``_BASIC_ATOMS``, and
 ``_ATOM_NAME_SYNONYMS`` tables and the protonation-variant, caps, and
 histidine-tautomer patch semantics are derived from openff-pablo
 (https://github.com/openforcefield/openff-pablo, MIT license,
-Copyright (c) 2025 Josh Mitchell). They are mirrored here, rather than
+Copyright (c) 2025 Ashley Mitchell). They are mirrored here, rather than
 imported, so that mBuild carries no OpenFF dependency. If a shared,
 dependency-free residue-definition package emerges upstream, this
 mirror should be replaced by it. ``test_biopolymers.py`` contains a
@@ -40,7 +40,7 @@ drift between the two. The full openff-pablo license notice is below.
 #
 # MIT License
 #
-# Copyright (c) 2025 Josh Mitchell
+# Copyright (c) 2025 Ashley Mitchell
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
