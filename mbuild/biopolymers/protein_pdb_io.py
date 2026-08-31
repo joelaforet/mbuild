@@ -22,7 +22,6 @@ __all__ = ["write_pdb"]
 class _PdbRecord:
     serial: int
     name: str
-    alt_loc: str
     resname: str
     chain_id: str
     resnum: int
@@ -30,7 +29,6 @@ class _PdbRecord:
     pos: np.ndarray
     element: str
     hetatm: bool
-    line_no: int
 
 
 @dataclass
@@ -73,7 +71,6 @@ def _parse_pdb(text):
             record = _PdbRecord(
                 serial=int(line[6:11]),
                 name=line[12:16].strip(),
-                alt_loc=alt_loc,
                 resname=line[17:20].strip(),
                 chain_id=line[21].strip(),
                 resnum=int(line[22:26]),
@@ -84,7 +81,6 @@ def _parse_pdb(text):
                 / 10.0,
                 element=line[76:78].strip(),
                 hetatm=record_type == "HETATM",
-                line_no=line_no,
             )
             key = (record.resname, record.chain_id, record.resnum, record.icode)
             if not residues or key != (
