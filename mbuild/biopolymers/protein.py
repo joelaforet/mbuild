@@ -745,12 +745,12 @@ class Protein(Compound):
     def to_gmso(self, **kwargs):
         """Create a GMSO topology that keeps residue identity.
 
-        The generic converter derives each site's residue from the
-        particle's direct parent, which renumbers residues per name
-        and misses fragment residues whose particles sit one level
-        deeper in the hierarchy. This override rewrites every site's
-        residue with the hierarchy's residue name and real PDB number,
-        so GMSO's residue metadata matches the structure. Chains stay
+        The generic converter numbers residues by counting the
+        occurrences of each residue name, so the numbers restart at 0
+        per name and do not match the PDB file. This override rewrites
+        every site's residue with the hierarchy's residue name and
+        real PDB number, so GMSO's residue metadata matches the
+        structure. Chains stay
         available through each site's molecule/group labels.
 
         Not carried over, because GMSO's data model has no slot for
@@ -1070,6 +1070,14 @@ class Protein(Compound):
         InterResidueBond
             The recorded bond, as appended to ``cross_bonds``.
         """
+        # fragments.py imports Residue from this module, so a top-level
+        # import of fragments here would be circular. Import inside the
+        # method instead.
+        from mbuild.biopolymers.fragments import (
+            _ensure_unique_atom_names,
+            _wrap_in_residue,
+        )
+
         bond_order = int(bond_order)
         site_residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
         site_atom = self._atom_of(site_residue, atom_name)
@@ -1085,10 +1093,10 @@ class Protein(Compound):
                 child for child in added.successors() if isinstance(child, Residue)
             ]
             if not frag_residues:
-                added = self._wrap_in_residue(added, fragment_resname)
+                added = _wrap_in_residue(added, fragment_resname)
                 frag_residues = [added]
         for residue in frag_residues:
-            self._ensure_unique_atom_names(residue)
+            _ensure_unique_atom_names(residue)
 
         if fragment_atom_name is None:
             linked = [
@@ -1269,42 +1277,6 @@ class Protein(Compound):
                 "protein fixed)."
             )
         return n_clashes
-
-    @staticmethod
-    def _wrap_in_residue(compound, fragment_resname):
-        """Wrap a plain Compound into a single Residue."""
-        resname = (fragment_resname or compound.name or "LIG")[:3].upper()
-        if not resname.isalnum():
-            resname = "LIG"
-        residue = Residue(resname=resname, resnum=1, hetatm=True)
-        residue.add(compound)
-        logger.info(f"Fragment {compound.name!r} wrapped into residue {resname!r}.")
-        return residue
-
-    @staticmethod
-    def _ensure_unique_atom_names(residue):
-        """Rename particles element+index when names repeat in a residue.
-
-        The PDB export and template matching need atom names that are
-        unique within each residue; fragments from SMILES usually name
-        every carbon "C".
-        """
-        names = [particle.name for particle in residue.particles()]
-        if len(set(names)) == len(names):
-            return
-        counters = {}
-        for particle in residue.particles():
-            symbol = (
-                particle.element.symbol.upper()
-                if particle.element is not None
-                else particle.name.upper()
-            )
-            counters[symbol] = counters.get(symbol, 0) + 1
-            particle.name = f"{symbol}{counters[symbol]}"
-        logger.info(
-            f"Renamed atoms of residue {residue.name} to element+index "
-            "names so they are unique within the residue."
-        )
 
     @staticmethod
     def _find_fragment_atom(frag_residues, atom_name, fragment_resnum):

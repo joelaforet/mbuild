@@ -12,13 +12,83 @@ import logging
 import numpy as np
 
 from mbuild import clone
-from mbuild.biopolymers.protein import Protein, Residue
+from mbuild.biopolymers.protein import Residue
+from mbuild.bond_graph import BondGraph
 from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["fragment_from_sdf", "fragment_from_smiles", "prepare_fragment"]
+
+
+def _wrap_in_residue(compound, fragment_resname):
+    """Wrap a detached Compound into a single flat Residue.
+
+    The compound's particles become direct children of the new
+    Residue, and each bond is added again with its bond order. The
+    residue must be flat because some exports (for example the GMSO
+    converter) derive a particle's residue from its direct parent, so
+    a particle nested below a wrapper Compound would get the wrong
+    residue. Ports of the compound are carried over.
+    """
+    resname = (fragment_resname or compound.name or "LIG")[:3].upper()
+    if not resname.isalnum():
+        resname = "LIG"
+    residue = Residue(resname=resname, resnum=1, hetatm=True)
+    if not compound.children:
+        # The compound is itself a particle; add it directly.
+        residue.add(compound)
+    else:
+        particles = list(compound.particles())
+        bonds = [
+            (particle1, particle2, data["bond_order"])
+            for particle1, particle2, data in compound.bonds(return_bond_order=True)
+        ]
+        ports = list(compound.all_ports())
+        for part in particles + ports:
+            part.parent.children.remove(part)
+            part.parent = None
+        for particle in particles:
+            # Compound.add removes the parent from the bond graph only
+            # when the added child carries a graph. Give each detached
+            # particle the single-node graph a standalone particle has,
+            # so the Residue itself does not stay in the graph as a
+            # spurious particle node.
+            particle.bond_graph = BondGraph()
+            particle.bond_graph.add_node(particle)
+        residue.add(particles)
+        for port in ports:
+            residue.add(port)
+        for particle1, particle2, order in bonds:
+            residue.add_bond((particle1, particle2), bond_order=order)
+    logger.info(f"Fragment {compound.name!r} wrapped into residue {resname!r}.")
+    return residue
+
+
+def _ensure_unique_atom_names(residue):
+    """Rename particles element+index when names repeat in a residue.
+
+    The PDB export and template matching need atom names that are
+    unique within each residue; fragments from SMILES usually name
+    every carbon "C".
+    """
+    names = [particle.name for particle in residue.particles()]
+    if len(set(names)) == len(names):
+        return
+    counters = {}
+    for particle in residue.particles():
+        symbol = (
+            particle.element.symbol.upper()
+            if particle.element is not None
+            else particle.name.upper()
+        )
+        counters[symbol] = counters.get(symbol, 0) + 1
+        particle.name = f"{symbol}{counters[symbol]}"
+    logger.info(
+        f"Renamed atoms of residue {residue.name} to element+index "
+        "names so they are unique within the residue."
+    )
 
 
 def fragment_from_smiles(smiles, resname):
@@ -75,8 +145,8 @@ def fragment_from_smiles(smiles, resname):
     # order and the charges list then come from one AddHs result, so
     # the positional mapping below is exact.
     copied = from_rdkit(rdkit_mol=explicit)
-    residue = Protein._wrap_in_residue(copied, resname)
-    Protein._ensure_unique_atom_names(residue)
+    residue = _wrap_in_residue(copied, resname)
+    _ensure_unique_atom_names(residue)
     particles = list(residue.particles())
     symbols = [particle.element.symbol for particle in particles]
     if symbols != elements:
@@ -146,10 +216,10 @@ def prepare_fragment(compound, resname):
             child for child in copied.successors() if isinstance(child, Residue)
         ]
         if not residues:
-            copied = Protein._wrap_in_residue(copied, resname)
+            copied = _wrap_in_residue(copied, resname)
             residues = [copied]
     for residue in residues:
-        Protein._ensure_unique_atom_names(residue)
+        _ensure_unique_atom_names(residue)
         if not residue.link_atoms:
             # mBuild's tagged-SMILES idiom: particle tags mark the sites.
             for particle in residue.particles():
@@ -237,7 +307,7 @@ def fragment_from_sdf(filename, resname):
             (particles[bond.GetBeginAtomIdx()], particles[bond.GetEndAtomIdx()]),
             bond_order=order,
         )
-    Protein._ensure_unique_atom_names(residue)
+    _ensure_unique_atom_names(residue)
     residue.atom_formal_charges = {
         particles[atom.GetIdx()].name: atom.GetFormalCharge()
         for atom in molecule.GetAtoms()
