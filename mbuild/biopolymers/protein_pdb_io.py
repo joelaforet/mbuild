@@ -22,7 +22,6 @@ __all__ = ["write_pdb"]
 class _PdbRecord:
     serial: int
     name: str
-    alt_loc: str
     resname: str
     chain_id: str
     resnum: int
@@ -30,7 +29,6 @@ class _PdbRecord:
     pos: np.ndarray
     element: str
     hetatm: bool
-    line_no: int
 
 
 @dataclass
@@ -54,6 +52,7 @@ def _parse_pdb(text):
     box = None
     seen_altloc_a = False
     in_extra_model = False
+    last_key = None
     for line_no, line in enumerate(text.splitlines(), start=1):
         record_type = line[:6]
         if record_type == "ENDMDL":
@@ -73,7 +72,6 @@ def _parse_pdb(text):
             record = _PdbRecord(
                 serial=int(line[6:11]),
                 name=line[12:16].strip(),
-                alt_loc=alt_loc,
                 resname=line[17:20].strip(),
                 chain_id=line[21].strip(),
                 resnum=int(line[22:26]),
@@ -84,23 +82,11 @@ def _parse_pdb(text):
                 / 10.0,
                 element=line[76:78].strip(),
                 hetatm=record_type == "HETATM",
-                line_no=line_no,
             )
             key = (record.resname, record.chain_id, record.resnum, record.icode)
-            if not residues or key != (
-                residues[-1].resname,
-                residues[-1].chain_id,
-                residues[-1].resnum,
-                residues[-1].icode,
-            ):
-                residues.append(
-                    _PdbResidue(
-                        resname=record.resname,
-                        chain_id=record.chain_id,
-                        resnum=record.resnum,
-                        icode=record.icode,
-                    )
-                )
+            if key != last_key:
+                residues.append(_PdbResidue(*key))
+                last_key = key
             residues[-1].records.append(record)
         elif record_type.startswith("TER") and residues:
             residues[-1].ter_after = True
@@ -174,11 +160,15 @@ def write_pdb(protein, filename, overwrite=False):
         # polymer links only between record-adjacent residues, so
         # backbone order in the file must follow residue numbers,
         # not attachment order.
-        for residue in sorted(
-            protein.residues(chain.chain_id),
-            key=lambda res: (res.resnum, res.icode),
+        for index, residue in enumerate(
+            sorted(
+                protein.residues(chain.chain_id),
+                key=lambda res: (res.resnum, res.icode),
+            )
         ):
-            residue_order[id(residue)] = len(residue_order)
+            # The order key holds the chain, so the peptide-bond test
+            # in _conect_lines cannot pair residues across a TER.
+            residue_order[id(residue)] = (chain.chain_id, index)
             if residue.resnum > 9999:
                 raise MBuildError(
                     "PDB residue numbers larger than 9999 are not supported."
@@ -199,6 +189,23 @@ def write_pdb(protein, filename, overwrite=False):
                 f"{chain.chain_id or ' ':1s}{residue.resnum:4d}"
                 f"{residue.icode or ' ':1s}"
             )
+
+    # The loops above only visit particles inside a Chain -> Residue
+    # path. A particle outside that path would be absent from the file
+    # and its bonds would be absent from the CONECT records. Raise
+    # instead of writing an incomplete file. The message matches the
+    # guard in Protein.to_rdkit.
+    orphans = [
+        particle for particle in protein.particles() if particle not in particle_serial
+    ]
+    if orphans:
+        raise MBuildError(
+            "Every atom of a Protein must belong to a Residue, but "
+            f"{[p.name for p in orphans[:5]]} "
+            f"{'(and more) ' if len(orphans) > 5 else ''}do not. Add "
+            "atoms through attach() or into a Residue, not directly "
+            "onto the Protein."
+        )
 
     for line in _conect_lines(
         protein, particle_serial, particle_residue, residue_order
@@ -233,9 +240,12 @@ def _conect_lines(protein, particle_serial, particle_residue, residue_order):
     viewers (e.g. PyMOL) treat CONECT records as the complete bond
     list for HETATM atoms and skip distance-based perception for
     them. Bonds between different ATOM residues are listed too
-    (disulfides), except peptide bonds, which residue adjacency
-    implies. Strict template readers accept these records because
-    their residue definitions predict all of them.
+    (disulfides), except the peptide bond, which residue adjacency
+    implies. A bond is a peptide bond only when its C atom belongs to
+    a residue and its N atom belongs to the next residue of the same
+    chain; any other C-N bond gets a CONECT record. Strict template
+    readers accept these records because their residue definitions
+    predict all of them.
     """
     partners = {}
     for particle1, particle2 in protein.bonds():
@@ -247,10 +257,15 @@ def _conect_lines(protein, particle_serial, particle_residue, residue_order):
             if not residue1.hetatm:
                 continue
         elif not (residue1.hetatm or residue2.hetatm):
-            adjacent = (
-                abs(residue_order[id(residue1)] - residue_order[id(residue2)]) == 1
-            )
-            if adjacent and {particle1.name, particle2.name} == {"C", "N"}:
+            chain1, index1 = residue_order[id(residue1)]
+            chain2, index2 = residue_order[id(residue2)]
+            if chain1 == chain2 and index2 - index1 == 1:
+                earlier, later = particle1, particle2
+            elif chain1 == chain2 and index1 - index2 == 1:
+                earlier, later = particle2, particle1
+            else:
+                earlier = later = None
+            if earlier is not None and (earlier.name, later.name) == ("C", "N"):
                 continue  # implied peptide bond
         serial1 = particle_serial[particle1]
         serial2 = particle_serial[particle2]
