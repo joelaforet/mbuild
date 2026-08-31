@@ -1053,3 +1053,12 @@ class TestDisulfidesAndFixesA(BaseTest):
         )
         template = parse_ccd_cif(text)
         assert [atom.formal_charge for atom in template.atoms] == [0, 0]
+
+    def test_default_libraries_share_parsed_templates(self):
+        # Tests that two CCDLibrary instances share the parsed variant
+        # list of one cif file. This is needed because every Protein()
+        # builds its own default library, and re-parsing the bundled
+        # files dominated the load time of every Protein after the
+        # first. The test compares object identity across two default
+        # instances, which only the class-level parse cache can give.
+        assert CCDLibrary()["ALA"] is CCDLibrary()["ALA"]

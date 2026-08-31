@@ -612,6 +612,14 @@ class CCDLibrary:
         ``files.rcsb.org/ligands/download`` into the user cache.
     """
 
+    #: Class-level cache of parsed variant lists, keyed by the resolved
+    #: cif path and its modification time. Every Protein() builds a
+    #: CCDLibrary, and re-parsing the same files dominated the load
+    #: time of every Protein after the first. Templates are frozen
+    #: dataclasses, so instances can share them; callers must not
+    #: mutate the cached lists.
+    _parse_cache = {}
+
     def __init__(self, paths=None, download=False):
         # The user download cache sits in the search order, so a
         # definition downloaded in one session loads in the next
@@ -639,9 +647,15 @@ class CCDLibrary:
 
     def _load(self, resname):
         text = None
+        cache_key = None
         for directory in self._paths:
             path = directory / f"{resname}.cif"
             if path.exists():
+                resolved = path.resolve()
+                cache_key = (str(resolved), resolved.stat().st_mtime_ns)
+                cached = CCDLibrary._parse_cache.get(cache_key)
+                if cached is not None:
+                    return cached
                 text = path.read_text()
                 break
         if text is None and self._download:
@@ -653,7 +667,10 @@ class CCDLibrary:
                 "cif file to the library search paths."
             )
         base = _add_synonyms(_add_disulfide(_fix_caps(parse_ccd_cif(text))))
-        return _protonation_variants(base)
+        variants = _protonation_variants(base)
+        if cache_key is not None:
+            CCDLibrary._parse_cache[cache_key] = variants
+        return variants
 
     def _download_cif(self, resname):
         import urllib.request
