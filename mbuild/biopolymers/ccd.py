@@ -439,11 +439,14 @@ def parse_ccd_cif(text):
     for row in loops.get("_chem_comp_atom", []):
         name = row["atom_id"]
         alt = row.get("alt_atom_id", name)
+        # CIF marks an unknown value with "?" and an inapplicable value
+        # with "."; both mean no formal charge here.
+        charge = row.get("charge", "0")
         atoms.append(
             AtomTemplate(
                 name=name,
                 element=row["type_symbol"].capitalize(),
-                formal_charge=int(row.get("charge", "0")),
+                formal_charge=0 if charge in ("?", ".") else int(charge),
                 leaving=row.get("pdbx_leaving_atom_flag", "N") == "Y",
                 synonyms=(alt,) if alt != name else (),
             )

@@ -1028,3 +1028,28 @@ class TestDisulfidesAndFixesA(BaseTest):
         template = parse_ccd_cif(text)
         assert {atom.name for atom in template.atoms} == {"C1", "C2"}
         assert len(template.bonds) == 1
+
+    def test_cif_parser_reads_unknown_charge_token(self):
+        # Tests that the CIF parser treats the '?' unknown-value token
+        # and the '.' inapplicable-value token in the charge column as
+        # a formal charge of zero. This is needed because CCD component
+        # files downloaded from RCSB can carry these tokens, and
+        # int('?') crashed the parser. The test parses a minimal
+        # component with both tokens and checks the charges.
+        from mbuild.biopolymers.ccd import parse_ccd_cif
+
+        text = "\n".join(
+            (
+                "data_ZZZ",
+                "_chem_comp.id ZZZ",
+                "loop_",
+                "_chem_comp_atom.comp_id",
+                "_chem_comp_atom.atom_id",
+                "_chem_comp_atom.type_symbol",
+                "_chem_comp_atom.charge",
+                "ZZZ C1 C ?",
+                "ZZZ C2 C .",
+            )
+        )
+        template = parse_ccd_cif(text)
+        assert [atom.formal_charge for atom in template.atoms] == [0, 0]
