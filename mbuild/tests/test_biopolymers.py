@@ -871,3 +871,35 @@ class TestDisulfidesAndFixesA(BaseTest):
             if chain_of(record.residue1) != chain_of(record.residue2)
         }
         assert frozenset(("A", "C")) in cross_chain
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach_without_simulation_support(self, caplog, monkeypatch):
+        # Tests that attach() returns a complete recorded bond and only
+        # warns when mbuild.simulation cannot import, and that a direct
+        # relax_fragments() call raises a clear error instead. This is
+        # needed because mbuild.simulation imports hoomd, which base
+        # installs do not have, and the old code crashed after the
+        # fragment was already bonded but before the bond was recorded.
+        # The test blocks the module in sys.modules, attaches a bulky
+        # fragment that triggers the automatic relax path, and checks
+        # the record, the warning, and the error.
+        import logging
+        import sys
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        bulky = mb.load("C(c1ccccc1)(c1ccccc1)c1ccccc1", smiles=True)
+        monkeypatch.setitem(sys.modules, "mbuild.simulation", None)
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            record = protein.attach(
+                bulky,
+                "C1",
+                resnum=5,
+                atom_name="NZ",
+                chain_id="A",
+                fragment_resname="TPM",
+            )
+        assert "Cannot relax" in caplog.text
+        assert protein.cross_bonds == [record]
+        assert (record.atom1_name, record.atom2_name) == ("NZ", "C1")
+        with pytest.raises(MBuildError, match="not importable"):
+            protein.relax_fragments()

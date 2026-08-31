@@ -838,7 +838,15 @@ class Protein(Compound):
         platform : str, optional, default="CPU"
             OpenMM platform name.
         """
-        from mbuild.simulation import OpenMMSimulation
+        try:
+            from mbuild.simulation import OpenMMSimulation
+        except ImportError as error:
+            raise MBuildError(
+                "relax_fragments() needs mbuild.simulation, which is not "
+                f"importable here ({error}). Install the simulation "
+                "dependencies (hoomd, openmm; see environment-dev.yml) "
+                "to relax fragments."
+            ) from error
 
         targets = (
             list(residues)
@@ -1032,14 +1040,9 @@ class Protein(Compound):
             bond_order=float(bond_order),
         )
 
-        clashes = self._warn_on_clashes(added, site_atom, frag_atom)
-        if clashes and relax:
-            logger.info("Relaxing the placed fragment with the protein held fixed.")
-            self.relax_fragments(residues=frag_residues)
-            clashes = self._warn_on_clashes(added, site_atom, frag_atom)
-            if not clashes:
-                logger.info("Fragment overlaps resolved by relaxation.")
-
+        # The record is appended before the relaxation step, so the
+        # protein state stays complete and consistent when relaxation
+        # fails: the fragment is already bonded at this point.
         record = InterResidueBond(
             residue1=site_residue,
             residue2=frag_residue,
@@ -1050,6 +1053,31 @@ class Protein(Compound):
             leaving2=tuple(sorted(h.name for h in frag_hydrogens)),
         )
         self.cross_bonds.append(record)
+
+        clashes = self._warn_on_clashes(added, site_atom, frag_atom)
+        if clashes and relax:
+            try:
+                import mbuild.simulation  # noqa: F401
+            except ImportError as error:
+                # The automatic path only warns: the attachment itself
+                # is complete, and the user can relax later on a system
+                # with the simulation dependencies installed.
+                logger.warning(
+                    "Cannot relax the placed fragment: mbuild.simulation "
+                    f"is not importable ({error}). Install the simulation "
+                    "dependencies (hoomd, openmm) or call "
+                    "relax_fragments() elsewhere. The fragment keeps its "
+                    "rigid placement."
+                )
+            else:
+                logger.info(
+                    "Relaxing the placed fragment with the protein held fixed."
+                )
+                self.relax_fragments(residues=frag_residues)
+                clashes = self._warn_on_clashes(added, site_atom, frag_atom)
+                if not clashes:
+                    logger.info("Fragment overlaps resolved by relaxation.")
+
         return record
 
     @staticmethod
