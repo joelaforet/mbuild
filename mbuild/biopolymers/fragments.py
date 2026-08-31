@@ -17,7 +17,76 @@ from mbuild.exceptions import MBuildError
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["fragment_from_sdf", "prepare_fragment"]
+__all__ = ["fragment_from_sdf", "fragment_from_smiles", "prepare_fragment"]
+
+
+def fragment_from_smiles(smiles, resname):
+    """Load a SMILES string as a named Residue fragment.
+
+    The residue keeps the formal charges from the SMILES, which an
+    mbuild Compound cannot store. Each dummy atom (``*`` or ``[*:n]``)
+    marks an attachment site: it is replaced by a hydrogen (the leaving
+    atom), and its neighbor is recorded in ``link_atoms``.
+
+    Parameters
+    ----------
+    smiles : str
+        The fragment as a SMILES string.
+    resname : str
+        The residue name (up to 3 characters, e.g. "MYR").
+
+    Returns
+    -------
+    Residue
+        A detached residue with unique, stable atom names.
+    """
+    from rdkit import Chem
+
+    from mbuild.conversion import from_rdkit
+
+    parsed = Chem.MolFromSmiles(smiles)
+    if parsed is None:
+        raise MBuildError(f"Could not parse SMILES {smiles!r}.")
+    editable = Chem.RWMol(parsed)
+    dummies = [atom for atom in editable.GetAtoms() if atom.GetAtomicNum() == 0]
+    link_index = {}
+    for dummy in dummies:
+        label = str(dummy.GetAtomMapNum() or 1)
+        if label in link_index:
+            raise MBuildError(
+                "Attachment points must carry distinct labels: write "
+                "them as [*:1], [*:2], ... when a fragment has more "
+                "than one."
+            )
+        neighbors = dummy.GetNeighbors()
+        if len(neighbors) != 1:
+            raise MBuildError("An attachment point (*) must bond exactly one atom.")
+        link_index[label] = neighbors[0].GetIdx()
+        dummy.SetAtomicNum(1)
+    mol = editable.GetMol()
+    Chem.SanitizeMol(mol)
+    explicit = Chem.AddHs(mol)
+    charges = [atom.GetFormalCharge() for atom in explicit.GetAtoms()]
+    elements = [atom.GetSymbol() for atom in explicit.GetAtoms()]
+    copied = from_rdkit(rdkit_mol=mol)
+    residue = Protein._wrap_in_residue(copied, resname)
+    Protein._ensure_unique_atom_names(residue)
+    particles = list(residue.particles())
+    symbols = [particle.element.symbol for particle in particles]
+    if len(particles) != len(charges) or symbols != elements:
+        raise MBuildError(
+            "Atom order of the loaded fragment does not match the "
+            "SMILES, so formal charges cannot be mapped onto atoms. "
+            "This is a bug in the loading path; please report it."
+        )
+    residue.atom_formal_charges = {
+        particle.name: charge for particle, charge in zip(particles, charges) if charge
+    }
+    residue.formal_charge = sum(charges)
+    residue.link_atoms = {
+        label: particles[index].name for label, index in link_index.items()
+    }
+    return residue
 
 
 def prepare_fragment(compound, resname):
@@ -31,10 +100,14 @@ def prepare_fragment(compound, resname):
     (3) reuse the names when building an external residue definition
     (e.g. a residue template for a downstream loader) for the fragment.
 
+    A SMILES string is also accepted and is loaded through
+    ``fragment_from_smiles``.
+
     Parameters
     ----------
-    compound : mbuild.Compound
-        The fragment. Cloned; the input is not changed.
+    compound : mbuild.Compound or str
+        The fragment, or a SMILES string for it. A Compound is cloned;
+        the input is not changed.
     resname : str
         The residue name (up to 3 characters, e.g. "MYR").
 
@@ -43,68 +116,15 @@ def prepare_fragment(compound, resname):
     Residue
         A detached residue with unique, stable atom names.
     """
-    charges = None
-    link_index = None
     if isinstance(compound, str):
-        # A SMILES string: load it and keep its formal charges, which
-        # an mbuild Compound cannot store. One dummy atom (*) marks the
-        # attachment site: it is replaced by a hydrogen (the leaving
-        # atom), and its neighbor becomes the fragment's link atom.
-        from rdkit import Chem
-
-        from mbuild.conversion import from_rdkit
-
-        parsed = Chem.MolFromSmiles(compound)
-        if parsed is None:
-            raise MBuildError(f"Could not parse SMILES {compound!r}.")
-        editable = Chem.RWMol(parsed)
-        dummies = [atom for atom in editable.GetAtoms() if atom.GetAtomicNum() == 0]
-        link_index = {}
-        for dummy in dummies:
-            label = str(dummy.GetAtomMapNum() or 1)
-            if label in link_index:
-                raise MBuildError(
-                    "Attachment points must carry distinct labels: write "
-                    "them as [*:1], [*:2], ... when a fragment has more "
-                    "than one."
-                )
-            neighbors = dummy.GetNeighbors()
-            if len(neighbors) != 1:
-                raise MBuildError("An attachment point (*) must bond exactly one atom.")
-            link_index[label] = neighbors[0].GetIdx()
-            dummy.SetAtomicNum(1)
-        mol = editable.GetMol()
-        Chem.SanitizeMol(mol)
-        explicit = Chem.AddHs(mol)
-        charges = [atom.GetFormalCharge() for atom in explicit.GetAtoms()]
-        elements = [atom.GetSymbol() for atom in explicit.GetAtoms()]
-        copied = from_rdkit(rdkit_mol=mol)
-    else:
-        copied = clone(compound)
+        return fragment_from_smiles(compound, resname)
+    copied = clone(compound)
     if isinstance(copied, Residue):
         residue = copied
         residue.name = (resname or residue.name)[:3].upper()
     else:
         residue = Protein._wrap_in_residue(copied, resname)
     Protein._ensure_unique_atom_names(residue)
-    if charges is not None:
-        particles = list(residue.particles())
-        symbols = [particle.element.symbol for particle in particles]
-        if len(particles) != len(charges) or symbols != elements:
-            raise MBuildError(
-                "Atom order of the loaded fragment does not match the "
-                "SMILES, so formal charges cannot be mapped onto atoms. "
-                "This is a bug in the loading path; please report it."
-            )
-        residue.atom_formal_charges = {
-            particle.name: charge
-            for particle, charge in zip(particles, charges)
-            if charge
-        }
-        residue.formal_charge = sum(charges)
-        residue.link_atoms = {
-            label: particles[index].name for label, index in link_index.items()
-        }
     if not residue.link_atoms:
         # mBuild's tagged-SMILES idiom: particle tags mark the sites.
         for particle in residue.particles():
