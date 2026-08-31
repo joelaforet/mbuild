@@ -747,3 +747,127 @@ class TestCCDLibrary(BaseTest):
         library = CCDLibrary()
         with pytest.raises(KeyError, match="XXX"):
             library["XXX"]
+
+
+class TestDisulfidesAndFixesA(BaseTest):
+    def test_vicinal_disulfide_3cu9(self):
+        # Tests that a disulfide between two adjacent cysteines loads as
+        # one SG-SG cross bond with neutral residues. This is needed
+        # because a bridged cysteine (HG absent) matches both the
+        # crosslink variants and the thiolate variants, and before the
+        # CONECT-aware filter the loader rejected every disulfide file
+        # as ambiguous. The test loads the vicinal disulfide of 3cu9 and
+        # checks the recorded bond, the leaving atoms, the charges, and
+        # the bond graph edge.
+        from mbuild.biopolymers.protein import Chain
+
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        (record,) = protein.cross_bonds
+        assert (record.atom1_name, record.atom2_name) == ("SG", "SG")
+        assert record.leaving1 == ("HG",) and record.leaving2 == ("HG",)
+        assert record.residue1.formal_charge == 0
+        assert record.residue2.formal_charge == 0
+        sg1 = next(record.residue1.particles_by_name("SG"))
+        sg2 = next(record.residue2.particles_by_name("SG"))
+        assert protein.bond_graph.has_edge(sg1, sg2)
+        assert isinstance(record.residue1.parent, Chain)
+
+    def test_disulfides_8ciq(self, tmp_path):
+        # Tests that a protein with three disulfides loads all three
+        # cross bonds and keeps them through a save_pdb round trip. This
+        # is needed because the written PDB is the handoff artifact for
+        # residue-template readers, and a lost CONECT record would make
+        # the reloaded protein mis-protonate the bridged cysteines. The
+        # test loads 8ciq, writes it back, reloads it, and compares the
+        # cross-bond counts.
+        protein = Protein(get_fn("8ciq.pdb"))
+        assert len(protein.cross_bonds) == 3
+        out = tmp_path / "8ciq_roundtrip.pdb"
+        protein.save_pdb(str(out))
+        reloaded = Protein(str(out))
+        assert len(reloaded.cross_bonds) == 3
+
+    def test_bare_thiolate_loads_without_conect(self, tmp_path):
+        # Tests that a cysteine without HG and without an SS CONECT
+        # loads as a deprotonated thiolate, not as an error. This is
+        # needed because the CONECT-aware filter must reject only the
+        # crosslink variants in this case and keep the thiolate variant,
+        # which is the openff-pablo behavior. The test removes the
+        # CONECT records from the 3cu9 asset (its cysteines already
+        # carry no HG) and checks the charges and the empty cross-bond
+        # list.
+        text = open(get_fn("3cu9_vicinal_disulfide.pdb")).read()
+        stripped = tmp_path / "thiolate.pdb"
+        stripped.write_text(
+            "\n".join(
+                line
+                for line in text.splitlines()
+                if not line.startswith("CONECT")
+            )
+        )
+        protein = Protein(str(stripped))
+        assert protein.cross_bonds == []
+        for residue in protein.residues():
+            assert residue.atom_formal_charges["SG"] == -1
+
+    def test_ss_conect_with_hg_present_errors(self, tmp_path):
+        # Tests that an SS CONECT to a cysteine that still carries its
+        # HG raises an error that names the disulfide conflict. This is
+        # needed because the loader must never guess: the file claims a
+        # disulfide through the CONECT record and denies it through the
+        # present HG, and only the user can decide which one is true.
+        # The test appends an HG atom to one 3cu9 cysteine, keeps the
+        # CONECT records, and asserts on the error message.
+        text = open(get_fn("3cu9_vicinal_disulfide.pdb")).read()
+        hg_line = (
+            "ATOM     24  HG  CYS A 222     -22.000  10.500   6.500"
+            "  1.00 11.91           H"
+        )
+        lines = text.splitlines()
+        insert_at = next(
+            index for index, line in enumerate(lines) if line.startswith("CONECT")
+        )
+        lines.insert(insert_at, hg_line)
+        bad = tmp_path / "hg_present.pdb"
+        bad.write_text("\n".join(lines))
+        with pytest.raises(MBuildError, match="signals a disulfide"):
+            Protein(str(bad))
+
+    def test_cross_chain_disulfide_2zuq(self):
+        # Tests that a disulfide between two different chains loads,
+        # which proves the crosslink filter works on global serials and
+        # not on residue adjacency. This is needed because inter-chain
+        # disulfides are common in multimeric proteins, and a filter
+        # keyed on chain-local state would miss them. The test loads the
+        # prepared 2zuq structure from the installed openff-pablo test
+        # data and checks for a cross bond whose residues sit in
+        # different chains.
+        from importlib import resources
+
+        from mbuild.biopolymers.protein import Chain
+
+        pytest.importorskip("openff.pablo")
+        data = (
+            resources.files("openff.pablo._tests")
+            / "data"
+            / "prepared_pdbs"
+            / "2zuq_prepared.pdb"
+        )
+        if not data.is_file():
+            pytest.skip("openff-pablo test data is not installed")
+
+        def chain_of(residue):
+            return next(
+                ancestor
+                for ancestor in residue.ancestors()
+                if isinstance(ancestor, Chain)
+            ).chain_id
+
+        with resources.as_file(data) as path:
+            protein = Protein(str(path))
+        cross_chain = {
+            frozenset((chain_of(record.residue1), chain_of(record.residue2)))
+            for record in protein.cross_bonds
+            if chain_of(record.residue1) != chain_of(record.residue2)
+        }
+        assert frozenset(("A", "C")) in cross_chain

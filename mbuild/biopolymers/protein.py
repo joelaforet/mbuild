@@ -242,6 +242,98 @@ def _match_residue(group, variants, prior_possible, posterior_possible):
     return matches
 
 
+def _filter_crosslink_candidates(groups, all_candidates, conects):
+    """Reject crosslink candidate matches that CONECT records contradict.
+
+    A bridged cysteine (HG absent) matches two kinds of variants: the
+    neutral crosslink variants (``expects_crosslink=True``) and the
+    deprotonated thiolate variants (``expects_crosslink=False``). The
+    two disagree on the SG formal charge, so ``_matches_agree`` would
+    reject every disulfide-containing file. The CONECT records decide
+    between them: a candidate whose variant carries a crosslink atom is
+    kept only when its crosslink expectation equals the presence of an
+    SS CONECT to a crosslink-capable partner residue. A partner is
+    crosslink-capable when any of its own pre-filter candidates expects
+    the crosslink; capability is computed before any rejection, so two
+    bridged residues validate each other. Candidates whose variant has
+    no crosslink atom are kept unchanged. This mirrors openff-pablo's
+    ``filter_on_crosslinks`` rule.
+
+    Returns the filtered candidate lists. Raises MBuildError when the
+    rule leaves a residue with no candidate.
+    """
+
+    def crosslink_serial(group, match):
+        """Return the serial of the match's crosslink atom, or None."""
+        name = match.variant.crosslink[0]
+        for record in group.records:
+            atom = match.record_atoms.get(id(record))
+            if atom is not None and atom.name == name:
+                return record.serial
+        return None
+
+    serial_owner = {}
+    for index, (group, candidates) in enumerate(zip(groups, all_candidates)):
+        for match in candidates:
+            if match.expects_crosslink:
+                serial = crosslink_serial(group, match)
+                if serial is not None:
+                    serial_owner[serial] = index
+
+    partners_of = {}
+    for pair in conects:
+        serials = tuple(pair)
+        if len(serials) != 2:
+            continue
+        partners_of.setdefault(serials[0], set()).add(serials[1])
+        partners_of.setdefault(serials[1], set()).add(serials[0])
+
+    filtered = []
+    for index, (group, candidates) in enumerate(zip(groups, all_candidates)):
+        kept = []
+        rejected = []
+        for match in candidates:
+            if not match.variant.crosslink:
+                kept.append(match)
+                continue
+            serial = crosslink_serial(group, match)
+            if serial is None:
+                kept.append(match)
+                continue
+            linked = any(
+                serial_owner.get(other, index) != index
+                for other in partners_of.get(serial, ())
+            )
+            if match.expects_crosslink == linked:
+                kept.append(match)
+            else:
+                rejected.append((match, linked))
+        if not kept:
+            match, linked = rejected[0]
+            for candidate in rejected:
+                if candidate[1] and not candidate[0].expects_crosslink:
+                    match, linked = candidate
+                    break
+            name = match.variant.crosslink[0]
+            leaving = sorted(match.variant.leaving_fragment_of(name))
+            if linked:
+                raise MBuildError(
+                    f"Residue {group.label}: a CONECT record joins its "
+                    f"{name} atom to the {name} atom of another residue, "
+                    f"which signals a disulfide, but its {leaving} atoms "
+                    "are present. Remove the CONECT record, or remove the "
+                    f"{leaving} atoms to form the disulfide."
+                )
+            raise MBuildError(
+                f"Residue {group.label} is missing its {leaving} atoms, "
+                "which signals a crosslink, but no CONECT record connects "
+                f"it to a crosslink partner. Add a CONECT record between "
+                f"the two {name} atoms, or restore the {leaving} atoms."
+            )
+        filtered.append(kept)
+    return filtered
+
+
 def _matches_agree(matches, group):
     """Verify that all valid matches assign the same chemistry.
 
@@ -371,17 +463,26 @@ class Protein(Compound):
                 and not groups[i].ter_after
             )
 
-        matches = []
+        all_candidates = []
         for i, group in enumerate(groups):
             prior_possible = i > 0 and linked(i - 1, i)
             posterior_possible = i < len(groups) - 1 and linked(i, i + 1)
-            candidates = _match_residue(
-                group,
-                self.library[group.resname],
-                prior_possible,
-                posterior_possible,
+            all_candidates.append(
+                _match_residue(
+                    group,
+                    self.library[group.resname],
+                    prior_possible,
+                    posterior_possible,
+                )
             )
-            matches.append(_matches_agree(candidates, group))
+        # A bridged cysteine matches both the crosslink variants and the
+        # thiolate variants; the CONECT records decide between them
+        # before the consensus check.
+        all_candidates = _filter_crosslink_candidates(groups, all_candidates, conects)
+        matches = [
+            _matches_agree(candidates, group)
+            for candidates, group in zip(all_candidates, groups)
+        ]
 
         self._build(groups, matches, conects)
         if box is not None:

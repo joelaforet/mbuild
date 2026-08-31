@@ -1,3 +1,5 @@
 # Vendored reference data and generated test assets: collapse in diffs.
 mbuild/lib/biomolecules/ccd_cache/*.cif linguist-generated=true
 mbuild/utils/reference/6m03_protonated.pdb linguist-generated=true
+mbuild/utils/reference/3cu9_vicinal_disulfide.pdb linguist-generated=true
+mbuild/utils/reference/8ciq.pdb linguist-generated=true
