@@ -747,3 +747,20 @@ class TestCCDLibrary(BaseTest):
         library = CCDLibrary()
         with pytest.raises(KeyError, match="XXX"):
             library["XXX"]
+
+
+class TestPdbWriterFixesB(BaseTest):
+    def test_save_pdb_rejects_orphan_atoms(self, tmp_path):
+        # Tests that save_pdb raises on a particle outside a
+        # Chain -> Residue path. This is needed because the writer walks
+        # protein.chains, so such a particle and its bonds would be
+        # silently absent from the file; to_rdkit already raises on the
+        # same condition and the two exports must agree. The test adds
+        # a bonded carbon directly onto the Protein and asserts the
+        # orphan error.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        carbon = mb.Compound(name="CX", element="C")
+        protein.add(carbon)
+        protein.add_bond((carbon, protein.get_atom(5, "NZ", chain_id="A")))
+        with pytest.raises(MBuildError, match="must belong to a Residue"):
+            protein.save_pdb(str(tmp_path / "orphan.pdb"))

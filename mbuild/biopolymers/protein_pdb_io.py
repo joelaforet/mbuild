@@ -200,6 +200,23 @@ def write_pdb(protein, filename, overwrite=False):
                 f"{residue.icode or ' ':1s}"
             )
 
+    # The loops above only visit particles inside a Chain -> Residue
+    # path. A particle outside that path would be absent from the file
+    # and its bonds would be absent from the CONECT records. Raise
+    # instead of writing an incomplete file. The message matches the
+    # guard in Protein.to_rdkit.
+    orphans = [
+        particle for particle in protein.particles() if particle not in particle_serial
+    ]
+    if orphans:
+        raise MBuildError(
+            "Every atom of a Protein must belong to a Residue, but "
+            f"{[p.name for p in orphans[:5]]} "
+            f"{'(and more) ' if len(orphans) > 5 else ''}do not. Add "
+            "atoms through attach() or into a Residue, not directly "
+            "onto the Protein."
+        )
+
     for line in _conect_lines(
         protein, particle_serial, particle_residue, residue_order
     ):
