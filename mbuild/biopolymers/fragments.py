@@ -6,6 +6,7 @@ attachment sites. These helpers build such fragments from SMILES
 strings (with * attachment points) and SDF files.
 """
 
+import itertools
 import logging
 
 import numpy as np
@@ -187,10 +188,13 @@ def fragment_from_sdf(filename, resname):
     from rdkit import Chem
 
     supplier = Chem.SDMolSupplier(str(filename), removeHs=False, sanitize=True)
-    molecules = [molecule for molecule in supplier if molecule is not None]
+    # Two entries are enough to decide the count; do not parse the rest.
+    molecules = [
+        molecule for molecule in itertools.islice(supplier, 2) if molecule is not None
+    ]
     if len(molecules) != 1:
         raise MBuildError(
-            f"{filename} holds {len(molecules)} readable molecules; "
+            f"{filename} does not hold exactly one readable molecule; "
             "fragment_from_sdf takes exactly one."
         )
     molecule = molecules[0]
