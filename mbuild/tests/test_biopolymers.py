@@ -1193,7 +1193,7 @@ class TestFragments(BaseTest):
         assert eth.link_atoms and set(eth.link_atoms.values()) <= eth_names
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_fragment_from_sdf(self, acetone, tmp_path):
+    def test_fragment_from_sdf(self, tmp_path):
         # Tests that an SDF fragment loads with explicit bond orders,
         # elements, and coordinates, as a named Residue. This is needed
         # because SDF is the rich fragment format that, unlike PDB,
