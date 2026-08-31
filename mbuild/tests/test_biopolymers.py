@@ -800,9 +800,7 @@ class TestDisulfidesAndFixesA(BaseTest):
         stripped = tmp_path / "thiolate.pdb"
         stripped.write_text(
             "\n".join(
-                line
-                for line in text.splitlines()
-                if not line.startswith("CONECT")
+                line for line in text.splitlines() if not line.startswith("CONECT")
             )
         )
         protein = Protein(str(stripped))

@@ -1174,9 +1174,7 @@ class Protein(Compound):
                     "rigid placement."
                 )
             else:
-                logger.info(
-                    "Relaxing the placed fragment with the protein held fixed."
-                )
+                logger.info("Relaxing the placed fragment with the protein held fixed.")
                 self.relax_fragments(residues=frag_residues)
                 clashes = self._warn_on_clashes(added, site_atom, frag_atom)
                 if not clashes:
