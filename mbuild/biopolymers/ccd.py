@@ -77,6 +77,10 @@ __all__ = ["AtomTemplate", "BondTemplate", "ResidueTemplate", "CCDLibrary"]
 
 CCD_CACHE_DIR = Path(__file__).parent.parent / "lib" / "biomolecules" / "ccd_cache"
 
+#: Directory where downloaded CCD definitions are stored and found
+#: again in later sessions.
+USER_CCD_CACHE_DIR = Path.home() / ".mbuild" / "ccd_cache"
+
 RCSB_CCD_URL = "https://files.rcsb.org/ligands/download/{}.cif"
 
 #: CCD component types that link into a polymer via the peptide bond.
@@ -591,14 +595,21 @@ class CCDLibrary:
     ----------
     paths : list of pathlib.Path, optional
         Directories searched for ``{RESNAME}.cif`` files, in order. The
-        bundled directory is always searched last.
+        user download cache and the bundled directory are always
+        searched last, in that order.
     download : bool, optional, default=False
         Download unknown residue codes from
         ``files.rcsb.org/ligands/download`` into the user cache.
     """
 
     def __init__(self, paths=None, download=False):
-        self._paths = [Path(p) for p in (paths or [])] + [CCD_CACHE_DIR]
+        # The user download cache sits in the search order, so a
+        # definition downloaded in one session loads in the next
+        # session without download=True.
+        self._paths = [Path(p) for p in (paths or [])] + [
+            USER_CCD_CACHE_DIR,
+            CCD_CACHE_DIR,
+        ]
         self._download = download
         self._templates = {}
 
@@ -637,7 +648,7 @@ class CCDLibrary:
     def _download_cif(self, resname):
         import urllib.request
 
-        cache_dir = Path.home() / ".mbuild" / "ccd_cache"
+        cache_dir = USER_CCD_CACHE_DIR
         cached = cache_dir / f"{resname}.cif"
         if cached.exists():
             return cached.read_text()

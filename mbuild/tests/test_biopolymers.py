@@ -961,3 +961,21 @@ class TestDisulfidesAndFixesA(BaseTest):
         protein.add(chain)
         with pytest.raises(MBuildError, match=r"chains \['A', 'B'\]"):
             protein.get_residue(221)
+
+    def test_downloaded_templates_load_from_user_cache(self, tmp_path, monkeypatch):
+        # Tests that a CCD definition already present in the user
+        # download cache loads without download=True. This is needed
+        # because the library searched only the caller paths and the
+        # bundled directory, so a template downloaded in one session
+        # was invisible in the next session unless the user passed
+        # download=True again. The test points the cache constant at a
+        # tmp directory, places a renamed copy of the bundled ALA
+        # definition there, and loads it with downloads disabled.
+        from mbuild.biopolymers import ccd
+
+        source = ccd.CCD_CACHE_DIR / "ALA.cif"
+        (tmp_path / "ZZZ.cif").write_text(source.read_text().replace("ALA", "ZZZ"))
+        monkeypatch.setattr(ccd, "USER_CCD_CACHE_DIR", tmp_path)
+        library = CCDLibrary(download=False)
+        variants = library["ZZZ"]
+        assert variants and variants[0].name == "ZZZ"
