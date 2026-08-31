@@ -850,3 +850,330 @@ class TestFragmentFixesC(BaseTest):
         eth = residues["ETH"]
         eth_names = {particle.name for particle in eth.particles()}
         assert eth.link_atoms and set(eth.link_atoms.values()) <= eth_names
+
+
+class TestDisulfidesAndFixesA(BaseTest):
+    def test_vicinal_disulfide_3cu9(self):
+        # Tests that a disulfide between two adjacent cysteines loads as
+        # one SG-SG cross bond with neutral residues. This is needed
+        # because a bridged cysteine (HG absent) matches both the
+        # crosslink variants and the thiolate variants, and before the
+        # CONECT-aware filter the loader rejected every disulfide file
+        # as ambiguous. The test loads the vicinal disulfide of 3cu9 and
+        # checks the recorded bond, the leaving atoms, the charges, and
+        # the bond graph edge.
+        from mbuild.biopolymers.protein import Chain
+
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        (record,) = protein.cross_bonds
+        assert (record.atom1_name, record.atom2_name) == ("SG", "SG")
+        assert record.leaving1 == ("HG",) and record.leaving2 == ("HG",)
+        assert record.residue1.formal_charge == 0
+        assert record.residue2.formal_charge == 0
+        sg1 = next(record.residue1.particles_by_name("SG"))
+        sg2 = next(record.residue2.particles_by_name("SG"))
+        assert protein.bond_graph.has_edge(sg1, sg2)
+        assert isinstance(record.residue1.parent, Chain)
+
+    def test_disulfides_8ciq(self, tmp_path):
+        # Tests that a protein with three disulfides loads all three
+        # cross bonds and keeps them through a save_pdb round trip. This
+        # is needed because the written PDB is the handoff artifact for
+        # residue-template readers, and a lost CONECT record would make
+        # the reloaded protein mis-protonate the bridged cysteines. The
+        # test loads 8ciq, writes it back, reloads it, and compares the
+        # cross-bond counts.
+        protein = Protein(get_fn("8ciq.pdb"))
+        assert len(protein.cross_bonds) == 3
+        out = tmp_path / "8ciq_roundtrip.pdb"
+        protein.save_pdb(str(out))
+        reloaded = Protein(str(out))
+        assert len(reloaded.cross_bonds) == 3
+
+    def test_bare_thiolate_loads_without_conect(self, tmp_path):
+        # Tests that a cysteine without HG and without an SS CONECT
+        # loads as a deprotonated thiolate, not as an error. This is
+        # needed because the CONECT-aware filter must reject only the
+        # crosslink variants in this case and keep the thiolate variant,
+        # which is the openff-pablo behavior. The test removes the
+        # CONECT records from the 3cu9 asset (its cysteines already
+        # carry no HG) and checks the charges and the empty cross-bond
+        # list.
+        text = open(get_fn("3cu9_vicinal_disulfide.pdb")).read()
+        stripped = tmp_path / "thiolate.pdb"
+        stripped.write_text(
+            "\n".join(
+                line for line in text.splitlines() if not line.startswith("CONECT")
+            )
+        )
+        protein = Protein(str(stripped))
+        assert protein.cross_bonds == []
+        for residue in protein.residues():
+            assert residue.atom_formal_charges["SG"] == -1
+
+    def test_ss_conect_with_hg_present_errors(self, tmp_path):
+        # Tests that an SS CONECT to a cysteine that still carries its
+        # HG raises an error that names the disulfide conflict. This is
+        # needed because the loader must never guess: the file claims a
+        # disulfide through the CONECT record and denies it through the
+        # present HG, and only the user can decide which one is true.
+        # The test appends an HG atom to one 3cu9 cysteine, keeps the
+        # CONECT records, and asserts on the error message.
+        text = open(get_fn("3cu9_vicinal_disulfide.pdb")).read()
+        hg_line = (
+            "ATOM     24  HG  CYS A 222     -22.000  10.500   6.500"
+            "  1.00 11.91           H"
+        )
+        lines = text.splitlines()
+        insert_at = next(
+            index for index, line in enumerate(lines) if line.startswith("CONECT")
+        )
+        lines.insert(insert_at, hg_line)
+        bad = tmp_path / "hg_present.pdb"
+        bad.write_text("\n".join(lines))
+        with pytest.raises(MBuildError, match="signals a disulfide"):
+            Protein(str(bad))
+
+    def test_cross_chain_disulfide_2zuq(self):
+        # Tests that a disulfide between two different chains loads,
+        # which proves the crosslink filter works on global serials and
+        # not on residue adjacency. This is needed because inter-chain
+        # disulfides are common in multimeric proteins, and a filter
+        # keyed on chain-local state would miss them. The test loads the
+        # prepared 2zuq structure from the installed openff-pablo test
+        # data and checks for a cross bond whose residues sit in
+        # different chains.
+        from importlib import resources
+
+        from mbuild.biopolymers.protein import Chain
+
+        pytest.importorskip("openff.pablo")
+        data = (
+            resources.files("openff.pablo._tests")
+            / "data"
+            / "prepared_pdbs"
+            / "2zuq_prepared.pdb"
+        )
+        if not data.is_file():
+            pytest.skip("openff-pablo test data is not installed")
+
+        def chain_of(residue):
+            return next(
+                ancestor
+                for ancestor in residue.ancestors()
+                if isinstance(ancestor, Chain)
+            ).chain_id
+
+        with resources.as_file(data) as path:
+            protein = Protein(str(path))
+        cross_chain = {
+            frozenset((chain_of(record.residue1), chain_of(record.residue2)))
+            for record in protein.cross_bonds
+            if chain_of(record.residue1) != chain_of(record.residue2)
+        }
+        assert frozenset(("A", "C")) in cross_chain
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach_without_simulation_support(self, caplog, monkeypatch):
+        # Tests that attach() returns a complete recorded bond and only
+        # warns when mbuild.simulation cannot import, and that a direct
+        # relax_fragments() call raises a clear error instead. This is
+        # needed because mbuild.simulation imports hoomd, which base
+        # installs do not have, and the old code crashed after the
+        # fragment was already bonded but before the bond was recorded.
+        # The test blocks the module in sys.modules, attaches a bulky
+        # fragment that triggers the automatic relax path, and checks
+        # the record, the warning, and the error.
+        import logging
+        import sys
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        bulky = mb.load("C(c1ccccc1)(c1ccccc1)c1ccccc1", smiles=True)
+        monkeypatch.setitem(sys.modules, "mbuild.simulation", None)
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            record = protein.attach(
+                bulky,
+                "C1",
+                resnum=5,
+                atom_name="NZ",
+                chain_id="A",
+                fragment_resname="TPM",
+            )
+        assert "Cannot relax" in caplog.text
+        assert protein.cross_bonds == [record]
+        assert (record.atom1_name, record.atom2_name) == ("NZ", "C1")
+        with pytest.raises(MBuildError, match="not importable"):
+            protein.relax_fragments()
+
+    def test_gmso_routed_save_and_trajectory_keep_residues(self, tmp_path):
+        # Tests that a GMSO-routed save (.gro) and to_trajectory keep
+        # the per-residue partitioning. This is needed because
+        # conversion.save calls the module-level to_gmso and the generic
+        # to_trajectory assigns one default residue, so both silently
+        # collapsed the protein into a single residue. The test saves a
+        # .gro file and checks the residue columns, then builds an
+        # mdtraj topology and counts its residues.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        out = tmp_path / "identity.gro"
+        protein.save(str(out))
+        atom_lines = out.read_text().splitlines()[2 : 2 + protein.n_particles]
+        first = atom_lines[0]
+        assert (first[:5].strip(), first[5:10].strip()) == ("1", "SER")
+        assert len({line[:10] for line in atom_lines}) == 306
+
+        topology = protein.to_trajectory().topology
+        assert len(list(topology.residues)) == 306
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_volume_runs_through_to_rdkit(self):
+        # Tests that Compound.volume() works on a Protein and returns a
+        # positive float. This is needed because volume() calls
+        # to_rdkit(embed=True), and the Protein override did not accept
+        # the embed keyword, so volume() raised TypeError. The override
+        # must accept and ignore embed, because the export already
+        # carries the real coordinates. The test computes the volume of
+        # a small disulfide peptide. Compound.volume references
+        # Chem.AllChem without importing the submodule, so the test
+        # imports it first; a fix there belongs to core mBuild, which
+        # this recipe does not modify.
+        from rdkit.Chem import AllChem  # noqa: F401
+
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        volume = protein.volume()
+        assert isinstance(volume, float) and volume > 0.0
+
+    def test_get_residue_ambiguity_error_names_chains(self):
+        # Tests that get_residue raises an MBuildError that lists the
+        # candidate chains when a residue number repeats across chains,
+        # even when one residue sits under a wrapper Compound inside
+        # its chain. This is needed because the old error path read
+        # residue.parent.chain_id, and a wrapped fragment residue's
+        # parent is the wrapper, so the error report itself crashed
+        # with AttributeError. The test adds a wrapped residue with a
+        # duplicate number in a second chain and asserts on the
+        # message.
+        from mbuild.biopolymers.protein import Chain, Residue
+
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        wrapper = mb.Compound(name="wrapper")
+        wrapper.add(Residue(resname="LIG", resnum=221, hetatm=True))
+        chain = Chain(chain_id="B")
+        chain.add(wrapper)
+        protein.add(chain)
+        with pytest.raises(MBuildError, match=r"chains \['A', 'B'\]"):
+            protein.get_residue(221)
+
+    def test_downloaded_templates_load_from_user_cache(self, tmp_path, monkeypatch):
+        # Tests that a CCD definition already present in the user
+        # download cache loads without download=True. This is needed
+        # because the library searched only the caller paths and the
+        # bundled directory, so a template downloaded in one session
+        # was invisible in the next session unless the user passed
+        # download=True again. The test points the cache constant at a
+        # tmp directory, places a renamed copy of the bundled ALA
+        # definition there, and loads it with downloads disabled.
+        from mbuild.biopolymers import ccd
+
+        source = ccd.CCD_CACHE_DIR / "ALA.cif"
+        (tmp_path / "ZZZ.cif").write_text(source.read_text().replace("ALA", "ZZZ"))
+        monkeypatch.setattr(ccd, "USER_CCD_CACHE_DIR", tmp_path)
+        library = CCDLibrary(download=False)
+        variants = library["ZZZ"]
+        assert variants and variants[0].name == "ZZZ"
+
+    def test_to_parmed_rejects_residue_atom_name_collision(self):
+        # Tests that to_parmed raises a clear error when a residue name
+        # equals an atom name present in the protein. This is needed
+        # because the generic converter matches each atom's own name
+        # against the residue list before its ancestors, so a residue
+        # named like an atom (an ion residue CA next to alpha-carbon
+        # atoms CA) silently splits those atoms into spurious residues;
+        # the converter itself is core code that this recipe does not
+        # modify. The test renames one residue to CA and asserts on the
+        # error.
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        next(protein.residues()).name = "CA"
+        with pytest.raises(MBuildError, match=r"\['CA'\].*spurious"):
+            protein.to_parmed()
+
+    def test_cif_parser_reads_adjacent_loops(self):
+        # Tests that the CIF parser reads a loop_ block that follows
+        # another loop_ block with no '#' or blank separator. This is
+        # needed because the old parser consumed the second loop_ token
+        # inside the first block and dropped the second block, so a
+        # downloaded component file in that layout lost its bonds. The
+        # test parses a minimal component with adjacent atom and bond
+        # loops and checks that both survive.
+        from mbuild.biopolymers.ccd import parse_ccd_cif
+
+        text = "\n".join(
+            (
+                "data_ZZZ",
+                "_chem_comp.id ZZZ",
+                '_chem_comp.type "L-PEPTIDE LINKING"',
+                "loop_",
+                "_chem_comp_atom.comp_id",
+                "_chem_comp_atom.atom_id",
+                "_chem_comp_atom.type_symbol",
+                "_chem_comp_atom.charge",
+                "ZZZ C1 C 0",
+                "ZZZ C2 C 0",
+                "loop_",
+                "_chem_comp_bond.comp_id",
+                "_chem_comp_bond.atom_id_1",
+                "_chem_comp_bond.atom_id_2",
+                "_chem_comp_bond.value_order",
+                "ZZZ C1 C2 SING",
+            )
+        )
+        template = parse_ccd_cif(text)
+        assert {atom.name for atom in template.atoms} == {"C1", "C2"}
+        assert len(template.bonds) == 1
+
+    def test_cif_parser_reads_unknown_charge_token(self):
+        # Tests that the CIF parser treats the '?' unknown-value token
+        # and the '.' inapplicable-value token in the charge column as
+        # a formal charge of zero. This is needed because CCD component
+        # files downloaded from RCSB can carry these tokens, and
+        # int('?') crashed the parser. The test parses a minimal
+        # component with both tokens and checks the charges.
+        from mbuild.biopolymers.ccd import parse_ccd_cif
+
+        text = "\n".join(
+            (
+                "data_ZZZ",
+                "_chem_comp.id ZZZ",
+                "loop_",
+                "_chem_comp_atom.comp_id",
+                "_chem_comp_atom.atom_id",
+                "_chem_comp_atom.type_symbol",
+                "_chem_comp_atom.charge",
+                "ZZZ C1 C ?",
+                "ZZZ C2 C .",
+            )
+        )
+        template = parse_ccd_cif(text)
+        assert [atom.formal_charge for atom in template.atoms] == [0, 0]
+
+    def test_default_libraries_share_parsed_templates(self):
+        # Tests that two CCDLibrary instances share the parsed variant
+        # list of one cif file. This is needed because every Protein()
+        # builds its own default library, and re-parsing the bundled
+        # files dominated the load time of every Protein after the
+        # first. The test compares object identity across two default
+        # instances, which only the class-level parse cache can give.
+        assert CCDLibrary()["ALA"] is CCDLibrary()["ALA"]
+
+    def test_port_cleanup_leaves_consistent_state(self):
+        # Tests that the port creation path removes the auto-generated
+        # ports and keeps the atom's remaining bonds. This is needed
+        # because the cleanup no longer goes through Compound.remove,
+        # which rescanned every particle of the protein per call; the
+        # direct removal must leave the same state. The test creates a
+        # port at a CB atom and checks that the returned Port is the
+        # only port and that the bond graph keeps the other neighbors.
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        port = protein.add_port_at(221, "CB")
+        assert list(protein.all_ports()) == [port]
+        cb = protein.get_atom(221, "CB")
+        assert sorted(p.name for p in cb.direct_bonds()) == ["CA", "HB3", "SG"]

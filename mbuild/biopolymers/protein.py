@@ -147,6 +147,17 @@ class _Match:
     expects_crosslink: bool
 
 
+def _chain_of(residue):
+    """Return the Chain ancestor of a residue.
+
+    A fragment residue can sit under a wrapper Compound inside its
+    Chain, so the direct parent is not always the Chain.
+    """
+    return next(
+        ancestor for ancestor in residue.ancestors() if isinstance(ancestor, Chain)
+    )
+
+
 def _atom_in_residue(residue, atom_name):
     """Return the named particle of a residue, or None.
 
@@ -240,6 +251,98 @@ def _match_residue(group, variants, prior_possible, posterior_possible):
             "or reduce) and uses standard PDB atom names."
         )
     return matches
+
+
+def _filter_crosslink_candidates(groups, all_candidates, conects):
+    """Reject crosslink candidate matches that CONECT records contradict.
+
+    A bridged cysteine (HG absent) matches two kinds of variants: the
+    neutral crosslink variants (``expects_crosslink=True``) and the
+    deprotonated thiolate variants (``expects_crosslink=False``). The
+    two disagree on the SG formal charge, so ``_matches_agree`` would
+    reject every disulfide-containing file. The CONECT records decide
+    between them: a candidate whose variant carries a crosslink atom is
+    kept only when its crosslink expectation equals the presence of an
+    SS CONECT to a crosslink-capable partner residue. A partner is
+    crosslink-capable when any of its own pre-filter candidates expects
+    the crosslink; capability is computed before any rejection, so two
+    bridged residues validate each other. Candidates whose variant has
+    no crosslink atom are kept unchanged. This mirrors openff-pablo's
+    ``filter_on_crosslinks`` rule.
+
+    Returns the filtered candidate lists. Raises MBuildError when the
+    rule leaves a residue with no candidate.
+    """
+
+    def crosslink_serial(group, match):
+        """Return the serial of the match's crosslink atom, or None."""
+        name = match.variant.crosslink[0]
+        for record in group.records:
+            atom = match.record_atoms.get(id(record))
+            if atom is not None and atom.name == name:
+                return record.serial
+        return None
+
+    serial_owner = {}
+    for index, (group, candidates) in enumerate(zip(groups, all_candidates)):
+        for match in candidates:
+            if match.expects_crosslink:
+                serial = crosslink_serial(group, match)
+                if serial is not None:
+                    serial_owner[serial] = index
+
+    partners_of = {}
+    for pair in conects:
+        serials = tuple(pair)
+        if len(serials) != 2:
+            continue
+        partners_of.setdefault(serials[0], set()).add(serials[1])
+        partners_of.setdefault(serials[1], set()).add(serials[0])
+
+    filtered = []
+    for index, (group, candidates) in enumerate(zip(groups, all_candidates)):
+        kept = []
+        rejected = []
+        for match in candidates:
+            if not match.variant.crosslink:
+                kept.append(match)
+                continue
+            serial = crosslink_serial(group, match)
+            if serial is None:
+                kept.append(match)
+                continue
+            linked = any(
+                serial_owner.get(other, index) != index
+                for other in partners_of.get(serial, ())
+            )
+            if match.expects_crosslink == linked:
+                kept.append(match)
+            else:
+                rejected.append((match, linked))
+        if not kept:
+            match, linked = rejected[0]
+            for candidate in rejected:
+                if candidate[1] and not candidate[0].expects_crosslink:
+                    match, linked = candidate
+                    break
+            name = match.variant.crosslink[0]
+            leaving = sorted(match.variant.leaving_fragment_of(name))
+            if linked:
+                raise MBuildError(
+                    f"Residue {group.label}: a CONECT record joins its "
+                    f"{name} atom to the {name} atom of another residue, "
+                    f"which signals a disulfide, but its {leaving} atoms "
+                    "are present. Remove the CONECT record, or remove the "
+                    f"{leaving} atoms to form the disulfide."
+                )
+            raise MBuildError(
+                f"Residue {group.label} is missing its {leaving} atoms, "
+                "which signals a crosslink, but no CONECT record connects "
+                f"it to a crosslink partner. Add a CONECT record between "
+                f"the two {name} atoms, or restore the {leaving} atoms."
+            )
+        filtered.append(kept)
+    return filtered
 
 
 def _matches_agree(matches, group):
@@ -371,17 +474,26 @@ class Protein(Compound):
                 and not groups[i].ter_after
             )
 
-        matches = []
+        all_candidates = []
         for i, group in enumerate(groups):
             prior_possible = i > 0 and linked(i - 1, i)
             posterior_possible = i < len(groups) - 1 and linked(i, i + 1)
-            candidates = _match_residue(
-                group,
-                self.library[group.resname],
-                prior_possible,
-                posterior_possible,
+            all_candidates.append(
+                _match_residue(
+                    group,
+                    self.library[group.resname],
+                    prior_possible,
+                    posterior_possible,
+                )
             )
-            matches.append(_matches_agree(candidates, group))
+        # A bridged cysteine matches both the crosslink variants and the
+        # thiolate variants; the CONECT records decide between them
+        # before the consensus check.
+        all_candidates = _filter_crosslink_candidates(groups, all_candidates, conects)
+        matches = [
+            _matches_agree(candidates, group)
+            for candidates, group in zip(all_candidates, groups)
+        ]
 
         self._build(groups, matches, conects)
         if box is not None:
@@ -548,13 +660,23 @@ class Protein(Compound):
     # ------------------------------------------------------------------
     # Canonical Compound verbs, routed to residue-aware behavior
     # ------------------------------------------------------------------
+    #: File extensions that ``conversion.save`` routes through GMSO.
+    _GMSO_EXTENSIONS = frozenset((".gro", ".gsd", ".data", ".xyz", ".mcf", ".top"))
+
     def save(self, filename, **kwargs):
         """Save the protein; ``.pdb`` files route to ``save_pdb``.
 
         The generic ParmEd writer cannot express residue numbers, chain
         identifiers, or CONECT records, so a plain ``save`` would write
         a file that silently loses the protein's identity.
+
+        GMSO-routed extensions (.gro, .gsd, .data, .xyz, .mcf, .top) are
+        written from this class's ``to_gmso`` override, because
+        ``conversion.save`` calls the module-level converter, which
+        collapses the protein into one residue.
         """
+        import os
+
         if str(filename).lower().endswith(".pdb"):
             unexpected = set(kwargs) - {"overwrite"}
             if unexpected:
@@ -564,6 +686,25 @@ class Protein(Compound):
                     "would be ignored."
                 )
             return self.save_pdb(filename, overwrite=kwargs.get("overwrite", False))
+        extension = os.path.splitext(str(filename))[-1].lower()
+        if extension in self._GMSO_EXTENSIONS:
+            overwrite = kwargs.pop("overwrite", False)
+            if os.path.exists(filename) and not overwrite:
+                raise IOError(f"{filename} exists; not overwriting")
+            # conversion.save consumes these two and does not hand them
+            # to the GMSO writers; drop them the same way.
+            kwargs.pop("residues", None)
+            kwargs.pop("include_ports", None)
+            topology = self.to_gmso(box=kwargs.pop("box", None))
+            if extension == ".gro":
+                # The gro writer reads site.molecule before
+                # site.residue, and molecule holds the chain label.
+                # Clear it so the writer takes the per-residue name
+                # that this class's to_gmso set.
+                for site in topology.sites:
+                    site.molecule = None
+            topology.save(filename=filename, overwrite=overwrite, **kwargs)
+            return
         return super().save(filename, **kwargs)
 
     def to_parmed(self, **kwargs):
@@ -573,9 +714,32 @@ class Protein(Compound):
         default must fill in whenever the value is None, not only when
         the key is absent — otherwise every ParmEd-routed format (mol2,
         psf, ...) collapses the protein into one residue.
+
+        Raises MBuildError when a residue name equals an atom name
+        present in the protein. The generic converter matches each
+        atom's own name against the residue list before it checks the
+        atom's ancestors, so such a collision (for example a calcium
+        ion residue ``CA`` next to alpha-carbon atoms ``CA``) would
+        silently split those atoms into spurious residues. Rename the
+        residue before this export, or write a PDB with ``save_pdb``.
         """
         if kwargs.get("residues") is None:
             kwargs["residues"] = sorted({residue.name for residue in self.residues()})
+        residue_names = kwargs["residues"]
+        if isinstance(residue_names, str):
+            residue_names = [residue_names]
+        colliding = set(residue_names) & {
+            particle.name for particle in self.particles()
+        }
+        if colliding:
+            raise MBuildError(
+                f"Residue names {sorted(colliding)} equal atom names in "
+                "this protein. The ParmEd converter matches atom names "
+                "against the residue list first, so these atoms would "
+                "split into spurious residues. Rename the residues "
+                "(residue.name = ...) before this export, or write a "
+                "PDB with save_pdb()."
+            )
         return super().to_parmed(**kwargs)
 
     def to_gmso(self, **kwargs):
@@ -601,7 +765,14 @@ class Protein(Compound):
         particle_residue = self._particle_residues()
         particles = list(self.particles())
         sites = list(topology.sites)
-        if len(sites) != len(particles) or any(
+        # The guard compares site count, per-site names, and per-site
+        # positions. Names alone cannot detect a reorder of same-name
+        # residues; positions can, because every atom sits at its own
+        # coordinates.
+        aligned = len(sites) == len(particles) and np.allclose(
+            topology.positions.to_value("nm"), self.xyz, atol=1e-6
+        )
+        if not aligned or any(
             site.name != particle.name for site, particle in zip(sites, particles)
         ):
             raise MBuildError(
@@ -615,7 +786,27 @@ class Protein(Compound):
                 site.residue = GMSOResidue(name=residue.name, number=residue.resnum)
         return topology
 
-    def to_rdkit(self):
+    def to_trajectory(self, include_ports=False, chains=None, residues=None, box=None):
+        """Create an mdtraj Trajectory that keeps chains and residues.
+
+        The generic converter assigns every atom to one default residue
+        unless the caller lists the chain and residue names. This
+        override fills both lists from the hierarchy, so each Chain and
+        each Residue compound becomes its own mdtraj chain and residue.
+        Caller-provided values win.
+        """
+        if chains is None:
+            chains = sorted({chain.name for chain in self.chains})
+        if residues is None:
+            residues = sorted({residue.name for residue in self.residues()})
+        return super().to_trajectory(
+            include_ports=include_ports,
+            chains=chains,
+            residues=residues,
+            box=box,
+        )
+
+    def to_rdkit(self, embed=False):
         """Create a sanitized RDKit molecule of the (modified) protein.
 
         Unlike the generic ``Compound.to_rdkit``, this export carries
@@ -624,7 +815,21 @@ class Protein(Compound):
         one conformer, and PDB residue info on every atom. The result
         sanitizes, so it is directly usable by RDKit and by tools that
         consume RDKit molecules.
+
+        Parameters
+        ----------
+        embed : bool, optional, default=False
+            Accepted for compatibility with ``Compound.to_rdkit``
+            (``Compound.volume`` passes ``embed=True``). The value is
+            ignored: the molecule always carries one conformer with the
+            protein's real coordinates, and a new embedding would
+            replace them with generated ones.
         """
+        if embed:
+            logger.debug(
+                "Protein.to_rdkit ignores embed=True: the export always "
+                "carries the protein's real coordinates."
+            )
         rdkit = import_("rdkit")  # noqa: F841
         from rdkit import Chem
 
@@ -737,7 +942,15 @@ class Protein(Compound):
         platform : str, optional, default="CPU"
             OpenMM platform name.
         """
-        from mbuild.simulation import OpenMMSimulation
+        try:
+            from mbuild.simulation import OpenMMSimulation
+        except ImportError as error:
+            raise MBuildError(
+                "relax_fragments() needs mbuild.simulation, which is not "
+                f"importable here ({error}). Install the simulation "
+                "dependencies (hoomd, openmm; see environment-dev.yml) "
+                "to relax fragments."
+            ) from error
 
         targets = (
             list(residues)
@@ -914,7 +1127,7 @@ class Protein(Compound):
         added.add(frag_port, label="attach_frag")
 
         # Renumber fragment residues into the site's chain.
-        chain = next(c for c in site_residue.ancestors() if isinstance(c, Chain))
+        chain = _chain_of(site_residue)
         next_resnum = max(r.resnum for r in self.residues(chain.chain_id)) + 1
         for offset, residue in enumerate(frag_residues):
             residue.resnum = next_resnum + offset
@@ -931,14 +1144,9 @@ class Protein(Compound):
             bond_order=float(bond_order),
         )
 
-        clashes = self._warn_on_clashes(added, site_atom, frag_atom)
-        if clashes and relax:
-            logger.info("Relaxing the placed fragment with the protein held fixed.")
-            self.relax_fragments(residues=frag_residues)
-            clashes = self._warn_on_clashes(added, site_atom, frag_atom)
-            if not clashes:
-                logger.info("Fragment overlaps resolved by relaxation.")
-
+        # The record is appended before the relaxation step, so the
+        # protein state stays complete and consistent when relaxation
+        # fails: the fragment is already bonded at this point.
         record = InterResidueBond(
             residue1=site_residue,
             residue2=frag_residue,
@@ -949,6 +1157,29 @@ class Protein(Compound):
             leaving2=tuple(sorted(h.name for h in frag_hydrogens)),
         )
         self.cross_bonds.append(record)
+
+        clashes = self._warn_on_clashes(added, site_atom, frag_atom)
+        if clashes and relax:
+            try:
+                import mbuild.simulation  # noqa: F401
+            except ImportError as error:
+                # The automatic path only warns: the attachment itself
+                # is complete, and the user can relax later on a system
+                # with the simulation dependencies installed.
+                logger.warning(
+                    "Cannot relax the placed fragment: mbuild.simulation "
+                    f"is not importable ({error}). Install the simulation "
+                    "dependencies (hoomd, openmm) or call "
+                    "relax_fragments() elsewhere. The fragment keeps its "
+                    "rigid placement."
+                )
+            else:
+                logger.info("Relaxing the placed fragment with the protein held fixed.")
+                self.relax_fragments(residues=frag_residues)
+                clashes = self._warn_on_clashes(added, site_atom, frag_atom)
+                if not clashes:
+                    logger.info("Fragment overlaps resolved by relaxation.")
+
         return record
 
     @staticmethod
@@ -968,9 +1199,18 @@ class Protein(Compound):
         residue = atom.parent
         old_ports = {p for p in residue.children if isinstance(p, Port)}
         root.remove(hydrogens)
-        root.remove(
-            [p for p in residue.children if isinstance(p, Port) and p not in old_ports]
-        )
+        # Compound.remove removes a Port with three constant-cost
+        # operations and then rescans every particle of the root in
+        # _prune_ghost_ports. The ports removed here were created by
+        # the remove() call above and anchor an atom that is still
+        # present, so that rescan finds nothing. Apply the same three
+        # operations directly and skip the second full-protein scan.
+        for port in [
+            p for p in residue.children if isinstance(p, Port) and p not in old_ports
+        ]:
+            root._remove(port)
+            port.parent.children.remove(port)
+            root._remove_references(port)
         return Port(anchor=atom, orientation=orientation, separation=separation / 2)
 
     @staticmethod
@@ -1137,9 +1377,11 @@ class Protein(Compound):
                 + (f" in chain {chain_id}" if chain_id else "")
             )
         if len(found) > 1:
+            # _chain_of, not parent: a wrapped fragment residue's
+            # parent is its wrapper Compound, not the Chain.
             raise MBuildError(
                 f"Residue number {resnum} is ambiguous across chains "
-                f"{[r.parent.chain_id for r in found]}; pass chain_id."
+                f"{[_chain_of(r).chain_id for r in found]}; pass chain_id."
             )
         return found[0]
 
