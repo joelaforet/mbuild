@@ -290,6 +290,60 @@ class TestProtein(BaseTest):
         with pytest.raises(MBuildError, match="download=True"):
             Protein(str(bad_residue))
 
+    def test_insertion_codes_2mum(self):
+        # Tests that a PDB with insertion codes loads with the inserted
+        # residues addressable through get_residue(resnum, icode=...)
+        # and keeps the codes through a save_pdb round trip. This is
+        # needed because numbering schemes for antibodies and proteases
+        # insert residues under a shared number, the loader keys
+        # residues on (resnum, icode), and the writer sorts by the same
+        # pair. The test loads the prepared 2MUM structure, addresses
+        # two residues that share number 28, and compares the insertion
+        # codes and the residue count after a round trip.
+        protein = Protein(get_fn("2MUM_icode.pdb"))
+        residues = list(protein.residues())
+        assert len(residues) == 50
+        inserted = sorted((r.resnum, r.icode) for r in residues if r.icode)
+        assert inserted == [(14, "A"), (28, "A"), (28, "B"), (34, "A"), (40, "A")]
+        assert protein.get_residue(28, icode="A").name == "ASP"
+        assert protein.get_residue(28, icode="B").name == "CYS"
+        assert protein.get_residue(28).name == "TYR"
+
+        protein.save_pdb("2mum_roundtrip.pdb")
+        reloaded = Protein("2mum_roundtrip.pdb")
+        assert len(list(reloaded.residues())) == 50
+        assert (
+            sorted((r.resnum, r.icode) for r in reloaded.residues() if r.icode)
+            == inserted
+        )
+
+    def test_multichain_no_ter_1p3q(self):
+        # Tests that a four-chain PDB without TER records loads into
+        # four chains and that no peptide bond crosses a chain
+        # boundary. This is needed because without TER records the
+        # loader must separate chains from the chain identifier column
+        # alone, and a linker keyed only on record adjacency would bond
+        # the last residue of one chain to the first residue of the
+        # next. The test loads the prepared 1p3q structure, checks the
+        # chain ids, checks each chain-boundary residue pair for bonds,
+        # and round-trips the chain count through save_pdb.
+        protein = Protein(get_fn("1p3q_noter.pdb"))
+        chain_ids = [chain.chain_id for chain in protein.chains]
+        assert chain_ids == ["A", "B", "C", "D"]
+        for earlier, later in zip(chain_ids, chain_ids[1:]):
+            last = set(list(protein.residues(chain_id=earlier))[-1].particles())
+            first = set(
+                next(iter(protein.residues(chain_id=later))).particles()
+            )
+            assert not any(
+                (a in last and b in first) or (a in first and b in last)
+                for a, b in protein.bonds()
+            )
+
+        protein.save_pdb("1p3q_roundtrip.pdb")
+        reloaded = Protein("1p3q_roundtrip.pdb")
+        assert [chain.chain_id for chain in reloaded.chains] == chain_ids
+
     def test_get_atom(self, protein_6m03):
         # Tests that residues and atoms are addressable by residue number
         # and atom name. This is needed because functionalization
