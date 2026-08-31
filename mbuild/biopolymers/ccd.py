@@ -8,8 +8,8 @@ mBuild Compounds.
 The data model follows the practice of residue-template readers,
 inspired by and verified to be compatible with openff-pablo
 (https://github.com/openforcefield/openff-pablo), so that a protein
-loaded and modified with mBuild round-trips through such tools without
-translation. In particular:
+loaded into and modified by mBuild can be exported to software that can
+assign parameters. In particular:
 
 - Each atom carries a ``leaving`` flag. Leaving atoms are the atoms that
   are absent from a PDB file when the corresponding inter-residue bond
