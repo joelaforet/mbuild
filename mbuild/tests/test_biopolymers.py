@@ -332,9 +332,7 @@ class TestProtein(BaseTest):
         assert chain_ids == ["A", "B", "C", "D"]
         for earlier, later in zip(chain_ids, chain_ids[1:]):
             last = set(list(protein.residues(chain_id=earlier))[-1].particles())
-            first = set(
-                next(iter(protein.residues(chain_id=later))).particles()
-            )
+            first = set(next(iter(protein.residues(chain_id=later))).particles())
             assert not any(
                 (a in last and b in first) or (a in first and b in last)
                 for a, b in protein.bonds()
@@ -514,12 +512,6 @@ class TestProtein(BaseTest):
         assert "Relax the structure" in caplog.text
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    @pytest.mark.skipif(
-        not (has_hoomd and has_openmm),
-        reason="relax_fragments needs mbuild.simulation (hoomd) and openmm",
-    )
-
-    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_attach_without_simulation_support(self, protein_6m03, caplog, monkeypatch):
         # Tests that attach() returns a complete recorded bond and only
         # warns when mbuild.simulation cannot import, and that a direct
@@ -551,6 +543,11 @@ class TestProtein(BaseTest):
         with pytest.raises(MBuildError, match="not importable"):
             protein.relax_fragments()
 
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    @pytest.mark.skipif(
+        not (has_hoomd and has_openmm),
+        reason="relax_fragments needs mbuild.simulation (hoomd) and openmm",
+    )
     def test_relax_fragments(self, protein_6m03):
         # Tests that relax_fragments() pulls a clashing attached
         # fragment out of steric overlap while the protein stays fixed.
