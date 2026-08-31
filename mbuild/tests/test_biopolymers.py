@@ -809,6 +809,8 @@ class TestPdbWriterFixesB(BaseTest):
         protein.save_pdb(str(out))
         lines = out.read_text().splitlines()
         assert sum(line.startswith("CONECT") for line in lines) == 0
+
+
 class TestFragmentFixesC(BaseTest):
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_prepare_fragment_keeps_multiple_residues(self):
