@@ -68,7 +68,12 @@ def fragment_from_smiles(smiles, resname):
     explicit = Chem.AddHs(mol)
     charges = [atom.GetFormalCharge() for atom in explicit.GetAtoms()]
     elements = [atom.GetSymbol() for atom in explicit.GetAtoms()]
-    copied = from_rdkit(rdkit_mol=mol)
+    # Pass the explicit-hydrogen molecule. from_rdkit calls AddHs on
+    # its input; on a molecule whose hydrogens are already explicit
+    # that call adds no atoms and keeps the atom order. The particle
+    # order and the charges list then come from one AddHs result, so
+    # the positional mapping below is exact.
+    copied = from_rdkit(rdkit_mol=explicit)
     residue = Protein._wrap_in_residue(copied, resname)
     Protein._ensure_unique_atom_names(residue)
     particles = list(residue.particles())
