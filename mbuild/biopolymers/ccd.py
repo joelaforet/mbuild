@@ -255,7 +255,18 @@ class ResidueTemplate:
         return sum(atom.formal_charge for atom in self.atoms)
 
     def bonded_names(self, name):
-        """Return the canonical names bonded to the named atom."""
+        """Return the canonical names bonded to the named atom.
+
+        Parameters
+        ----------
+        name : str
+            Canonical atom name.
+
+        Returns
+        -------
+        set of str
+            The bonded canonical names; empty for an unknown name.
+        """
         return self._neighbors.get(name, set())
 
     def leaving_fragment_of(self, name):
@@ -265,6 +276,16 @@ class ResidueTemplate:
         (non-leaving) atom through leaving atoms only. This is the set of
         atoms that must be absent from a PDB file for a bond formed at the
         named atom, and it matches Pablo's leaving-fragment semantics.
+
+        Parameters
+        ----------
+        name : str
+            Canonical name of a non-leaving atom.
+
+        Returns
+        -------
+        set of str
+            The names of the connected leaving atoms.
         """
         atom_by_name = self._atom_by_name
         fragment = set()
@@ -311,6 +332,16 @@ class ResidueTemplate:
 
         The formal charge of the atom bonded to the proton is decremented,
         following Pablo's ``ResidueDefinition.deprotonated_at``.
+
+        Parameters
+        ----------
+        name : str
+            Canonical name of the hydrogen to remove.
+
+        Returns
+        -------
+        ResidueTemplate
+            A new template without the proton.
         """
         atom = self._atom_by_name.get(name)
         if atom is None or atom.element != "H":
@@ -344,6 +375,18 @@ class ResidueTemplate:
         The heavy atom's formal charge is incremented and the new proton
         inherits its ``leaving`` flag, following Pablo's
         ``ResidueDefinition.protonated_at``.
+
+        Parameters
+        ----------
+        heavy_name : str
+            Canonical name of the heavy atom to protonate.
+        proton_name : str
+            Name given to the added proton.
+
+        Returns
+        -------
+        ResidueTemplate
+            A new template with the proton added.
         """
         heavy = self._atom_by_name.get(heavy_name)
         if heavy is None:
@@ -427,6 +470,16 @@ def parse_ccd_cif(text):
 
     The base template is the unpatched CCD species (e.g. the free amino
     acid with OXT/HXT/H2 present and flagged as leaving atoms).
+
+    Parameters
+    ----------
+    text : str
+        The content of one CCD component ``.cif`` file.
+
+    Returns
+    -------
+    ResidueTemplate
+        The base template, before patches and protonation variants.
     """
     keys, loops = _parse_cif_blocks(text)
     resname = keys.get("_chem_comp.id")
@@ -632,6 +685,7 @@ class CCDLibrary:
         self._templates = {}
 
     def __contains__(self, resname):
+        """Return True when the residue name resolves to templates."""
         try:
             self[resname]
         except KeyError:
@@ -646,6 +700,12 @@ class CCDLibrary:
         return self._templates[resname]
 
     def _load(self, resname):
+        """Read, parse, patch, and expand the templates for one residue.
+
+        The search paths are tried in order; a missing file falls back
+        to the RCSB download when ``download=True``. Parsed variant
+        lists are cached class-wide, keyed by file path and mtime.
+        """
         text = None
         cache_key = None
         for directory in self._paths:
@@ -673,6 +733,7 @@ class CCDLibrary:
         return variants
 
     def _download_cif(self, resname):
+        """Download one CCD ``.cif`` file into the user cache directory."""
         import urllib.request
 
         cache_dir = USER_CCD_CACHE_DIR

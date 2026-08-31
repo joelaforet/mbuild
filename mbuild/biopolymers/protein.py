@@ -65,18 +65,23 @@ class Chain(Compound):
 class Residue(Compound):
     """One residue of a biopolymer. Children are atom particles.
 
+    Parameters
+    ----------
+    resname : str, optional, default="RES"
+        The residue name.
+    resnum : int, optional, default=1
+        The PDB residue sequence number.
+    icode : str, optional, default=""
+        The PDB insertion code.
+    hetatm : bool, optional, default=False
+        True if the residue was read from (or should be written as)
+        HETATM records.
+
     Attributes
     ----------
-    resnum : int
-        The PDB residue sequence number.
-    icode : str
-        The PDB insertion code ("" when absent).
     original_name : str
         The residue name at load time; ``name`` may change when the
         residue is modified.
-    hetatm : bool
-        True if the residue was read from (or should be written as)
-        HETATM records.
     template : mbuild.biopolymers.ccd.ResidueTemplate or None
         The matched template variant, kept for chemistry lookups.
     formal_charge : int
@@ -449,6 +454,7 @@ class Protein(Compound):
     # Loading
     # ------------------------------------------------------------------
     def _load_pdb(self, filename):
+        """Parse the PDB file, match every residue, and build the hierarchy."""
         with open(filename) as handle:
             text = handle.read()
         groups, conects, box = _parse_pdb(text)
@@ -500,6 +506,7 @@ class Protein(Compound):
             self.box = box
 
     def _build(self, groups, matches, conects):
+        """Build chains, residues, particles, and intra-residue bonds."""
         # Build each residue fully while it is detached, and attach whole
         # chains at the end: Compound.add composes the parent's entire
         # bond graph on every attach, so adding particles under an
@@ -557,6 +564,7 @@ class Protein(Compound):
         self._check_conects(conects, serial_to_particle)
 
     def _bond_backbone(self, groups, matches, residues):
+        """Form the peptide bonds that the matched variants expect."""
         for i in range(len(groups) - 1):
             here, there = matches[i], matches[i + 1]
             if here.expects_posterior != there.expects_prior:
@@ -587,6 +595,7 @@ class Protein(Compound):
             self.add_bond((carbon, nitrogen), bond_order=1.0)
 
     def _bond_crosslinks(self, groups, matches, residues, conects):
+        """Form the crosslink bonds and record them in ``cross_bonds``."""
         expecting = {}
         for group, match, residue in zip(groups, matches, residues):
             if match.expects_crosslink:
@@ -641,6 +650,7 @@ class Protein(Compound):
             satisfied.update((serial, partner_serial))
 
     def _check_conects(self, conects, serial_to_particle):
+        """Verify that every CONECT record maps to a template-predicted bond."""
         for pair in conects:
             serials = tuple(pair)
             if len(serials) == 1:
@@ -674,6 +684,15 @@ class Protein(Compound):
         written from this class's ``to_gmso`` override, because
         ``conversion.save`` calls the module-level converter, which
         collapses the protein into one residue.
+
+        Parameters
+        ----------
+        filename : str
+            Path of the file to write. The extension selects the
+            writer.
+        **kwargs
+            Passed to the selected writer. For ``.pdb`` files only
+            ``overwrite`` is accepted.
         """
         import os
 
@@ -722,6 +741,17 @@ class Protein(Compound):
         ion residue ``CA`` next to alpha-carbon atoms ``CA``) would
         silently split those atoms into spurious residues. Rename the
         residue before this export, or write a PDB with ``save_pdb``.
+
+        Parameters
+        ----------
+        **kwargs
+            Passed to ``Compound.to_parmed``. ``residues`` defaults to
+            the residue names of this protein.
+
+        Returns
+        -------
+        parmed.Structure
+            The ParmEd structure with per-residue assignments.
         """
         if kwargs.get("residues") is None:
             kwargs["residues"] = sorted({residue.name for residue in self.residues()})
@@ -745,18 +775,28 @@ class Protein(Compound):
     def to_gmso(self, **kwargs):
         """Create a GMSO topology that keeps residue identity.
 
-        The generic converter derives each site's residue from the
-        particle's direct parent, which renumbers residues per name
-        and misses fragment residues whose particles sit one level
-        deeper in the hierarchy. This override rewrites every site's
-        residue with the hierarchy's residue name and real PDB number,
-        so GMSO's residue metadata matches the structure. Chains stay
+        The generic converter numbers residues by counting the
+        occurrences of each residue name, so the numbers restart at 0
+        per name and do not match the PDB file. This override rewrites
+        every site's residue with the hierarchy's residue name and
+        real PDB number, so GMSO's residue metadata matches the
+        structure. Chains stay
         available through each site's molecule/group labels.
 
         Not carried over, because GMSO's data model has no slot for
         them: formal charges (a GMSO site charge is a partial charge,
         so it stays unset for a typing engine to fill), bond orders,
         insertion codes, and the HETATM flag.
+
+        Parameters
+        ----------
+        **kwargs
+            Passed to ``Compound.to_gmso``.
+
+        Returns
+        -------
+        gmso.Topology
+            The topology with per-site residue names and numbers.
         """
         gmso = import_("gmso")  # noqa: F841
         from gmso.abc.abstract_site import Residue as GMSOResidue
@@ -794,6 +834,24 @@ class Protein(Compound):
         override fills both lists from the hierarchy, so each Chain and
         each Residue compound becomes its own mdtraj chain and residue.
         Caller-provided values win.
+
+        Parameters
+        ----------
+        include_ports : bool, optional, default=False
+            Include ghost particles of open ports.
+        chains : list of str, optional
+            Chain names to map to mdtraj chains. Default: the names of
+            this protein's Chain compounds.
+        residues : list of str, optional
+            Residue names to map to mdtraj residues. Default: the
+            residue names of this protein.
+        box : mbuild.Box, optional
+            The unit cell written to the trajectory. Default: this
+            protein's box, or its bounding box with a 0.5 nm pad.
+
+        Returns
+        -------
+        mdtraj.Trajectory
         """
         if chains is None:
             chains = sorted({chain.name for chain in self.chains})
@@ -824,6 +882,11 @@ class Protein(Compound):
             ignored: the molecule always carries one conformer with the
             protein's real coordinates, and a new embedding would
             replace them with generated ones.
+
+        Returns
+        -------
+        rdkit.Chem.Mol
+            The sanitized molecule.
         """
         if embed:
             logger.debug(
@@ -990,6 +1053,29 @@ class Protein(Compound):
         Use it with ``force_overlap`` for placements ``attach()`` does
         not cover. Bonds formed this way are not recorded in
         ``cross_bonds``.
+
+        Parameters
+        ----------
+        resnum : int
+            Residue number of the target residue.
+        atom_name : str
+            Name of the atom that anchors the port. It must have at
+            least ``bond_order`` bonded hydrogens.
+        chain_id : str, optional
+            Chain of the target residue; required when residue numbers
+            repeat across chains.
+        icode : str, optional
+            Insertion code of the target residue.
+        separation : float, optional, default=0.15
+            Length of the bond the port will form, in nanometers.
+        bond_order : int, optional, default=1
+            Order of the bond the port will form; one hydrogen leaves
+            per unit.
+
+        Returns
+        -------
+        mbuild.Port
+            The port, anchored at the named atom.
         """
         residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
         atom = self._atom_of(residue, atom_name)
@@ -1064,12 +1150,24 @@ class Protein(Compound):
             Order of the new bond.
         separation : float, optional, default=0.15
             Length of the new bond in nanometers.
+        relax : bool, optional, default=True
+            When the placed fragment overlaps existing atoms, run a
+            short energy minimization that moves only the fragment
+            (see ``relax_fragments``).
 
         Returns
         -------
         InterResidueBond
             The recorded bond, as appended to ``cross_bonds``.
         """
+        # fragments.py imports Residue from this module, so a top-level
+        # import of fragments here would be circular. Import inside the
+        # method instead.
+        from mbuild.biopolymers.fragments import (
+            _ensure_unique_atom_names,
+            _wrap_in_residue,
+        )
+
         bond_order = int(bond_order)
         site_residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
         site_atom = self._atom_of(site_residue, atom_name)
@@ -1085,10 +1183,10 @@ class Protein(Compound):
                 child for child in added.successors() if isinstance(child, Residue)
             ]
             if not frag_residues:
-                added = self._wrap_in_residue(added, fragment_resname)
+                added = _wrap_in_residue(added, fragment_resname)
                 frag_residues = [added]
         for residue in frag_residues:
-            self._ensure_unique_atom_names(residue)
+            _ensure_unique_atom_names(residue)
 
         if fragment_atom_name is None:
             linked = [
@@ -1218,8 +1316,8 @@ class Protein(Compound):
         """Return ``count`` hydrogens bonded to the atom (sorted by name).
 
         One hydrogen leaves per unit of bond order. Reactions that
-        remove other leaving groups (e.g. condensations) are the domain
-        of future reaction recipes built on top of ``attach``.
+        remove other leaving groups (e.g. condensations) belong in
+        future reaction recipes that use ``attach``.
         """
         if not 1 <= count <= 3:
             raise MBuildError(f"bond_order must be 1, 2, or 3; you passed {count}.")
@@ -1271,42 +1369,6 @@ class Protein(Compound):
         return n_clashes
 
     @staticmethod
-    def _wrap_in_residue(compound, fragment_resname):
-        """Wrap a plain Compound into a single Residue."""
-        resname = (fragment_resname or compound.name or "LIG")[:3].upper()
-        if not resname.isalnum():
-            resname = "LIG"
-        residue = Residue(resname=resname, resnum=1, hetatm=True)
-        residue.add(compound)
-        logger.info(f"Fragment {compound.name!r} wrapped into residue {resname!r}.")
-        return residue
-
-    @staticmethod
-    def _ensure_unique_atom_names(residue):
-        """Rename particles element+index when names repeat in a residue.
-
-        The PDB export and template matching need atom names that are
-        unique within each residue; fragments from SMILES usually name
-        every carbon "C".
-        """
-        names = [particle.name for particle in residue.particles()]
-        if len(set(names)) == len(names):
-            return
-        counters = {}
-        for particle in residue.particles():
-            symbol = (
-                particle.element.symbol.upper()
-                if particle.element is not None
-                else particle.name.upper()
-            )
-            counters[symbol] = counters.get(symbol, 0) + 1
-            particle.name = f"{symbol}{counters[symbol]}"
-        logger.info(
-            f"Renamed atoms of residue {residue.name} to element+index "
-            "names so they are unique within the residue."
-        )
-
-    @staticmethod
     def _find_fragment_atom(frag_residues, atom_name, fragment_resnum):
         """Locate the named atom among the fragment residues."""
         hits = []
@@ -1352,6 +1414,16 @@ class Protein(Compound):
         of nodes instead of hundreds of residues. This method backs
         ``get_residue``, ``net_formal_charge``, and the exports, so it
         must stay fast.
+
+        Parameters
+        ----------
+        chain_id : str, optional
+            Yield only the residues of this chain.
+
+        Yields
+        ------
+        Residue
+            The next residue, in hierarchy order.
         """
         for chain in self.chains:
             if chain_id is not None and chain.chain_id != chain_id:
@@ -1365,7 +1437,24 @@ class Protein(Compound):
                     stack.extendleft(reversed(child.children))
 
     def get_residue(self, resnum, chain_id=None, icode=""):
-        """Return the residue with the given number (and chain/icode)."""
+        """Return the residue with the given number (and chain/icode).
+
+        Parameters
+        ----------
+        resnum : int
+            The residue number.
+        chain_id : str, optional
+            The chain to search; required when residue numbers repeat
+            across chains.
+        icode : str, optional
+            The insertion code.
+
+        Returns
+        -------
+        Residue
+            The single residue that matches. Raises MBuildError when
+            no residue matches or the match is ambiguous.
+        """
         found = [
             residue
             for residue in self.residues(chain_id=chain_id)
@@ -1386,13 +1475,32 @@ class Protein(Compound):
         return found[0]
 
     def get_atom(self, resnum, atom_name, chain_id=None, icode=""):
-        """Return the named atom particle of the given residue."""
+        """Return the named atom particle of the given residue.
+
+        Parameters
+        ----------
+        resnum : int
+            The residue number.
+        atom_name : str
+            The atom name within the residue.
+        chain_id : str, optional
+            The chain to search; required when residue numbers repeat
+            across chains.
+        icode : str, optional
+            The insertion code.
+
+        Returns
+        -------
+        mbuild.Compound
+            The atom particle. Raises MBuildError when the residue or
+            the atom does not exist.
+        """
         residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
         return self._atom_of(residue, atom_name)
 
     @staticmethod
     def _atom_of(residue, atom_name):
-        """Return the named atom of a residue already in hand, or raise."""
+        """Return the named atom of the given residue, or raise."""
         particle = _atom_in_residue(residue, atom_name)
         if particle is None:
             raise MBuildError(
@@ -1464,9 +1572,12 @@ class Protein(Compound):
         format these records into their own vocabulary (residue
         definitions, crosslink declarations, templates).
 
-        Keys per record: ``residue_names``, ``residue_numbers``,
-        ``atom_names``, ``leaving_atoms`` (one list per side), and
-        ``bond_order``.
+        Returns
+        -------
+        list of dict
+            One dict per record, with the keys ``residue_names``,
+            ``residue_numbers``, ``atom_names``, ``leaving_atoms``
+            (one list per side), and ``bond_order``.
         """
         return [
             {

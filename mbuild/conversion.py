@@ -845,7 +845,7 @@ def from_rdkit(rdkit_mol, compound=None, coords_only=False, smiles_seed=0):
 
     mymol = Chem.AddHs(rdkit_mol)
     if AllChem.EmbedMolecule(mymol, randomSeed=smiles_seed) != 0:
-        # Default ETKDG embedding gives up on some large or highly
+        # Default ETKDG embedding fails for some large or highly
         # branched molecules (e.g. glycans); random initial coordinates
         # followed by the same distance-geometry cleanup usually succeed.
         params = AllChem.ETKDGv3()

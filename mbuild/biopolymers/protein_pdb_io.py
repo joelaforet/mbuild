@@ -42,11 +42,17 @@ class _PdbResidue:
 
     @property
     def label(self):
+        """Return the residue identity for error messages and logs."""
         return f"{self.resname} {self.chain_id}:{self.resnum}{self.icode}"
 
 
 def _parse_pdb(text):
-    """Parse ATOM/HETATM/TER/CONECT/CRYST1 records of the first model."""
+    """Parse ATOM/HETATM/TER/CONECT/CRYST1 records of the first model.
+
+    Returns a tuple ``(residues, conects, box)``: the ``_PdbResidue``
+    groups in file order, the CONECT pairs as a set of frozensets of
+    two serials, and the ``Box`` or None.
+    """
     residues = []
     conects = set()
     box = None
@@ -131,6 +137,8 @@ def write_pdb(protein, filename, overwrite=False):
 
     Parameters
     ----------
+    protein : mbuild.biopolymers.Protein
+        The protein to write.
     filename : str
         Path of the PDB file to write.
     overwrite : bool, optional, default=False
@@ -218,6 +226,7 @@ def write_pdb(protein, filename, overwrite=False):
 
 
 def _pdb_atom_line(serial, particle, residue, chain_id):
+    """Format one ATOM or HETATM record for the particle."""
     record = "HETATM" if residue.hetatm else "ATOM  "
     name = particle.name
     # PDB alignment: names shorter than 4 characters are right-shifted
