@@ -649,13 +649,23 @@ class Protein(Compound):
     # ------------------------------------------------------------------
     # Canonical Compound verbs, routed to residue-aware behavior
     # ------------------------------------------------------------------
+    #: File extensions that ``conversion.save`` routes through GMSO.
+    _GMSO_EXTENSIONS = frozenset((".gro", ".gsd", ".data", ".xyz", ".mcf", ".top"))
+
     def save(self, filename, **kwargs):
         """Save the protein; ``.pdb`` files route to ``save_pdb``.
 
         The generic ParmEd writer cannot express residue numbers, chain
         identifiers, or CONECT records, so a plain ``save`` would write
         a file that silently loses the protein's identity.
+
+        GMSO-routed extensions (.gro, .gsd, .data, .xyz, .mcf, .top) are
+        written from this class's ``to_gmso`` override, because
+        ``conversion.save`` calls the module-level converter, which
+        collapses the protein into one residue.
         """
+        import os
+
         if str(filename).lower().endswith(".pdb"):
             unexpected = set(kwargs) - {"overwrite"}
             if unexpected:
@@ -665,6 +675,25 @@ class Protein(Compound):
                     "would be ignored."
                 )
             return self.save_pdb(filename, overwrite=kwargs.get("overwrite", False))
+        extension = os.path.splitext(str(filename))[-1].lower()
+        if extension in self._GMSO_EXTENSIONS:
+            overwrite = kwargs.pop("overwrite", False)
+            if os.path.exists(filename) and not overwrite:
+                raise IOError(f"{filename} exists; not overwriting")
+            # conversion.save consumes these two and does not hand them
+            # to the GMSO writers; drop them the same way.
+            kwargs.pop("residues", None)
+            kwargs.pop("include_ports", None)
+            topology = self.to_gmso(box=kwargs.pop("box", None))
+            if extension == ".gro":
+                # The gro writer reads site.molecule before
+                # site.residue, and molecule holds the chain label.
+                # Clear it so the writer takes the per-residue name
+                # that this class's to_gmso set.
+                for site in topology.sites:
+                    site.molecule = None
+            topology.save(filename=filename, overwrite=overwrite, **kwargs)
+            return
         return super().save(filename, **kwargs)
 
     def to_parmed(self, **kwargs):
@@ -715,6 +744,26 @@ class Protein(Compound):
                 _, residue = entry
                 site.residue = GMSOResidue(name=residue.name, number=residue.resnum)
         return topology
+
+    def to_trajectory(self, include_ports=False, chains=None, residues=None, box=None):
+        """Create an mdtraj Trajectory that keeps chains and residues.
+
+        The generic converter assigns every atom to one default residue
+        unless the caller lists the chain and residue names. This
+        override fills both lists from the hierarchy, so each Chain and
+        each Residue compound becomes its own mdtraj chain and residue.
+        Caller-provided values win.
+        """
+        if chains is None:
+            chains = sorted({chain.name for chain in self.chains})
+        if residues is None:
+            residues = sorted({residue.name for residue in self.residues()})
+        return super().to_trajectory(
+            include_ports=include_ports,
+            chains=chains,
+            residues=residues,
+            box=box,
+        )
 
     def to_rdkit(self):
         """Create a sanitized RDKit molecule of the (modified) protein.

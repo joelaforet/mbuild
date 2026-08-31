@@ -903,3 +903,22 @@ class TestDisulfidesAndFixesA(BaseTest):
         assert (record.atom1_name, record.atom2_name) == ("NZ", "C1")
         with pytest.raises(MBuildError, match="not importable"):
             protein.relax_fragments()
+
+    def test_gmso_routed_save_and_trajectory_keep_residues(self, tmp_path):
+        # Tests that a GMSO-routed save (.gro) and to_trajectory keep
+        # the per-residue partitioning. This is needed because
+        # conversion.save calls the module-level to_gmso and the generic
+        # to_trajectory assigns one default residue, so both silently
+        # collapsed the protein into a single residue. The test saves a
+        # .gro file and checks the residue columns, then builds an
+        # mdtraj topology and counts its residues.
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        out = tmp_path / "identity.gro"
+        protein.save(str(out))
+        atom_lines = out.read_text().splitlines()[2 : 2 + protein.n_particles]
+        first = atom_lines[0]
+        assert (first[:5].strip(), first[5:10].strip()) == ("1", "SER")
+        assert len({line[:10] for line in atom_lines}) == 306
+
+        topology = protein.to_trajectory().topology
+        assert len(list(topology.residues)) == 306
