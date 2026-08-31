@@ -4,7 +4,13 @@ import mbuild as mb
 from mbuild.biopolymers import CCDLibrary, Protein
 from mbuild.exceptions import MBuildError
 from mbuild.tests.base_test import BaseTest
-from mbuild.utils.io import get_fn, has_hoomd, has_openmm, has_rdkit
+from mbuild.utils.io import (
+    get_fn,
+    has_hoomd,
+    has_openff_pablo,
+    has_openmm,
+    has_rdkit,
+)
 
 
 class TestCCDLibrary(BaseTest):
@@ -88,6 +94,7 @@ class TestCCDLibrary(BaseTest):
         assert nme.linking == "peptide"
         assert nme.prior_fragment == {"HN1"}
 
+    @pytest.mark.skipif(not has_openff_pablo, reason="openff-pablo is not installed")
     def test_pablo_parity(self):
         # Tests that mBuild's templates agree with openff-pablo's residue
         # definitions on names, elements, formal charges, leaving flags,
@@ -99,7 +106,8 @@ class TestCCDLibrary(BaseTest):
         # openff-pablo reads the written PDB. The test compares the
         # base variant of every bundled amino acid field by field, and
         # runs only where openff-pablo is installed.
-        pablo = pytest.importorskip("openff.pablo")
+        import openff.pablo as pablo
+
         library = CCDLibrary()
         for resname in (
             "ALA ARG ASN ASP CYS GLN GLU GLY HIS ILE LEU LYS "
@@ -667,6 +675,7 @@ class TestProtein(BaseTest):
         with pytest.raises(MBuildError, match="signals a disulfide"):
             Protein(str(bad))
 
+    @pytest.mark.skipif(not has_openff_pablo, reason="openff-pablo is not installed")
     def test_cross_chain_disulfide_2zuq(self):
         # Tests that a disulfide between two different chains loads,
         # which proves the crosslink filter works on global serials and
@@ -680,7 +689,6 @@ class TestProtein(BaseTest):
 
         from mbuild.biopolymers.protein import Chain
 
-        pytest.importorskip("openff.pablo")
         data = (
             resources.files("openff.pablo._tests")
             / "data"
@@ -1046,6 +1054,7 @@ class TestProteinExports(BaseTest):
             protein.to_parmed()
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    @pytest.mark.skipif(not has_openff_pablo, reason="openff-pablo is not installed")
     def test_pablo_pipeline_integration(self, protein_6m03, tmp_path):
         # Tests the full handoff: attach a CCD-named fragment, write the
         # prepared PDB, and load it through openff-pablo with the
@@ -1057,7 +1066,8 @@ class TestProteinExports(BaseTest):
         # LYS 5 NZ, and asserts pablo returns one whole molecule with
         # the expected charge and connectivity. Runs only where a pablo
         # version with with_crosslink (>= 0.2) is installed.
-        pablo = pytest.importorskip("openff.pablo")
+        import openff.pablo as pablo
+
         if not hasattr(pablo, "STD_CCD_CACHE"):
             pytest.skip("openff-pablo >= 0.2 is required")
 
