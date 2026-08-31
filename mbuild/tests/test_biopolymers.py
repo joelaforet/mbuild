@@ -1062,3 +1062,17 @@ class TestDisulfidesAndFixesA(BaseTest):
         # first. The test compares object identity across two default
         # instances, which only the class-level parse cache can give.
         assert CCDLibrary()["ALA"] is CCDLibrary()["ALA"]
+
+    def test_port_cleanup_leaves_consistent_state(self):
+        # Tests that the port creation path removes the auto-generated
+        # ports and keeps the atom's remaining bonds. This is needed
+        # because the cleanup no longer goes through Compound.remove,
+        # which rescanned every particle of the protein per call; the
+        # direct removal must leave the same state. The test creates a
+        # port at a CB atom and checks that the returned Port is the
+        # only port and that the bond graph keeps the other neighbors.
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        port = protein.add_port_at(221, "CB")
+        assert list(protein.all_ports()) == [port]
+        cb = protein.get_atom(221, "CB")
+        assert sorted(p.name for p in cb.direct_bonds()) == ["CA", "HB3", "SG"]

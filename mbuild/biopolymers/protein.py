@@ -1201,9 +1201,18 @@ class Protein(Compound):
         residue = atom.parent
         old_ports = {p for p in residue.children if isinstance(p, Port)}
         root.remove(hydrogens)
-        root.remove(
-            [p for p in residue.children if isinstance(p, Port) and p not in old_ports]
-        )
+        # Compound.remove removes a Port with three constant-cost
+        # operations and then rescans every particle of the root in
+        # _prune_ghost_ports. The ports removed here were created by
+        # the remove() call above and anchor an atom that is still
+        # present, so that rescan finds nothing. Apply the same three
+        # operations directly and skip the second full-protein scan.
+        for port in [
+            p for p in residue.children if isinstance(p, Port) and p not in old_ports
+        ]:
+            root._remove(port)
+            port.parent.children.remove(port)
+            root._remove_references(port)
         return Port(anchor=atom, orientation=orientation, separation=separation / 2)
 
     @staticmethod
