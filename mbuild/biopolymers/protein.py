@@ -714,9 +714,32 @@ class Protein(Compound):
         default must fill in whenever the value is None, not only when
         the key is absent — otherwise every ParmEd-routed format (mol2,
         psf, ...) collapses the protein into one residue.
+
+        Raises MBuildError when a residue name equals an atom name
+        present in the protein. The generic converter matches each
+        atom's own name against the residue list before it checks the
+        atom's ancestors, so such a collision (for example a calcium
+        ion residue ``CA`` next to alpha-carbon atoms ``CA``) would
+        silently split those atoms into spurious residues. Rename the
+        residue before this export, or write a PDB with ``save_pdb``.
         """
         if kwargs.get("residues") is None:
             kwargs["residues"] = sorted({residue.name for residue in self.residues()})
+        residue_names = kwargs["residues"]
+        if isinstance(residue_names, str):
+            residue_names = [residue_names]
+        colliding = set(residue_names) & {
+            particle.name for particle in self.particles()
+        }
+        if colliding:
+            raise MBuildError(
+                f"Residue names {sorted(colliding)} equal atom names in "
+                "this protein. The ParmEd converter matches atom names "
+                "against the residue list first, so these atoms would "
+                "split into spurious residues. Rename the residues "
+                "(residue.name = ...) before this export, or write a "
+                "PDB with save_pdb()."
+            )
         return super().to_parmed(**kwargs)
 
     def to_gmso(self, **kwargs):

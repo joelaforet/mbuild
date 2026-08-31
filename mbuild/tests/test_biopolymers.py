@@ -979,3 +979,18 @@ class TestDisulfidesAndFixesA(BaseTest):
         library = CCDLibrary(download=False)
         variants = library["ZZZ"]
         assert variants and variants[0].name == "ZZZ"
+
+    def test_to_parmed_rejects_residue_atom_name_collision(self):
+        # Tests that to_parmed raises a clear error when a residue name
+        # equals an atom name present in the protein. This is needed
+        # because the generic converter matches each atom's own name
+        # against the residue list before its ancestors, so a residue
+        # named like an atom (an ion residue CA next to alpha-carbon
+        # atoms CA) silently splits those atoms into spurious residues;
+        # the converter itself is core code that this recipe does not
+        # modify. The test renames one residue to CA and asserts on the
+        # error.
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        next(protein.residues()).name = "CA"
+        with pytest.raises(MBuildError, match=r"\['CA'\].*spurious"):
+            protein.to_parmed()
