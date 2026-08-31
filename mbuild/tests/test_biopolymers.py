@@ -747,3 +747,44 @@ class TestCCDLibrary(BaseTest):
         library = CCDLibrary()
         with pytest.raises(KeyError, match="XXX"):
             library["XXX"]
+
+
+class TestFragmentFixesC(BaseTest):
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_prepare_fragment_keeps_multiple_residues(self):
+        # Tests that prepare_fragment keeps the Residue children of a
+        # multi-residue Compound, with their charges and link atoms.
+        # This is needed because the old code wrapped the whole Compound
+        # into one new Residue, which dropped the inner residues'
+        # atom_formal_charges and link_atoms and renamed atoms across
+        # residue boundaries. The test builds a Compound from two
+        # prepared residues (one charged, one star-sited), runs
+        # prepare_fragment, and checks that both residues survive with
+        # their metadata mapped to real atom names.
+        from mbuild.biopolymers import (
+            Residue,
+            fragment_from_smiles,
+            prepare_fragment,
+        )
+
+        charged = fragment_from_smiles("C[NH3+]", "AMM")
+        sited = fragment_from_smiles("*CC", "ETH")
+        fragment = mb.Compound(name="LNK")
+        fragment.add(charged)
+        fragment.add(sited)
+
+        prepared = prepare_fragment(fragment, "LNK")
+        residues = {
+            child.name: child
+            for child in prepared.successors()
+            if isinstance(child, Residue)
+        }
+        assert set(residues) == {"AMM", "ETH"}
+        amm = residues["AMM"]
+        assert amm.formal_charge == 1
+        atom_names = {particle.name for particle in amm.particles()}
+        assert set(amm.atom_formal_charges) <= atom_names
+        assert sum(amm.atom_formal_charges.values()) == 1
+        eth = residues["ETH"]
+        eth_names = {particle.name for particle in eth.particles()}
+        assert eth.link_atoms and set(eth.link_atoms.values()) <= eth_names

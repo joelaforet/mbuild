@@ -103,34 +103,53 @@ def prepare_fragment(compound, resname):
     A SMILES string is also accepted and is loaded through
     ``fragment_from_smiles``.
 
+    Residue detection follows ``attach()``: a Residue input and a
+    Compound that holds Residue children keep their residues; only a
+    residue-less Compound is wrapped into one new Residue. Atom names
+    are made unique within each residue, not across the fragment, so
+    each residue keeps its ``atom_formal_charges`` and ``link_atoms``
+    keys.
+
     Parameters
     ----------
     compound : mbuild.Compound or str
         The fragment, or a SMILES string for it. A Compound is cloned;
         the input is not changed.
     resname : str
-        The residue name (up to 3 characters, e.g. "MYR").
+        The residue name (up to 3 characters, e.g. "MYR"). Applied only
+        when the fragment is wrapped or is itself a Residue; existing
+        Residue children keep their names.
 
     Returns
     -------
-    Residue
-        A detached residue with unique, stable atom names.
+    Residue or mbuild.Compound
+        A detached fragment with unique, stable atom names. A Compound
+        with Residue children is returned as the Compound that holds
+        them; other inputs return a Residue.
     """
     if isinstance(compound, str):
         return fragment_from_smiles(compound, resname)
     copied = clone(compound)
     if isinstance(copied, Residue):
-        residue = copied
-        residue.name = (resname or residue.name)[:3].upper()
+        # successors() does not yield the compound itself, so this arm
+        # is the residue detection for a Residue input, as in attach().
+        residues = [copied]
+        copied.name = (resname or copied.name)[:3].upper()
     else:
-        residue = Protein._wrap_in_residue(copied, resname)
-    Protein._ensure_unique_atom_names(residue)
-    if not residue.link_atoms:
-        # mBuild's tagged-SMILES idiom: particle tags mark the sites.
-        for particle in residue.particles():
-            if particle.particle_tag:
-                residue.link_atoms[str(particle.particle_tag)] = particle.name
-    return residue
+        residues = [
+            child for child in copied.successors() if isinstance(child, Residue)
+        ]
+        if not residues:
+            copied = Protein._wrap_in_residue(copied, resname)
+            residues = [copied]
+    for residue in residues:
+        Protein._ensure_unique_atom_names(residue)
+        if not residue.link_atoms:
+            # mBuild's tagged-SMILES idiom: particle tags mark the sites.
+            for particle in residue.particles():
+                if particle.particle_tag:
+                    residue.link_atoms[str(particle.particle_tag)] = particle.name
+    return copied
 
 
 def fragment_from_sdf(filename, resname):
