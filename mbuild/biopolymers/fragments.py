@@ -78,7 +78,7 @@ def fragment_from_smiles(smiles, resname):
     Protein._ensure_unique_atom_names(residue)
     particles = list(residue.particles())
     symbols = [particle.element.symbol for particle in particles]
-    if len(particles) != len(charges) or symbols != elements:
+    if symbols != elements:
         raise MBuildError(
             "Atom order of the loaded fragment does not match the "
             "SMILES, so formal charges cannot be mapped onto atoms. "
