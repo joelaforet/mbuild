@@ -765,7 +765,14 @@ class Protein(Compound):
         particle_residue = self._particle_residues()
         particles = list(self.particles())
         sites = list(topology.sites)
-        if len(sites) != len(particles) or any(
+        # The guard compares site count, per-site names, and per-site
+        # positions. Names alone cannot detect a reorder of same-name
+        # residues; positions can, because every atom sits at its own
+        # coordinates.
+        aligned = len(sites) == len(particles) and np.allclose(
+            topology.positions.to_value("nm"), self.xyz, atol=1e-6
+        )
+        if not aligned or any(
             site.name != particle.name for site, particle in zip(sites, particles)
         ):
             raise MBuildError(
