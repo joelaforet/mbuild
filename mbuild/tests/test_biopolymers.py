@@ -4,7 +4,7 @@ import mbuild as mb
 from mbuild.biopolymers import CCDLibrary, Protein
 from mbuild.exceptions import MBuildError
 from mbuild.tests.base_test import BaseTest
-from mbuild.utils.io import get_fn, has_rdkit
+from mbuild.utils.io import get_fn, has_hoomd, has_openmm, has_rdkit
 
 
 class TestCCDLibrary(BaseTest):
@@ -253,6 +253,7 @@ class TestCCDLibrary(BaseTest):
             atom_name="NZ",
             chain_id="A",
             fragment_resname="AC1",
+            relax=False,
         )
         record = protein.attach(
             fragment,
@@ -261,6 +262,7 @@ class TestCCDLibrary(BaseTest):
             atom_name="C3",
             chain_id="A",
             fragment_resname="AC2",
+            relax=False,
         )
         assert record.residue1.resnum == 307
         assert record.residue2.resnum == 308
@@ -317,6 +319,7 @@ class TestCCDLibrary(BaseTest):
             atom_name="NZ",
             chain_id="A",
             fragment_resname="XCT",
+            relax=False,
         )
         out = tmp_path / "modified.pdb"
         protein.save_pdb(str(out))
@@ -404,6 +407,7 @@ class TestCCDLibrary(BaseTest):
             atom_name="NZ",
             chain_id="A",
             fragment_resname="ACE",
+            relax=False,
         )
         out = tmp_path / "acetylated.pdb"
         protein.save_pdb(str(out))
@@ -453,7 +457,9 @@ class TestCCDLibrary(BaseTest):
         assert "C1" in names
 
         protein = Protein(get_fn("6m03_protonated.pdb"))
-        protein.attach(fragment, "C1", resnum=5, atom_name="NZ", chain_id="A")
+        protein.attach(
+            fragment, "C1", resnum=5, atom_name="NZ", chain_id="A", relax=False
+        )
         attached = protein.get_residue(307, chain_id="A")
         assert [p.name for p in attached.particles()] == [
             name
@@ -508,6 +514,7 @@ class TestCCDLibrary(BaseTest):
             atom_name="NZ",
             chain_id="A",
             fragment_resname="AC1",
+            relax=False,
         ).residue2
         second = protein.attach(
             fragment,
@@ -516,6 +523,7 @@ class TestCCDLibrary(BaseTest):
             atom_name="C3",
             chain_id="A",
             fragment_resname="AC2",
+            relax=False,
         ).residue2
         first.resnum, second.resnum = 308, 307
 
@@ -548,6 +556,7 @@ class TestCCDLibrary(BaseTest):
             chain_id="A",
             fragment_resname="IMN",
             bond_order=2,
+            relax=False,
         )
         assert record.leaving1 == ("HZ1", "HZ2")
         assert len(record.leaving2) == 2
@@ -581,6 +590,7 @@ class TestCCDLibrary(BaseTest):
             atom_name="NZ",
             chain_id="A",
             fragment_resname="ACT",
+            relax=False,
         )
         copy = mb.clone(protein)
         assert copy.library is protein.library
@@ -611,7 +621,9 @@ class TestCCDLibrary(BaseTest):
         fragment = prepare_fragment("C[N+](C)(C)CCS(=O)(=O)[O-]", "SBM")
         assert fragment.formal_charge == 0
         assert len(fragment.atom_formal_charges) == 2
-        protein.attach(fragment, "C1", resnum=5, atom_name="NZ", chain_id="A")
+        protein.attach(
+            fragment, "C1", resnum=5, atom_name="NZ", chain_id="A", relax=False
+        )
         assert Chem.GetFormalCharge(protein.to_rdkit()) == -4
 
         # Atoms outside any Residue must fail loudly, not vanish.
@@ -685,8 +697,53 @@ class TestCCDLibrary(BaseTest):
                 atom_name="NZ",
                 chain_id="A",
                 fragment_resname="TPM",
+                relax=False,
             )
         assert "Relax the structure" in caplog.text
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    @pytest.mark.skipif(
+        not (has_hoomd and has_openmm),
+        reason="relax_fragments needs mbuild.simulation (hoomd) and openmm",
+    )
+    def test_relax_fragments(self):
+        # Tests that relax_fragments() pulls a clashing attached
+        # fragment out of steric overlap while the protein stays fixed.
+        # This is needed because attach() places fragments rigidly, and
+        # relax=False leaves any overlap in place for a later explicit
+        # relax call; this is the only test of that call. The test
+        # attaches a bulky fragment with relax=False, counts fragment
+        # atoms within the 0.1 nm clash cutoff of protein atoms before
+        # and after relax_fragments(), and asserts the count decreased
+        # while the protein coordinates did not change.
+        import numpy as np
+        from scipy.spatial import cKDTree
+
+        protein = Protein(get_fn("6m03_protonated.pdb"))
+        bulky = mb.load("C(c1ccccc1)(c1ccccc1)c1ccccc1", smiles=True)
+        protein.attach(
+            bulky,
+            "C1",
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="TPM",
+            relax=False,
+        )
+        fragment_atoms = set(protein.get_residue(307, chain_id="A").particles())
+        others = [p for p in protein.particles() if p not in fragment_atoms]
+
+        def clash_count():
+            tree = cKDTree([p.pos for p in others])
+            distances, _ = tree.query([p.pos for p in fragment_atoms])
+            return int((distances < 0.1).sum())
+
+        protein_positions = np.array([p.pos for p in others])
+        before = clash_count()
+        assert before > 0
+        protein.relax_fragments(n_steps=50)
+        assert clash_count() < before
+        assert np.allclose([p.pos for p in others], protein_positions)
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_star_sited_fragment(self):
@@ -703,7 +760,9 @@ class TestCCDLibrary(BaseTest):
         assert fragment.link_atoms == {"1": "C1"}
 
         protein = Protein(get_fn("6m03_protonated.pdb"))
-        record = protein.attach(fragment, resnum=5, atom_name="NZ", chain_id="A")
+        record = protein.attach(
+            fragment, resnum=5, atom_name="NZ", chain_id="A", relax=False
+        )
         assert record.atom2_name == "C1"
         nz = protein.get_atom(5, "NZ", chain_id="A")
         assert "C1" in {p.name for p in nz.direct_bonds()}

@@ -353,6 +353,14 @@ try:
 except ImportError:
     has_freud = False
 
+try:
+    import openmm
+
+    has_openmm = True
+    del openmm
+except ImportError:
+    has_openmm = False
+
 
 def get_fn(name):
     """Get the full path to one of the reference files shipped for utils.
