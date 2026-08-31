@@ -994,3 +994,37 @@ class TestDisulfidesAndFixesA(BaseTest):
         next(protein.residues()).name = "CA"
         with pytest.raises(MBuildError, match=r"\['CA'\].*spurious"):
             protein.to_parmed()
+
+    def test_cif_parser_reads_adjacent_loops(self):
+        # Tests that the CIF parser reads a loop_ block that follows
+        # another loop_ block with no '#' or blank separator. This is
+        # needed because the old parser consumed the second loop_ token
+        # inside the first block and dropped the second block, so a
+        # downloaded component file in that layout lost its bonds. The
+        # test parses a minimal component with adjacent atom and bond
+        # loops and checks that both survive.
+        from mbuild.biopolymers.ccd import parse_ccd_cif
+
+        text = "\n".join(
+            (
+                "data_ZZZ",
+                "_chem_comp.id ZZZ",
+                '_chem_comp.type "L-PEPTIDE LINKING"',
+                "loop_",
+                "_chem_comp_atom.comp_id",
+                "_chem_comp_atom.atom_id",
+                "_chem_comp_atom.type_symbol",
+                "_chem_comp_atom.charge",
+                "ZZZ C1 C 0",
+                "ZZZ C2 C 0",
+                "loop_",
+                "_chem_comp_bond.comp_id",
+                "_chem_comp_bond.atom_id_1",
+                "_chem_comp_bond.atom_id_2",
+                "_chem_comp_bond.value_order",
+                "ZZZ C1 C2 SING",
+            )
+        )
+        template = parse_ccd_cif(text)
+        assert {atom.name for atom in template.atoms} == {"C1", "C2"}
+        assert len(template.bonds) == 1

@@ -386,9 +386,11 @@ def _parse_cif_blocks(text):
     """
     keys = {}
     loops = {}
-    lines = iter(text.splitlines())
-    for line in lines:
-        line = line.strip()
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        index += 1
         if line.startswith("_"):
             tokens = _tokenize_cif_line(line)
             if len(tokens) >= 2:
@@ -396,11 +398,16 @@ def _parse_cif_blocks(text):
         elif line == "loop_":
             headers = []
             rows = []
-            for line in lines:
-                line = line.strip()
+            while index < len(lines):
+                line = lines[index].strip()
+                if line == "loop_":
+                    # Do not consume the terminator: the outer loop
+                    # must parse it as the start of the next loop.
+                    break
+                index += 1
                 if line.startswith("_"):
                     headers.append(line.split()[0])
-                elif line in ("#", "", "loop_"):
+                elif line in ("#", ""):
                     break
                 else:
                     tokens = _tokenize_cif_line(line)
