@@ -52,6 +52,7 @@ def _parse_pdb(text):
     box = None
     seen_altloc_a = False
     in_extra_model = False
+    last_key = None
     for line_no, line in enumerate(text.splitlines(), start=1):
         record_type = line[:6]
         if record_type == "ENDMDL":
@@ -83,20 +84,9 @@ def _parse_pdb(text):
                 hetatm=record_type == "HETATM",
             )
             key = (record.resname, record.chain_id, record.resnum, record.icode)
-            if not residues or key != (
-                residues[-1].resname,
-                residues[-1].chain_id,
-                residues[-1].resnum,
-                residues[-1].icode,
-            ):
-                residues.append(
-                    _PdbResidue(
-                        resname=record.resname,
-                        chain_id=record.chain_id,
-                        resnum=record.resnum,
-                        icode=record.icode,
-                    )
-                )
+            if key != last_key:
+                residues.append(_PdbResidue(*key))
+                last_key = key
             residues[-1].records.append(record)
         elif record_type.startswith("TER") and residues:
             residues[-1].ter_after = True
