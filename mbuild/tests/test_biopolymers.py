@@ -579,6 +579,24 @@ class TestProtein(BaseTest):
         assert protein.n_particles == 795
         assert list(protein.residues())[0].resnum == 10001
 
+    def test_hexadecimal_conect_serials_2mum(self):
+        # Tests that a CONECT record whose atom serials are written in
+        # hexadecimal loads. This is needed because OpenMM applies the
+        # same overflow encoding to CONECT serials as to ATOM serials,
+        # and the decimal-only reader raised ValueError on the CONECT
+        # records of every system above 99999 atoms. The test appends a
+        # CONECT record for the backbone N-CA bond of the first residue
+        # of the prepared 2MUM structure, whose serials read A0001 and
+        # A0002, then loads the file. The loader checks every CONECT
+        # record against the bonds the templates predict, so a load
+        # that succeeds proves both serials decoded to the two bonded
+        # atoms.
+        text = open(get_fn("2MUM_composed_function.pdb")).read()
+        with_conect = Path("2mum_hex_conect.pdb")
+        with_conect.write_text(text + "CONECTA0001A0002\n")
+        protein = Protein(str(with_conect))
+        assert protein.n_particles == 795
+
     def test_multichain_no_ter_1p3q(self):
         # Tests that a four-chain PDB without TER records loads into
         # four chains and that no peptide bond crosses a chain

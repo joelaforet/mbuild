@@ -61,7 +61,10 @@ def _decode_index(field, width):
     ``value - 10 ** width + 10 * 16 ** (width - 1)`` in hexadecimal.
     Atom serials therefore run 99999, A0000, A0001 up to AFFFF, then
     B0000. Residue numbers run 9999, A000, A001, and so on. Any system
-    above 99999 atoms or 9999 residues carries such fields.
+    above 99999 atoms or 9999 residues carries such fields. Section 10
+    (Connectivity Section, CONECT) gives the CONECT atom serials the
+    same five columns, and OpenMM encodes them by the same rule, so
+    those fields need this function too.
 
     This function inverts that rule. A field that reads as a decimal
     number keeps its decimal value, so a file inside the column widths
@@ -175,7 +178,7 @@ def _parse_pdb(text):
             residues[-1].ter_after = True
         elif record_type == "CONECT":
             fields = [line[start : start + 5].strip() for start in (6, 11, 16, 21, 26)]
-            serials = [int(value) for value in fields if value]
+            serials = [_decode_index(value, 5) for value in fields if value]
             for partner in serials[1:]:
                 conects.add(frozenset((serials[0], partner)))
         elif record_type == "CRYST1":
