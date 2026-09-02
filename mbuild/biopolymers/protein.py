@@ -228,6 +228,26 @@ def _chain_of(residue):
     )
 
 
+def _residue_label(residue):
+    """Return a short label for a residue, such as ``LYS 5 A``.
+
+    The chain identifier is appended when the chain has one.
+
+    Parameters
+    ----------
+    residue : Residue
+        The residue to label.
+
+    Returns
+    -------
+    str
+        The residue name, its number, and the chain identifier.
+    """
+    label = f"{residue.name} {residue.resnum}"
+    chain_id = _chain_of(residue).chain_id
+    return f"{label} {chain_id}" if chain_id else label
+
+
 def _atom_in_residue(residue, atom_name):
     """Return the named particle of a residue, or None.
 
@@ -1453,6 +1473,38 @@ class Protein(Compound):
         proton_name = protons[0]
         _remove_pruning_ports(self, atom, [_atom_in_residue(residue, proton_name)])
         _stamp_template(residue, variant.deprotonated_at(proton_name))
+        self._warn_if_variant_is_absent(residue, atom_name, proton_name)
+
+    def _warn_if_variant_is_absent(self, residue, atom_name, proton_name):
+        """Warn when no library variant describes the deprotonated residue.
+
+        ``deprotonate`` builds the new template variant from the old
+        one. The library holds fewer variants than that construction can
+        produce, so the result can be a residue that no library variant
+        describes. The loader matches a file against the library
+        variants, so a PDB written from such a residue does not reload.
+        The warning names the consequence and the call proceeds.
+
+        Parameters
+        ----------
+        residue : Residue
+            The residue, with its new template already assigned.
+        atom_name : str
+            Name of the heavy atom that lost the proton.
+        proton_name : str
+            Name of the removed proton.
+        """
+        variant = residue.template
+        library_variants = self.library[residue.name]
+        if any(other.atom_names == variant.atom_names for other in library_variants):
+            return
+        logger.warning(
+            f"{_residue_label(residue)} atom {atom_name} lost {proton_name}. "
+            f"The template library holds no {residue.name} variant with the "
+            f"atoms of {variant.description}. A PDB written from this protein "
+            "does not reload with Protein(). Deprotonate another atom if the "
+            "written file must reload."
+        )
 
     def add_port_at(
         self,
@@ -1734,10 +1786,9 @@ class Protein(Compound):
         if not charge:
             return
         chain_id = _chain_of(residue).chain_id
-        label = f"{residue.name} {residue.resnum}"
+        label = _residue_label(residue)
         call = f'deprotonate({resnum}, "{atom_name}"'
         if chain_id:
-            label = f"{label} {chain_id}"
             call = f'{call}, chain_id="{chain_id}"'
         logger.warning(
             f"{label} atom {atom_name} has formal charge {charge:+d} before "

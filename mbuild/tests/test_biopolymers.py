@@ -659,6 +659,30 @@ class TestProtein(BaseTest):
         assert sum(1 for p in nz.direct_bonds() if p.element.symbol == "H") == hydrogens
         assert protein.net_formal_charge == net_before - 1
 
+    def test_deprotonate_warns_when_no_library_variant_matches(
+        self, protein_6m03, caplog
+    ):
+        # Tests that deprotonate() warns when the residue it builds
+        # matches no variant of the template library, and stays silent
+        # when a variant matches. This is needed because deprotonate()
+        # constructs the new template instead of matching it, so some
+        # sites give a residue that save_pdb writes and the loader
+        # cannot read back. The test deprotonates TRP 31 NE1, which the
+        # library does not hold, then CYS 16 SG, which it does, and
+        # reads the log after each call.
+        import logging
+
+        protein = protein_6m03
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein.deprotonate(31, "NE1", chain_id="A")
+        assert "holds no TRP variant" in caplog.text
+        assert "does not reload" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein.deprotonate(16, "SG", chain_id="A")
+        assert "holds no CYS variant" not in caplog.text
+
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_attach(self, protein_6m03, acetone):
         # Tests that attach() substitutes one hydrogen on each side,
