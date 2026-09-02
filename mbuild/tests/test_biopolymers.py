@@ -1038,6 +1038,29 @@ class TestProteinExports(BaseTest):
         with pytest.raises(MBuildError, match="must belong to a Residue"):
             protein.save_pdb("orphan.pdb")
 
+    def test_save_pdb_modified_protein_does_not_reload(self, protein_6m03, acetone):
+        # Tests that a written modified protein fails to reload with an
+        # error that names the fragment residue. This is needed because
+        # save_pdb is the handoff artifact of this recipe and users try
+        # to reload it: the fragment has no CCD entry, and mBuild writes
+        # no modification bond declaration, so the loader cannot match
+        # the fragment residue. The test attaches a fragment, writes the
+        # file, and asserts that the error names the fragment residue.
+        protein = protein_6m03
+        protein.attach(
+            acetone,
+            "C1",
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="ACT",
+            relax=False,
+        )
+        path = Path("modified_reload.pdb")
+        protein.save_pdb(str(path))
+        with pytest.raises(MBuildError, match="Residue ACT"):
+            Protein(str(path))
+
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_modified_protein_export(self, protein_6m03, acetone):
         # Tests that an attached fragment exports as HETATM records with
