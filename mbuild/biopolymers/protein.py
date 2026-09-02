@@ -1474,6 +1474,39 @@ class Protein(Compound):
         _remove_pruning_ports(self, atom, [_atom_in_residue(residue, proton_name)])
         _stamp_template(residue, variant.deprotonated_at(proton_name))
         self._warn_if_variant_is_absent(residue, atom_name, proton_name)
+        self._warn_on_split_charge(residue)
+
+    @staticmethod
+    def _warn_on_split_charge(residue):
+        """Warn when the residue keeps more than one charged atom.
+
+        ``ResidueTemplate.deprotonated_at`` decrements the charge of the
+        heavy atom that held the proton. It changes no other atom, so a
+        residue whose charge sat on a second atom now holds two charged
+        atoms. The residue charge can still be zero. The warning names
+        the atoms and their charges and the call proceeds.
+
+        Parameters
+        ----------
+        residue : Residue
+            The residue, with its new template already assigned.
+        """
+        charges = {
+            name: charge
+            for name, charge in residue.atom_formal_charges.items()
+            if charge
+        }
+        if len(charges) < 2:
+            return
+        listing = ", ".join(
+            f"{name} {charge:+d}" for name, charge in sorted(charges.items())
+        )
+        logger.warning(
+            f"{_residue_label(residue)} holds {len(charges)} charged atoms "
+            f"after this call: {listing}. Load the protein again and "
+            "deprotonate another atom if one charged atom is correct for the "
+            "chemistry you model."
+        )
 
     def _warn_if_variant_is_absent(self, residue, atom_name, proton_name):
         """Warn when no library variant describes the deprotonated residue.

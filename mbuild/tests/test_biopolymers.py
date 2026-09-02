@@ -683,6 +683,23 @@ class TestProtein(BaseTest):
             protein.deprotonate(16, "SG", chain_id="A")
         assert "holds no CYS variant" not in caplog.text
 
+    def test_deprotonate_warns_on_a_split_charge(self, protein_6m03, caplog):
+        # Tests that deprotonate() warns when the residue keeps two
+        # charged atoms, and that it still removes the proton. This is
+        # needed because deprotonated_at() decrements only the heavy
+        # atom that held the proton, so an arginine ends with one
+        # negative and one positive nitrogen. The test deprotonates
+        # ARG 4 NH1 of the bundled 6m03 asset, reads the log, and reads
+        # the per-atom charges back.
+        import logging
+
+        protein = protein_6m03
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein.deprotonate(4, "NH1", chain_id="A")
+        assert "NH1 -1, NH2 +1" in caplog.text
+        residue = protein.get_residue(4, chain_id="A")
+        assert residue.atom_formal_charges == {"NH1": -1, "NH2": 1}
+
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_attach(self, protein_6m03, acetone):
         # Tests that attach() substitutes one hydrogen on each side,
