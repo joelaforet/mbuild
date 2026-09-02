@@ -1422,6 +1422,28 @@ class TestProteinExports(BaseTest):
         topology = protein.to_trajectory().topology
         assert len(list(topology.residues)) == 306
 
+    def test_gmso_save_without_a_box_warns(self, caplog):
+        # Tests that a .gro write with no box available logs a warning
+        # that names the box argument, and that a write with a box logs
+        # nothing. This is needed because mb.solvate and mb.fill_box
+        # leave the packed system without a box, so the writer recorded
+        # the bounding box of the atoms, which for one packed system
+        # measured 4.18 x 5.06 x 4.52 nm instead of the 6 x 6 x 6 nm
+        # packing box. The test saves a protein whose file carries no
+        # CRYST1 record, once without a box and once with one, and
+        # reads the log each time.
+        import logging
+
+        protein = Protein(get_fn("8ciq.pdb"))
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            mb.biopolymers.save(protein, "no_box.gro")
+        assert "box=mb.Box(...)" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            mb.biopolymers.save(protein, "boxed.gro", box=mb.Box([6.0, 6.0, 6.0]))
+        assert "box=mb.Box(...)" not in caplog.text
+
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_to_gmso_keeps_residue_identity(self, protein_6m03):
         # Tests that the GMSO export keeps real PDB residue numbers and

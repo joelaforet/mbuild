@@ -63,6 +63,10 @@ _GMSO_EXTENSIONS = frozenset((".gro", ".gsd", ".data", ".xyz", ".mcf", ".top"))
 #: that only share a chain identifier and increasing residue numbers.
 _ADVISORY_TER_MAX_C_N = 0.2
 
+#: Extensions whose writers record the unit cell, so a missing box
+#: changes the file that ``save`` writes.
+_BOXED_EXTENSIONS = frozenset((".gro", ".top"))
+
 
 class Chain(Compound):
     """A protein chain. Children are ``Residue`` compounds.
@@ -2355,7 +2359,10 @@ def save(compound, filename, **kwargs):
     filename : str
         Path of the file to write. The extension selects the writer.
     **kwargs
-        Passed to the selected writer.
+        Passed to the selected writer. Pass ``box`` to set the unit
+        cell. A ``.gro`` or ``.top`` write without a box logs a
+        warning, because the writer then takes the bounding box of the
+        compound, and a packed system carries no box of its own.
     """
     extension = os.path.splitext(str(filename))[-1].lower()
     if extension not in _GMSO_EXTENSIONS:
@@ -2367,7 +2374,16 @@ def save(compound, filename, **kwargs):
     # GMSO writers; drop them the same way.
     kwargs.pop("residues", None)
     kwargs.pop("include_ports", None)
-    topology = to_gmso(compound, box=kwargs.pop("box", None))
+    box = kwargs.pop("box", None)
+    if extension in _BOXED_EXTENSIONS and box is None and compound.box is None:
+        logger.warning(
+            f"No box is set, so the {extension} writer takes the "
+            "bounding box of the compound. mb.solvate and mb.fill_box "
+            "do not set a box on the packed system. The file then holds "
+            "a box that is smaller than the packing box. Pass "
+            "box=mb.Box(...) to write the box you packed into."
+        )
+    topology = to_gmso(compound, box=box)
     if extension == ".gro":
         # The gro writer reads site.molecule before site.residue, and
         # molecule holds the chain label. Clear it so the writer takes

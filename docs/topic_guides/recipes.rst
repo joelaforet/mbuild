@@ -81,13 +81,14 @@ residue accessors.
 
     water = WaterSPC()
     water.name = "SOL"
-    system = mb.solvate(protein, water, 10000, mb.Box([7.0, 7.0, 7.0]))
+    box = mb.Box([7.0, 7.0, 7.0])
+    system = mb.solvate(protein, water, 10000, box)
 
     solute = system.children[0]  # still a Protein
     solute.save_pdb("solute.pdb")
     print(solute.bond_records())
 
-    mb.biopolymers.save(system, "system.gro")
+    mb.biopolymers.save(system, "system.gro", box=box)
 
 Write the packed system with ``mb.biopolymers.save``, not with
 ``Compound.save``. ``Compound.save`` sends ``.gro`` to the module-level
@@ -109,6 +110,11 @@ Three further points:
 - A ``.top`` file needs a force field that types the protein, and it
   needs a change in GMSO's top writer, which puts the moleculetype name
   in the residue column.
+- ``mb.solvate`` and ``mb.fill_box`` do not set a box on the packed
+  system. Pass ``box=`` to ``mb.biopolymers.save`` for a ``.gro`` or a
+  ``.top`` file, as the snippet above does. Without it the writer takes
+  the bounding box of the compound, which is smaller than the packing
+  box, and ``save`` logs a warning.
 
 Cost: packing 8ciq in 10000 waters (30549 atoms) took about 10 s and
 the ``.gro`` write about 5 s on one desktop core. Both grow linearly
