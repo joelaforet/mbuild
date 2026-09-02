@@ -382,6 +382,33 @@ class TestCCDLibrary(BaseTest):
         template = parse_ccd_cif(text)
         assert [atom.formal_charge for atom in template.atoms] == [0, 0]
 
+    def test_cif_parser_reads_unknown_alt_atom_name(self):
+        # Tests that the CIF parser treats the '?' unknown-value token
+        # and the '.' inapplicable-value token in the alternate atom
+        # name column as no alternate name. This is needed because the
+        # parser kept the token itself as a synonym, so a PDB record
+        # whose atom is named '?' would have matched the atom, and the
+        # atom carried a synonym that names nothing. The test parses a
+        # minimal component with both tokens and checks the synonyms.
+        from mbuild.biopolymers.ccd import parse_ccd_cif
+
+        text = "\n".join(
+            (
+                "data_ZZZ",
+                "_chem_comp.id ZZZ",
+                "loop_",
+                "_chem_comp_atom.comp_id",
+                "_chem_comp_atom.atom_id",
+                "_chem_comp_atom.alt_atom_id",
+                "_chem_comp_atom.type_symbol",
+                "ZZZ C1 ? C",
+                "ZZZ C2 . C",
+                "ZZZ C3 CB C",
+            )
+        )
+        template = parse_ccd_cif(text)
+        assert [atom.synonyms for atom in template.atoms] == [(), (), ("CB",)]
+
     def test_default_libraries_share_parsed_templates(self):
         # Tests that two CCDLibrary instances share the parsed variant
         # list of one cif file. This is needed because every Protein()

@@ -643,9 +643,13 @@ def parse_ccd_cif(text):
     atoms = []
     for row in _cif_category_rows(keys, loops, "_chem_comp_atom"):
         name = row["atom_id"]
-        alt = row.get("alt_atom_id", name)
         # CIF marks an unknown value with "?" and an inapplicable value
-        # with "."; both mean no formal charge here.
+        # with "."; both mean that the row has no value in that column.
+        # An absent alternate name gives no synonym, and an absent
+        # charge gives a formal charge of zero.
+        alt = row.get("alt_atom_id", name)
+        if alt in ("?", "."):
+            alt = name
         charge = row.get("charge", "0")
         atoms.append(
             AtomTemplate(
