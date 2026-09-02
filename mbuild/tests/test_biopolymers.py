@@ -396,12 +396,16 @@ class TestProtein(BaseTest):
         # a file that does not match the templates has to be fixed by the
         # user, not silently misread. The test corrupts one atom name and
         # one residue name of the good asset and asserts on the errors.
+        # It also asserts that the list of accepted names holds H3, the
+        # extra proton of the N-terminal serine, which only one variant
+        # carries.
         text = open(get_fn("6m03_protonated.pdb")).read()
 
         bad_atom = Path("bad_atom.pdb")
         bad_atom.write_text(text.replace(" CB  SER A   1", " QQ  SER A   1", 1))
-        with pytest.raises(MBuildError, match="SER A:1"):
+        with pytest.raises(MBuildError, match="SER A:1") as error:
             Protein(str(bad_atom))
+        assert ", H3," in str(error.value)
 
         bad_residue = Path("bad_residue.pdb")
         bad_residue.write_text(text.replace("SER A   1", "XYZ A   1"))
