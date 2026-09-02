@@ -2380,7 +2380,11 @@ class TestFragments(BaseTest):
 
         # A Residue the caller built carries its own name. Without a
         # resname argument that name is used, so it gets the check too.
+        # A name that fits is kept, and upper-cased as before.
         built = Residue(resname="OCTYL")
         built.add(CH3())
         with pytest.raises(ValueError, match="OCTYL"):
             prepare_fragment(built, None)
+        kept = Residue(resname="oct")
+        kept.add(CH3())
+        assert prepare_fragment(kept, None).name == "OCT"
