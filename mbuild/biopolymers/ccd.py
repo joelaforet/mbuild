@@ -392,26 +392,53 @@ class ResidueTemplate:
             )
         return fragment
 
+    @property
+    def prior_link_atom(self):
+        """Return the atom that bonds to the preceding residue, or None.
+
+        The CCD names the backbone amide nitrogen ``N`` in every
+        peptide-linking component, so the peptide bond of the preceding
+        residue always lands on that atom. The property returns None
+        when the template is not peptide-linking or has no such atom,
+        which is the case for a ligand, an ion, or a cap such as ACE.
+        """
+        if self.linking != "peptide" or "N" not in self.atom_names:
+            return None
+        return "N"
+
+    @property
+    def posterior_link_atom(self):
+        """Return the atom that bonds to the following residue, or None.
+
+        The CCD names the backbone carbonyl carbon ``C`` in every
+        peptide-linking component. The property returns None under the
+        same conditions as ``prior_link_atom``.
+        """
+        if self.linking != "peptide" or "C" not in self.atom_names:
+            return None
+        return "C"
+
     @functools.cached_property
     def prior_fragment(self):
         """Return leaving atoms absent when bonded to a preceding residue.
 
-        For peptide residues this is the fragment at ``N`` (e.g. {"H2"}).
+        For peptide residues this is the fragment at
+        ``prior_link_atom`` (e.g. {"H2"}).
         """
-        if self.linking != "peptide" or "N" not in self.atom_names:
+        if self.prior_link_atom is None:
             return set()
-        return self.leaving_fragment_of("N")
+        return self.leaving_fragment_of(self.prior_link_atom)
 
     @functools.cached_property
     def posterior_fragment(self):
         """Return leaving atoms absent when bonded to a following residue.
 
-        For peptide residues this is the fragment at ``C`` (e.g.
-        {"OXT", "HXT"}).
+        For peptide residues this is the fragment at
+        ``posterior_link_atom`` (e.g. {"OXT", "HXT"}).
         """
-        if self.linking != "peptide" or "C" not in self.atom_names:
+        if self.posterior_link_atom is None:
             return set()
-        return self.leaving_fragment_of("C")
+        return self.leaving_fragment_of(self.posterior_link_atom)
 
     def deprotonated_at(self, name):
         """Return a copy with proton ``name`` removed.

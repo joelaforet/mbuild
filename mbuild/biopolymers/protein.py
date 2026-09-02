@@ -729,8 +729,10 @@ class Protein(Compound):
                         f"{groups[i + 1].label} (chain break without TER)."
                     )
                 continue
-            carbon = _atom_in_residue(residues[i], "C")
-            nitrogen = _atom_in_residue(residues[i + 1], "N")
+            # expects_posterior is only true for a peptide-linking
+            # variant, so neither link atom name is None here.
+            carbon = _atom_in_residue(residues[i], here.variant.posterior_link_atom)
+            nitrogen = _atom_in_residue(residues[i + 1], there.variant.prior_link_atom)
             if carbon is None or nitrogen is None:
                 raise MBuildError(
                     f"Cannot form the peptide bond between {groups[i].label} "
