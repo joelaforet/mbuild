@@ -519,9 +519,15 @@ def _match_residue(group, variants, prior_possible, posterior_possible):
             )
     if not matches:
         details = "\n  ".join(reasons)
+        # The per-variant reasons name the records that failed, but not
+        # the names the template takes. List them once, from the base
+        # variant, so the user can compare the file against them.
+        accepted = sorted(variants[0].name_to_atom)
         raise MBuildError(
             f"Could not match residue {group.label} against any "
             f"template variant:\n  {details}\n"
+            f"The {group.resname} template accepts these {len(accepted)} "
+            f"atom names: {', '.join(accepted)}.\n"
             "Check that the file is fully protonated (e.g. run pdbfixer "
             "or reduce) and uses standard PDB atom names."
         )
