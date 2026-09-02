@@ -1404,6 +1404,52 @@ class TestProteinExports(BaseTest):
         protein.save(str(mol2), overwrite=True)
         assert len(parmed.load_file(str(mol2), structure=True).residues) == 306
 
+    def test_module_save_refuses_to_overwrite(self):
+        # Tests that a second GMSO-routed save to one path raises
+        # IOError, and that overwrite=True writes the file. This is
+        # needed because the module function checks the path itself,
+        # before it builds the topology, so nothing else enforces the
+        # rule for the GMSO extensions. The test writes one .gro file
+        # three times.
+        protein = Protein(get_fn("8ciq.pdb"))
+        box = mb.Box([9.0, 9.0, 9.0])
+        mb.biopolymers.save(protein, "once.gro", box=box)
+        with pytest.raises(IOError, match="not overwriting"):
+            mb.biopolymers.save(protein, "once.gro", box=box)
+        mb.biopolymers.save(protein, "once.gro", box=box, overwrite=True)
+
+    def test_residue_labels_without_residues(self):
+        # Tests that residue_labels returns an empty map for a compound
+        # that holds no Residue. This is needed because the function is
+        # public and the GMSO export calls it on a packed system, so a
+        # solvent-only compound must return a map instead of raising on
+        # the empty span of residue numbers. The test labels one water
+        # molecule.
+        from mbuild.lib.molecules.water import WaterSPC
+
+        assert mb.biopolymers.residue_labels(WaterSPC()) == {}
+
+    def test_to_gmso_rejects_a_topology_it_cannot_align(self, monkeypatch):
+        # Tests that the GMSO export raises when the sites of the
+        # topology do not line up with the particles of the compound.
+        # This is needed because the export rewrites each site's residue
+        # by position in the two lists, so a converter that reordered
+        # the sites would write the wrong residue onto every atom and
+        # say nothing. The test patches Compound.to_gmso to convert a
+        # moved copy of the protein, which keeps the site count and the
+        # site names but changes every position.
+        from mbuild.compound import Compound
+
+        protein = Protein(get_fn("8ciq.pdb"))
+        moved = mb.clone(protein)
+        moved.translate([1.0, 0.0, 0.0])
+        original = Compound.to_gmso
+        monkeypatch.setattr(
+            Compound, "to_gmso", lambda self, **kwargs: original(moved, **kwargs)
+        )
+        with pytest.raises(MBuildError, match="Site order"):
+            mb.biopolymers.to_gmso(protein)
+
     def test_typed_only_extensions_name_the_missing_force_field(self):
         # Tests that a .data, .mcf or .top write raises an MBuildError
         # that names the extension when the topology carries no
