@@ -35,6 +35,7 @@ import os
 from collections import deque
 from dataclasses import dataclass, replace
 from functools import lru_cache
+from itertools import combinations
 
 import numpy as np
 
@@ -63,6 +64,13 @@ _GMSO_EXTENSIONS = frozenset((".gro", ".gsd", ".data", ".xyz", ".mcf", ".top"))
 #: strained or low-resolution structure. It still rejects two residues
 #: that only share a chain identifier and increasing residue numbers.
 _ADVISORY_TER_MAX_C_N = 0.2
+
+#: Largest separation, in bonds, at which two charged atoms of one
+#: residue count as one functional group. Arginine's NH1 and NH2 are
+#: two bonds apart through CZ, and their opposite charges come from the
+#: template model. An N-terminal serine's N and OG are three bonds
+#: apart, and their opposite charges are a real zwitterion.
+_SPLIT_CHARGE_MAX_BONDS = 2
 
 #: Extensions whose writers record the unit cell, so a missing box
 #: changes the file that ``save`` writes.
@@ -215,6 +223,45 @@ def _rdkit_bond_orders():
         2.0: Chem.BondType.DOUBLE,
         3.0: Chem.BondType.TRIPLE,
     }
+
+
+def _bond_separation(variant, start, end, max_bonds):
+    """Return the number of bonds between two atoms of one template.
+
+    The search is a breadth-first walk over the cached adjacency map of
+    ``ResidueTemplate.bonded_names``. It stops after ``max_bonds``
+    steps, so its cost does not grow with the size of the template.
+
+    Parameters
+    ----------
+    variant : ResidueTemplate
+        Template whose bonds define the graph.
+    start : str
+        Canonical name of the first atom.
+    end : str
+        Canonical name of the second atom.
+    max_bonds : int
+        Largest separation that the search reports.
+
+    Returns
+    -------
+    int or None
+        The separation in bonds, or None when the two atoms are more
+        than ``max_bonds`` apart or are not connected.
+    """
+    visited = {start}
+    frontier = {start}
+    for separation in range(1, max_bonds + 1):
+        frontier = {
+            name
+            for atom_name in frontier
+            for name in variant.bonded_names(atom_name)
+            if name not in visited
+        }
+        if end in frontier:
+            return separation
+        visited |= frontier
+    return None
 
 
 def _chain_of(residue):
@@ -1420,8 +1467,8 @@ class Protein(Compound):
         The template library is not searched, so the new variant can be
         one that no library variant describes. A warning reports that
         case, because a PDB written from such a residue does not reload.
-        A second warning reports a residue that keeps more than one
-        charged atom.
+        A second warning reports two charged atoms that lie within
+        ``_SPLIT_CHARGE_MAX_BONDS`` bonds of each other.
 
         The call changes nothing and logs a warning when the named atom
         carries no acidic proton, for example because it is already
@@ -1500,13 +1547,17 @@ class Protein(Compound):
 
     @staticmethod
     def _warn_on_split_charge(residue):
-        """Warn when the residue keeps more than one charged atom.
+        """Warn when two charged atoms lie in one functional group.
 
         ``ResidueTemplate.deprotonated_at`` decrements the charge of the
         heavy atom that held the proton. It changes no other atom, so a
         residue whose charge sat on a second atom now holds two charged
-        atoms. The residue charge can still be zero. The warning names
-        the atoms and their charges and the call proceeds.
+        atoms. Two charges within ``_SPLIT_CHARGE_MAX_BONDS`` bonds sit
+        on one functional group, and they usually show that the template
+        model split a delocalized charge across it. Two charges that are
+        further apart sit on separate functional groups, where they can
+        be a real zwitterion. The warning therefore names only the pairs
+        of the first kind, and the call proceeds.
 
         Parameters
         ----------
@@ -1520,14 +1571,26 @@ class Protein(Compound):
         }
         if len(charges) < 2:
             return
-        listing = ", ".join(
-            f"{name} {charge:+d}" for name, charge in sorted(charges.items())
-        )
+        variant = residue.template
+        pairs = []
+        for first, second in combinations(sorted(charges), 2):
+            separation = _bond_separation(
+                variant, first, second, _SPLIT_CHARGE_MAX_BONDS
+            )
+            if separation is None:
+                continue
+            pairs.append(
+                f"{first} {charges[first]:+d} and {second} "
+                f"{charges[second]:+d}, {separation} bonds apart"
+            )
+        if not pairs:
+            return
         logger.warning(
-            f"{_residue_label(residue)} holds {len(charges)} charged atoms "
-            f"after this call: {listing}. Load the protein again and "
-            "deprotonate another atom if one charged atom is correct for the "
-            "chemistry you model."
+            f"{_residue_label(residue)} holds charged atoms within "
+            f"{_SPLIT_CHARGE_MAX_BONDS} bonds after this call: "
+            f"{'; '.join(pairs)}. Load the protein again and deprotonate "
+            "another atom if one charged atom is correct for the chemistry "
+            "you model."
         )
 
     def _warn_if_variant_is_absent(self, residue, atom_name, proton_name):

@@ -681,19 +681,30 @@ class TestProtein(BaseTest):
         assert "holds no CYS variant" not in caplog.text
 
     def test_deprotonate_warns_on_a_split_charge(self, protein_6m03, caplog):
-        # Tests that deprotonate() warns when the residue keeps two
-        # charged atoms, and that it still removes the proton. This is
-        # needed because deprotonated_at() decrements only the heavy
-        # atom that held the proton, so an arginine ends with one
-        # negative and one positive nitrogen. The test deprotonates
-        # ARG 4 NH1 of the bundled 6m03 asset, reads the log, and reads
-        # the per-atom charges back.
+        # Tests that deprotonate() warns for two charged atoms within
+        # two bonds, and stays silent for two charged atoms further
+        # apart. This is needed because arginine's two nitrogens are one
+        # group split by the template model, while an N-terminal serine
+        # is a real zwitterion. The test deprotonates ARG 4 NH1 and
+        # SER 1 OG of the bundled 6m03 asset and reads the log and the
+        # per-atom charges back.
         protein = protein_6m03
         with caplog.at_level(logging.WARNING, logger="mbuild"):
             protein.deprotonate(4, "NH1", chain_id="A")
-        assert "NH1 -1, NH2 +1" in caplog.text
-        residue = protein.get_residue(4, chain_id="A")
-        assert residue.atom_formal_charges == {"NH1": -1, "NH2": 1}
+        assert "NH1 -1 and NH2 +1, 2 bonds apart" in caplog.text
+        assert protein.get_residue(4, chain_id="A").atom_formal_charges == {
+            "NH1": -1,
+            "NH2": 1,
+        }
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein.deprotonate(1, "OG", chain_id="A")
+        assert "bonds apart" not in caplog.text
+        assert protein.get_residue(1, chain_id="A").atom_formal_charges == {
+            "N": 1,
+            "OG": -1,
+        }
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_attach(self, protein_6m03, acetone):
