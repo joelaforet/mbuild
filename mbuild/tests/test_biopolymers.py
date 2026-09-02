@@ -1315,13 +1315,15 @@ class TestProteinExports(BaseTest):
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_save_pdb_modified_protein_does_not_reload(self, protein_6m03, acetone):
-        # Tests that a written modified protein fails to reload with an
-        # error that names the fragment residue. This is needed because
+        # Tests that a written modified protein fails to reload with the
+        # library error for an unknown residue. This is needed because
         # save_pdb is the handoff artifact of this recipe and users try
         # to reload it: the fragment has no CCD entry, and mBuild writes
         # no modification bond declaration, so the loader cannot match
         # the fragment residue. The test attaches a fragment, writes the
-        # file, and asserts that the error names the fragment residue.
+        # file, and asserts on the library message. The test encodes a
+        # present limitation. Delete it when mBuild can declare a
+        # modification bond that the loader reads back.
         protein = protein_6m03
         protein.attach(
             acetone,
@@ -1334,7 +1336,7 @@ class TestProteinExports(BaseTest):
         )
         path = Path("modified_reload.pdb")
         protein.save_pdb(str(path))
-        with pytest.raises(MBuildError, match="Residue ACT"):
+        with pytest.raises(MBuildError, match="is not in the CCD template library"):
             Protein(str(path))
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
