@@ -1126,7 +1126,15 @@ class Protein(Compound):
             The residues allowed to move. Default: every HETATM
             residue (i.e. all attached fragments).
         n_steps : int, optional, default=500
-            Maximum minimization iterations.
+            Maximum minimization iterations. It reaches OpenMM as
+            ``maxIterations``, where ``0`` means that the minimizer
+            runs until it meets ``tolerance``, with no iteration limit.
+            The default is finite because ``attach(relax=True)`` calls
+            this method: an interactive build must return, and a
+            fragment that a rigid placement puts deep inside the
+            protein can take a long time to meet the tolerance. Pass
+            ``0`` when the converged structure matters more than the
+            run time.
         tolerance : float, optional, default=50.0
             Energy tolerance in kJ/mol/nm.
         platform : str, optional, default="CPU"
