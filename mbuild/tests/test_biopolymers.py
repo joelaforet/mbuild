@@ -461,6 +461,34 @@ class TestProtein(BaseTest):
         assert "SER A:1" in caplog.text
         assert protein.get_atom(1, "CB", chain_id="A").pos[0] == pytest.approx(-0.2645)
 
+    def test_monatomic_ion_templates(self):
+        # Tests that a PDB which holds one ion of each bundled
+        # monatomic component loads with the formal charge of every
+        # ion. This is needed because a prepared MD system carries
+        # counter-ions, the library held sodium and chloride only, and
+        # the CIF reader read the loop_ form of a category alone, so
+        # even those two templates carried no atoms and no ion could
+        # load. The test writes one HETATM record per ion, each in its
+        # own residue, and compares the residue charges: five cations,
+        # five anions and neutral xenon.
+        ions = ["LI", "NA", "K", "RB", "CS", "F", "CL", "BR", "I", "IOD", "XE"]
+        lines = []
+        for serial, resname in enumerate(ions, start=1):
+            atom = "I" if resname == "IOD" else resname
+            lines.append(
+                f"HETATM{serial:5d} {atom:<4s} {resname:<4s}"
+                f"A{serial:4d}    {serial * 5.0:8.3f}{0.0:8.3f}{0.0:8.3f}"
+                f"  1.00  0.00          {atom:>2s}"
+            )
+        ion_file = Path("ions.pdb")
+        ion_file.write_text("\n".join(lines) + "\nEND\n")
+
+        protein = Protein(str(ion_file))
+        assert (
+            sorted(residue.formal_charge for residue in protein.residues())
+            == [-1] * 5 + [0] + [1] * 5
+        )
+
     def test_amber_digit_first_hydrogen_names(self):
         # Tests that a capped arginine written with digit-first
         # hydrogen names (2HB, 1HH1) loads with the canonical names of

@@ -20,7 +20,11 @@ assign parameters. In particular:
 
 The bundled ``.cif`` files in ``mbuild/lib/biomolecules/ccd_cache`` are
 unmodified CCD component files (public domain), copied from the set that
-openff-pablo vendors.
+openff-pablo vendors. ``I.cif`` is the one exception: the CCD gives the
+component id ``I`` to a nucleotide, but OpenMM and PACKMOL write ``I``
+as the residue name of an iodide ion, so the bundled ``I.cif`` holds the
+iodide ion. openff-pablo defines the same component by hand in
+``_std_ccd_cache.py``.
 
 Attribution: the ``_ACIDIC_PROTONS``, ``_BASIC_ATOMS``, and
 ``_ATOM_NAME_SYNONYMS`` tables and the protonation-variant, caps, and
@@ -578,6 +582,41 @@ def _parse_cif_blocks(text):
     return keys, loops
 
 
+def _cif_category_rows(keys, loops, category):
+    """Return the rows of one CIF category, in either of its two forms.
+
+    The CIF format writes a category of more than one row as a
+    ``loop_`` block, and a category of exactly one row as plain
+    ``_category.item value`` lines. Every monatomic component of the
+    CCD, such as the ion files NA, CL and BR, writes its single
+    ``_chem_comp_atom`` row in the second form. A reader of the
+    ``loop_`` form alone gives such a component no atoms, so no residue
+    can match it.
+
+    Parameters
+    ----------
+    keys : dict
+        The ``_category.item`` values of the file.
+    loops : dict
+        The ``loop_`` blocks of the file, keyed by category.
+    category : str
+        The category name, for example ``"_chem_comp_atom"``.
+
+    Returns
+    -------
+    list of dict
+        One dict per row, keyed by the item name without the category.
+    """
+    if category in loops:
+        return loops[category]
+    row = {
+        key.rsplit(".", 1)[1]: value
+        for key, value in keys.items()
+        if key.rsplit(".", 1)[0] == category
+    }
+    return [row] if row else []
+
+
 def parse_ccd_cif(text):
     """Parse one CCD component ``.cif`` file into a base ResidueTemplate.
 
@@ -602,7 +641,7 @@ def parse_ccd_cif(text):
     linking = "peptide" if comp_type in _PEPTIDE_LINKING_TYPES else None
 
     atoms = []
-    for row in loops.get("_chem_comp_atom", []):
+    for row in _cif_category_rows(keys, loops, "_chem_comp_atom"):
         name = row["atom_id"]
         alt = row.get("alt_atom_id", name)
         # CIF marks an unknown value with "?" and an inapplicable value
@@ -623,7 +662,7 @@ def parse_ccd_cif(text):
             atom2=row["atom_id_2"],
             order=_CIF_BOND_ORDERS.get(row.get("value_order", "SING"), 1),
         )
-        for row in loops.get("_chem_comp_bond", [])
+        for row in _cif_category_rows(keys, loops, "_chem_comp_bond")
     )
     return ResidueTemplate(
         name=resname,
