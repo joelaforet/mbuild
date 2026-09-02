@@ -172,6 +172,139 @@ def _atom_in_residue(residue, atom_name):
     return next(residue.particles_by_name(atom_name), None)
 
 
+def _assign_records(group, variant):
+    """Assign the records of one PDB residue to template atoms.
+
+    The first pass gives every record the single atom that
+    ``name_to_atom`` reports for its name. That pass resolves files
+    written with wwPDB version 3 atom names, and it is the only pass
+    such files need.
+
+    Two of its rejection reasons come from the atom names alone: a name
+    the template does not carry, and two records that claim the same
+    template atom. Both happen on files whose hydrogen names are valid
+    but not canonical. Digit-first names such as ``2HB`` are PDB format
+    version 2 names, which Amber-style tools still write, and they fail
+    the first reason. Glycine written with the version 2 alpha-hydrogen
+    names ``HA1``/``HA2`` fails the second, because the CCD gives the
+    version 3 atom ``HA2`` the alternative name ``HA1`` and the atom
+    ``HA3`` the alternative name ``HA2``. After either reason, a second
+    pass runs ``_assign_records_bipartite`` over the full candidate
+    list of every record.
+
+    Parameters
+    ----------
+    group : _ResidueGroup
+        The records of one PDB residue, in file order.
+    variant : mbuild.biopolymers.ccd.ResidueTemplate
+        The template variant to assign the records to.
+
+    Returns
+    -------
+    record_atoms : dict
+        Maps ``id(record)`` to the assigned AtomTemplate. Complete only
+        when ``reason`` is None.
+    reason : str or None
+        Why the variant does not fit, or None on success.
+    """
+    name_to_atom = variant.name_to_atom
+    record_atoms = {}
+    used = set()
+    reason = None
+    names_disagree = False
+    for record in group.records:
+        atom = name_to_atom.get(record.name)
+        if atom is None:
+            reason = f"atom name {record.name!r} is not in the template"
+            names_disagree = True
+            break
+        if atom.name in used:
+            reason = f"two records match template atom {atom.name!r}"
+            names_disagree = True
+            break
+        if record.element and record.element.upper() != atom.element.upper():
+            reason = (
+                f"element {record.element!r} of atom {record.name!r} "
+                f"conflicts with template element {atom.element!r}"
+            )
+            break
+        used.add(atom.name)
+        record_atoms[id(record)] = atom
+    if not names_disagree:
+        return record_atoms, reason
+    return _assign_records_bipartite(group, variant, reason)
+
+
+def _assign_records_bipartite(group, variant, reason):
+    """Assign records to template atoms by a bipartite matching.
+
+    Every record gets the candidate atoms of
+    ``ResidueTemplate.atoms_named``, kept only where the element of the
+    record agrees. A Kuhn augmenting-path search then gives each record
+    a distinct template atom. The records are visited in file order and
+    the candidates stay in template order, so the same file always
+    produces the same assignment.
+
+    The assignment covers every record or none. A partial cover is a
+    failure, because chemistry comes from the template and a record
+    with no atom has no chemistry.
+
+    Parameters
+    ----------
+    group : _ResidueGroup
+        The records of one PDB residue, in file order.
+    variant : mbuild.biopolymers.ccd.ResidueTemplate
+        The template variant to assign the records to.
+    reason : str
+        The rejection reason of the first pass. It is reported again
+        when the assignment fails, so that the error message keeps
+        naming the record that the user must inspect.
+
+    Returns
+    -------
+    record_atoms : dict
+        Maps ``id(record)`` to the assigned AtomTemplate, or empty on
+        failure.
+    reason : str or None
+        None on success, else the reason passed in.
+    """
+    candidates = []
+    for record in group.records:
+        atoms = [
+            atom
+            for atom in variant.atoms_named(record.name)
+            if not record.element or record.element.upper() == atom.element.upper()
+        ]
+        if not atoms:
+            return {}, reason
+        candidates.append(atoms)
+
+    holder = {}
+
+    def augment(index, visited):
+        """Give record ``index`` an atom, moving earlier records on."""
+        for atom in candidates[index]:
+            if atom.name in visited:
+                continue
+            visited.add(atom.name)
+            held_by = holder.get(atom.name)
+            if held_by is None or augment(held_by, visited):
+                holder[atom.name] = index
+                return True
+        return False
+
+    for index in range(len(candidates)):
+        if not augment(index, set()):
+            return {}, reason
+
+    atom_of = {index: name for name, index in holder.items()}
+    name_to_atom = variant.name_to_atom
+    return {
+        id(record): name_to_atom[atom_of[index]]
+        for index, record in enumerate(group.records)
+    }, None
+
+
 def _match_residue(group, variants, prior_possible, posterior_possible):
     """Match one PDB residue against its template variants.
 
@@ -181,29 +314,11 @@ def _match_residue(group, variants, prior_possible, posterior_possible):
     matches = []
     reasons = []
     for variant in variants:
-        name_to_atom = variant.name_to_atom
-        record_atoms = {}
-        used = set()
-        reason = None
-        for record in group.records:
-            atom = name_to_atom.get(record.name)
-            if atom is None:
-                reason = f"atom name {record.name!r} is not in the template"
-                break
-            if atom.name in used:
-                reason = f"two records match template atom {atom.name!r}"
-                break
-            if record.element and record.element.upper() != atom.element.upper():
-                reason = (
-                    f"element {record.element!r} of atom {record.name!r} "
-                    f"conflicts with template element {atom.element!r}"
-                )
-                break
-            used.add(atom.name)
-            record_atoms[id(record)] = atom
+        record_atoms, reason = _assign_records(group, variant)
         if reason is not None:
             reasons.append(f"{variant.description}: {reason}")
             continue
+        used = {atom.name for atom in record_atoms.values()}
 
         missing = variant.atom_names - used
         prior = variant.prior_fragment

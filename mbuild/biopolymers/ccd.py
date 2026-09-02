@@ -155,6 +155,38 @@ _ATOM_NAME_SYNONYMS = {
 }
 
 
+#: Matches an atom name that starts with one or more digits, such as
+#: ``2HB`` or ``1HH1``.
+_DIGIT_FIRST_NAME = re.compile(r"^(\d+)([A-Za-z]\w*)$")
+
+
+def _wraparound_name(name):
+    """Return a digit-first atom name in digit-last form.
+
+    Names such as ``2HB`` and ``1HH1`` are PDB format version 2 atom
+    names. Amber-style tools (tleap, and the Amber writers of OpenMM
+    and ParmEd) still write them. The wwPDB Format Guide v3.30, section
+    "Atom Names", puts the digit last, so version 3 files and the CCD
+    write the same atoms as ``HB2`` and ``HH11``. This function rotates
+    the leading digits to the end of the name.
+
+    Parameters
+    ----------
+    name : str
+        A PDB atom name with the padding whitespace already removed.
+
+    Returns
+    -------
+    str or None
+        The rotated name, or None when the name does not start with a
+        digit.
+    """
+    match = _DIGIT_FIRST_NAME.match(name)
+    if match is None:
+        return None
+    return match.group(2) + match.group(1)
+
+
 @dataclass(frozen=True)
 class AtomTemplate:
     """One atom of a CCD residue template.
@@ -249,10 +281,64 @@ class ResidueTemplate:
                     mapping[synonym] = atom
         return mapping
 
+    @functools.cached_property
+    def _atoms_by_any_name(self):
+        """Return a dict mapping every accepted name to its atoms.
+
+        A name maps to more than one atom when it is the canonical name
+        of one atom and an alternative name of another. Glycine is the
+        common case: the CCD gives ``HA2`` the alternative name ``HA1``
+        and ``HA3`` the alternative name ``HA2``.
+        """
+        mapping = {}
+        for atom in self.atoms:
+            mapping.setdefault(atom.name, []).append(atom)
+        for atom in self.atoms:
+            for synonym in atom.synonyms:
+                candidates = mapping.setdefault(synonym, [])
+                if atom not in candidates:
+                    candidates.append(atom)
+        return {name: tuple(atoms) for name, atoms in mapping.items()}
+
     @property
     def formal_charge(self):
         """Return the net formal charge of this variant."""
         return sum(atom.formal_charge for atom in self.atoms)
+
+    def atoms_named(self, name):
+        """Return every template atom that a PDB atom name can denote.
+
+        The candidates come in a fixed order: the atom whose canonical
+        CCD name is ``name``, then the atoms that carry ``name`` as an
+        alternative name in template order, then those two groups again
+        for the digit-last rotation of a digit-first name (see
+        ``_wraparound_name``). The order is fixed so that a matcher
+        that consumes the list gives the same result on every run.
+
+        This method reports more than one atom for a name, and the
+        rotated names, which ``name_to_atom`` does not. Use it only to
+        resolve a residue whose names the single-atom lookup rejects.
+
+        Parameters
+        ----------
+        name : str
+            A PDB atom name.
+
+        Returns
+        -------
+        list of AtomTemplate
+            The candidate atoms. Empty when this template accepts no
+            atom of that name.
+        """
+        candidates = list(self._atoms_by_any_name.get(name, ()))
+        rotated = _wraparound_name(name)
+        if rotated is not None:
+            candidates.extend(
+                atom
+                for atom in self._atoms_by_any_name.get(rotated, ())
+                if atom not in candidates
+            )
+        return candidates
 
     def bonded_names(self, name):
         """Return the canonical names bonded to the named atom.

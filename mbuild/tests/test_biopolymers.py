@@ -290,6 +290,43 @@ class TestProtein(BaseTest):
         with pytest.raises(MBuildError, match="download=True"):
             Protein(str(bad_residue))
 
+    def test_amber_digit_first_hydrogen_names(self):
+        # Tests that a capped arginine written with digit-first
+        # hydrogen names (2HB, 1HH1) loads with the canonical names of
+        # the CCD template (HB2, HH11). This is needed because
+        # digit-first names are PDB format version 2 names that
+        # Amber-style tools still write, and the first-hit name lookup
+        # rejects every one of them, so such a file could not load at
+        # all. The test loads the bundled capped-arginine asset and
+        # reads back the residue names and the arginine atom names.
+        protein = Protein(get_fn("capped_arg_altresonance.pdb"))
+        residues = list(protein.residues())
+        assert [residue.name for residue in residues] == ["ACE", "ARG", "NME"]
+        names = {particle.name for particle in residues[1].particles()}
+        assert {"HB2", "HB3", "HH11", "HH12"} <= names
+
+    def test_v2_glycine_alpha_hydrogens(self):
+        # Tests that a glycine written with the alpha-hydrogen names
+        # HA1 and HA2 loads as the atoms HA2 and HA3. This is needed
+        # because HA1/HA2 are the PDB format version 2 names of the
+        # atoms that wwPDB version 3 calls HA2/HA3, and the CCD lists
+        # HA1 as an alternative name of HA2 and HA2 as an alternative
+        # name of HA3, so a first-hit lookup gives both records the
+        # atom HA2 and the residue matches no variant. The test renames
+        # the alpha hydrogens of every glycine in the bundled
+        # protonated asset, loads the result, and reads back the atom
+        # names of a glycine.
+        text = open(get_fn("6m03_protonated.pdb")).read()
+        renamed = Path("6m03_v2_glycine.pdb")
+        renamed.write_text(
+            text.replace(" HA2 GLY", " HA1 GLY").replace(" HA3 GLY", " HA2 GLY")
+        )
+
+        protein = Protein(str(renamed))
+        assert protein.n_particles == 4682
+        glycine = next(r for r in protein.residues() if r.name == "GLY")
+        assert {"HA2", "HA3"} <= {p.name for p in glycine.particles()}
+
     def test_insertion_codes_2mum(self):
         # Tests that a PDB with insertion codes loads with the inserted
         # residues addressable through get_residue(resnum, icode=...)
