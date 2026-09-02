@@ -98,6 +98,33 @@ def _gly_gly_with_ter(resnum=2, icode=" ", offset=0.0, complete=False):
     return "\n".join(lines) + "\n"
 
 
+def _gly_gly_hexadecimal():
+    """Return PDB text whose atom serials and residue numbers overflow.
+
+    OpenMM writes an atom serial or a residue number that does not fit
+    its columns as a shifted hexadecimal field, in
+    ``openmm/app/pdbfile.py::_formatIndex``. It writes atom serial
+    100000 as ``A0000`` and residue number 10001 as ``A001``. This
+    function rewrites both fields of ``_gly_gly_with_ter`` into that
+    form: the serials start at 100000 and the two residues are
+    numbered 10001 and 10002.
+
+    Returns
+    -------
+    str
+        The PDB text.
+    """
+    lines = []
+    serial = 0xA0000
+    for line in _gly_gly_with_ter(complete=True).splitlines():
+        if line.startswith(("ATOM  ", "TER   ")):
+            resnum = 0xA000 + int(line[22:26])
+            line = f"{line[:6]}{serial:5X}{line[11:22]}{resnum:4X}{line[26:]}"
+            serial += 1
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
 class TestCCDLibrary(BaseTest):
     def test_base_template(self):
         # Tests that a bundled CCD cif parses into a template with the
@@ -611,38 +638,37 @@ class TestProtein(BaseTest):
             == inserted
         )
 
-    def test_hexadecimal_serial_and_resseq_2mum(self):
+    def test_hexadecimal_serial_and_resseq(self):
         # Tests that a PDB whose atom serials and residue numbers are
         # written in hexadecimal loads with the decoded values. This is
         # needed because OpenMM switches both fields to hexadecimal
         # when they overflow their columns, so every system above 99999
         # atoms or 9999 residues carries them, and the decimal-only
-        # reader raised ValueError on such a file. The test loads the
-        # prepared 2MUM structure whose serials read A0001 upward and
-        # whose residue numbers read A001 upward, then checks the
-        # particle count and the number of the first residue, which
-        # the field A001 encodes as 10001.
-        protein = Protein(get_fn("2MUM_composed_function.pdb"))
-        assert protein.n_particles == 795
-        assert list(protein.residues())[0].resnum == 10001
+        # reader raised ValueError on such a file. The test writes a
+        # glycine pair whose serials read A0000 upward and whose
+        # residue numbers read A001 and A002, then checks the particle
+        # count and both residue numbers.
+        overflowed = Path("gly_hex.pdb")
+        overflowed.write_text(_gly_gly_hexadecimal())
+        protein = Protein(str(overflowed))
+        assert protein.n_particles == 20
+        assert [r.resnum for r in protein.residues()] == [10001, 10002]
 
-    def test_hexadecimal_conect_serials_2mum(self):
+    def test_hexadecimal_conect_serials(self):
         # Tests that a CONECT record whose atom serials are written in
         # hexadecimal loads. This is needed because OpenMM applies the
         # same overflow encoding to CONECT serials as to ATOM serials,
         # and the decimal-only reader raised ValueError on the CONECT
         # records of every system above 99999 atoms. The test appends a
         # CONECT record for the backbone N-CA bond of the first residue
-        # of the prepared 2MUM structure, whose serials read A0001 and
-        # A0002, then loads the file. The loader checks every CONECT
-        # record against the bonds the templates predict, so a load
-        # that succeeds proves both serials decoded to the two bonded
-        # atoms.
-        text = open(get_fn("2MUM_composed_function.pdb")).read()
-        with_conect = Path("2mum_hex_conect.pdb")
-        with_conect.write_text(text + "CONECTA0001A0002\n")
+        # of the same glycine pair, whose serials read A0000 and A0004,
+        # then loads the file. The loader checks every CONECT record
+        # against the bonds the templates predict, so a load that
+        # succeeds proves both serials decoded to the two bonded atoms.
+        with_conect = Path("gly_hex_conect.pdb")
+        with_conect.write_text(_gly_gly_hexadecimal() + "CONECTA0000A0004\n")
         protein = Protein(str(with_conect))
-        assert protein.n_particles == 795
+        assert protein.n_particles == 20
 
     def test_hexadecimal_indices_round_trip(self):
         # Tests that a structure whose residue numbers overflow their
