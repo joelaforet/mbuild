@@ -23,6 +23,11 @@ file with bond records for downstream parameterization. Worked examples
 live in the demos repository:
 https://github.com/joelaforet/mbuild_protein_demos
 
+The loader reads one conformer of a disordered atom. It keeps the
+records whose alternate location indicator is blank and the records
+that carry the first non-blank indicator of the file. It skips the
+other conformers and it names the affected residues in a warning.
+
 Prepare a charged site before you bond to it. ``attach`` removes one
 hydrogen from the anchor atom and puts the new bond in its place, so
 the formal charge of that atom does not change. A lysine side-chain

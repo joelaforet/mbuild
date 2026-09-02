@@ -105,6 +105,13 @@ def _decode_index(field, width):
 def _parse_pdb(text):
     """Parse ATOM/HETATM/TER/CONECT/CRYST1 records of the first model.
 
+    A disordered atom carries an alternate location indicator in
+    column 17, which the wwPDB Format Guide v3.30, section 9
+    (Coordinate Section, ATOM), names altLoc. One conformer only is
+    read: the records whose altLoc is blank, plus the records that
+    carry the first non-blank altLoc of the file. The other conformers
+    are skipped, and one warning names the residues that lose them.
+
     Returns a tuple ``(residues, conects, box)``: the ``_PdbResidue``
     groups in file order, the CONECT pairs as a set of frozensets of
     two serials, and the ``Box`` or None.
@@ -112,25 +119,17 @@ def _parse_pdb(text):
     residues = []
     conects = set()
     box = None
-    seen_altloc_a = False
+    kept_alt_loc = None
+    skipped_alt_loc_keys = {}
     in_extra_model = False
     last_key = None
-    for line_no, line in enumerate(text.splitlines(), start=1):
+    for line in text.splitlines():
         record_type = line[:6]
         if record_type == "ENDMDL":
             in_extra_model = True
         elif record_type.startswith("MODEL") and in_extra_model:
             logger.warning("PDB file has multiple models; only model 1 is read.")
         elif record_type in ("ATOM  ", "HETATM") and not in_extra_model:
-            alt_loc = line[16].strip()
-            if alt_loc not in ("", "A"):
-                raise MBuildError(
-                    f"Alternate location {alt_loc!r} on line {line_no} is not "
-                    "supported. Keep only one location (altLoc blank or 'A')."
-                )
-            if alt_loc == "A" and not seen_altloc_a:
-                logger.warning("Using alternate location 'A' atoms only.")
-                seen_altloc_a = True
             record = _PdbRecord(
                 serial=_decode_index(line[6:11], 5),
                 name=line[12:16].strip(),
@@ -146,6 +145,19 @@ def _parse_pdb(text):
                 hetatm=record_type == "HETATM",
             )
             key = (record.resname, record.chain_id, record.resnum, record.icode)
+            # A crystal structure gives a disordered atom one record
+            # per conformer, each with its own altLoc letter. The
+            # loader builds one structure, so it keeps the blank
+            # records and the first non-blank letter of the file and
+            # it skips the rest. openff-pablo keeps the same pair
+            # (_pdb_data.py, _allowed_alt_locs).
+            alt_loc = line[16].strip()
+            if alt_loc:
+                if kept_alt_loc is None:
+                    kept_alt_loc = alt_loc
+                if alt_loc != kept_alt_loc:
+                    skipped_alt_loc_keys[key] = None
+                    continue
             if key != last_key:
                 residues.append(_PdbResidue(*key))
                 last_key = key
@@ -166,6 +178,12 @@ def _parse_pdb(text):
             angles = (float(line[33:40]), float(line[40:47]), float(line[47:54]))
             if any(length > 0.2 for length in lengths):
                 box = Box(lengths=lengths, angles=angles)
+    if skipped_alt_loc_keys:
+        labels = ", ".join(_PdbResidue(*key).label for key in skipped_alt_loc_keys)
+        logger.warning(
+            f"Alternate location {kept_alt_loc!r} is read for {labels}. "
+            "The other conformers of these residues are skipped."
+        )
     if not residues:
         raise MBuildError("No ATOM or HETATM records found in the PDB file.")
     return residues, conects, box

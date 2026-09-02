@@ -413,6 +413,38 @@ class TestProtein(BaseTest):
         with pytest.raises(MBuildError, match="download=True"):
             Protein(str(bad_residue))
 
+    def test_alternate_locations_keep_the_first_conformer(self, caplog):
+        # Tests that a residue with two alternate locations loads with
+        # the first conformer only and logs one warning that names the
+        # residue. This is needed because a crystal structure gives a
+        # disordered atom one record per conformer, and the loader
+        # raised on every altLoc letter, so such a file could not load
+        # at all. The test writes a copy of the good asset in which
+        # three atoms of the N-terminal serine carry an altLoc 'A'
+        # record and an altLoc 'B' record 1 A away, then checks the
+        # log and the position of the CB atom, which must hold the 'A'
+        # coordinates.
+        lines = []
+        for line in open(get_fn("6m03_protonated.pdb")).read().splitlines():
+            if line[17:26] == "SER A   1" and line[12:16].strip() in (
+                "CB",
+                "OG",
+                "HG",
+            ):
+                shifted = f"{float(line[30:38]) + 1.0:8.3f}"
+                lines.append(line[:16] + "A" + line[17:])
+                lines.append(line[:16] + "B" + line[17:30] + shifted + line[38:])
+            else:
+                lines.append(line)
+        altloc = Path("altloc.pdb")
+        altloc.write_text("\n".join(lines) + "\n")
+
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein = Protein(str(altloc))
+        assert len(caplog.records) == 1
+        assert "SER A:1" in caplog.text
+        assert protein.get_atom(1, "CB", chain_id="A").pos[0] == pytest.approx(-0.2645)
+
     def test_amber_digit_first_hydrogen_names(self):
         # Tests that a capped arginine written with digit-first
         # hydrogen names (2HB, 1HH1) loads with the canonical names of
