@@ -39,6 +39,8 @@ https://github.com/joelaforet/mbuild_protein_demos
 
 .. autofunction:: mbuild.biopolymers.fragments.fragment_from_sdf
 
+.. autofunction:: mbuild.biopolymers.fragments.fragment_from_smiles
+
 Solvating a protein
 ^^^^^^^^^^^^^^^^^^^
 
