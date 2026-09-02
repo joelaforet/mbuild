@@ -12,7 +12,7 @@ import logging
 import numpy as np
 
 from mbuild import clone
-from mbuild.biopolymers.protein import Residue
+from mbuild.biopolymers.protein import Residue, _rdkit_bond_orders
 from mbuild.bond_graph import BondGraph
 from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
@@ -310,15 +310,7 @@ def fragment_from_sdf(filename, resname):
             f"{filename} has implicit hydrogens; write the SDF with all "
             "hydrogens explicit."
         )
-    # Stricter than the map in conversion.py by intent: the core map
-    # accepts UNSPECIFIED as 0.0, but this loader needs real bond
-    # orders and raises on any other bond type below.
-    orders = {
-        Chem.BondType.SINGLE: 1.0,
-        Chem.BondType.DOUBLE: 2.0,
-        Chem.BondType.TRIPLE: 3.0,
-        Chem.BondType.AROMATIC: 1.5,
-    }
+    orders = {bond_type: order for order, bond_type in _rdkit_bond_orders().items()}
     conformer = molecule.GetConformer()
     residue = Residue(resname=(resname or "LIG")[:3].upper(), hetatm=True)
     particles = []

@@ -160,6 +160,36 @@ class _Match:
     expects_crosslink: bool
 
 
+def _rdkit_bond_orders():
+    """Return the RDKit bond type of every bond order this recipe uses.
+
+    The table is built on each call, because RDKit is an optional
+    dependency and the module must import without it.
+    ``Protein.to_rdkit`` reads the table forward and
+    ``fragments.fragment_from_sdf`` reads it backward, so one table
+    keeps the two directions in agreement.
+
+    The table is stricter than the map in ``mbuild.conversion`` by
+    intent: that map turns UNSPECIFIED into the order 0.0, and this
+    recipe needs a real bond order on every bond, so an absent key must
+    fail.
+
+    Returns
+    -------
+    dict
+        Map of bond order (float) -> ``rdkit.Chem.BondType``.
+    """
+    rdkit = import_("rdkit")  # noqa: F841
+    from rdkit import Chem
+
+    return {
+        1.0: Chem.BondType.SINGLE,
+        1.5: Chem.BondType.AROMATIC,
+        2.0: Chem.BondType.DOUBLE,
+        3.0: Chem.BondType.TRIPLE,
+    }
+
+
 def _chain_of(residue):
     """Return the Chain ancestor of a residue.
 
@@ -1004,6 +1034,7 @@ class Protein(Compound):
             particle_index[particle] = editable.AddAtom(atom)
 
         aromatic_pairs = []
+        bond_types = _rdkit_bond_orders()
         for particle1, particle2, data in self.bonds(return_bond_order=True):
             if particle1 not in particle_index or particle2 not in particle_index:
                 continue
@@ -1013,12 +1044,7 @@ class Protein(Compound):
                     f"Bond {particle1.name}-{particle2.name} has no bond "
                     "order; cannot export chemistry to RDKit."
                 )
-            bond_type = {
-                1.0: Chem.BondType.SINGLE,
-                2.0: Chem.BondType.DOUBLE,
-                3.0: Chem.BondType.TRIPLE,
-                1.5: Chem.BondType.AROMATIC,
-            }[order]
+            bond_type = bond_types[order]
             editable.AddBond(
                 particle_index[particle1], particle_index[particle2], bond_type
             )
