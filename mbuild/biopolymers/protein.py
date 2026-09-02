@@ -34,6 +34,7 @@ import logging
 import os
 from collections import deque
 from dataclasses import dataclass, replace
+from functools import lru_cache
 
 import numpy as np
 
@@ -184,12 +185,15 @@ class _Match:
     expects_crosslink: bool
 
 
+@lru_cache(maxsize=1)
 def _rdkit_bond_orders():
     """Return the RDKit bond type of every bond order this recipe uses.
 
-    The table is built on each call, because RDKit is an optional
-    dependency and the module must import without it.
-    ``Protein.to_rdkit`` reads the table forward and
+    The table is built on the first call, not at import, because RDKit
+    is an optional dependency and the module must import without it.
+    ``lru_cache`` then holds the one table, so a caller that reads it
+    per bond does not rebuild it. ``Protein.to_rdkit`` reads the table
+    forward and
     ``fragments.fragment_from_sdf`` reads it backward, so one table
     keeps the two directions in agreement.
 
@@ -2131,6 +2135,8 @@ class Protein(Compound):
         The chemistry exports resolve each particle's residue through
         this one map, so the traversal rules (recursive fragment
         residues) stay in ``residues()`` alone.
+        ``_residue_of_particles`` calls this method, so
+        ``residue_labels`` reads the same walk for a ``Protein``.
         """
         mapping = {}
         for chain in self.chains:
@@ -2202,6 +2208,45 @@ class Protein(Compound):
         ]
 
 
+def _residue_of_particles(compound):
+    """Return a map of particle -> the ``Residue`` that holds it.
+
+    A ``Protein`` answers through its own ``_particle_residues``, which
+    walks its chains and its residues. Every other compound is walked
+    particle by particle, and each particle takes its nearest
+    ``Residue`` ancestor. The second path is needed because
+    ``mb.solvate`` and ``mb.fill_box`` return a plain ``Compound`` that
+    holds the protein as a child.
+
+    Parameters
+    ----------
+    compound : mbuild.Compound
+        The compound to walk.
+
+    Returns
+    -------
+    dict
+        Map of particle -> ``Residue``. A particle that sits outside a
+        ``Residue`` gets no entry.
+    """
+    resolver = getattr(compound, "_particle_residues", None)
+    if resolver is not None:
+        return {particle: residue for particle, (_, residue) in resolver().items()}
+    mapping = {}
+    for particle in compound.particles():
+        residue = next(
+            (
+                ancestor
+                for ancestor in particle.ancestors()
+                if isinstance(ancestor, Residue)
+            ),
+            None,
+        )
+        if residue is not None:
+            mapping[particle] = residue
+    return mapping
+
+
 def residue_labels(compound):
     """Return a map of particle -> ``(residue name, residue number)``.
 
@@ -2231,21 +2276,10 @@ def residue_labels(compound):
     dict
         Map of particle -> ``(name, number)``.
     """
-    particle_residue = {}
+    particle_residue = _residue_of_particles(compound)
     order = []
     seen = set()
-    for particle in compound.particles():
-        residue = next(
-            (
-                ancestor
-                for ancestor in particle.ancestors()
-                if isinstance(ancestor, Residue)
-            ),
-            None,
-        )
-        if residue is None:
-            continue
-        particle_residue[particle] = residue
+    for residue in particle_residue.values():
         if id(residue) not in seen:
             seen.add(id(residue))
             order.append(residue)
