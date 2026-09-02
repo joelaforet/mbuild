@@ -277,8 +277,8 @@ def _record_pos(group, atom_name):
     )
 
 
-def _stamp_template(residue, variant):
-    """Write a template variant and its formal charges onto a residue.
+def _assign_template(residue, variant):
+    """Assign a template variant and its formal charges to a residue.
 
     Only the atoms the residue holds contribute to the charges. A
     residue inside a chain is missing the leaving atoms of its peptide
@@ -302,7 +302,7 @@ def _stamp_template(residue, variant):
     residue.formal_charge = sum(charges.values())
 
 
-def _remove_pruning_ports(root, atom, particles):
+def _remove_particles_and_ports(root, atom, particles):
     """Remove particles bonded to an atom and drop the opened ports.
 
     ``Compound.remove`` leaves one auto-generated port on the atom per
@@ -977,7 +977,7 @@ class Protein(Compound):
                 particles[atom.name] = particle
                 serial_to_particle[record.serial] = particle
             residue.add([particles[name] for name in particles])
-            _stamp_template(residue, match.variant)
+            _assign_template(residue, match.variant)
             for bond in match.variant.bonds:
                 if bond.atom1 in particles and bond.atom2 in particles:
                     residue.add_bond(
@@ -1410,10 +1410,18 @@ class Protein(Compound):
         """Remove the acidic proton of one atom and update its charge.
 
         The proton comes from the residue's matched template variant:
-        the acidic proton that the variant bonds to ``atom_name``. The
-        residue is then re-matched to the variant that describes the
-        result, so ``template``, ``formal_charge`` and
-        ``atom_formal_charges`` all describe the deprotonated residue.
+        the acidic proton that the variant bonds to ``atom_name``. A new
+        variant is then constructed from that variant, with the proton
+        removed and the charge of the heavy atom decremented. The new
+        variant is assigned to the residue, so ``template``,
+        ``formal_charge`` and ``atom_formal_charges`` all describe the
+        deprotonated residue.
+
+        The template library is not searched, so the new variant can be
+        one that no library variant describes. A warning reports that
+        case, because a PDB written from such a residue does not reload.
+        A second warning reports a residue that keeps more than one
+        charged atom.
 
         The call changes nothing and logs a warning when the named atom
         carries no acidic proton, for example because it is already
@@ -1437,10 +1445,6 @@ class Protein(Compound):
         icode : str, optional
             Insertion code of the target residue.
 
-        Returns
-        -------
-        None
-
         Raises
         ------
         MBuildError
@@ -1449,11 +1453,16 @@ class Protein(Compound):
 
         Notes
         -----
+        The method serves every site that reacts from its neutral or
+        anionic form. The sites are LYS NZ, SER OG, THR OG1, CYS SG,
+        TYR OH, and the ring nitrogens of HIS.
+
         A protonated amine is not the reactive species in an acylation.
-        The neutral amine is the reactive species, and the product is a
-        neutral amide. Call this method before ``attach`` so that the
-        site starts from the neutral form and the product carries the
-        correct charge.
+        The neutral amine is the reactive species. The product of a
+        lysine N-acylation is a neutral secondary amide. It carries one
+        N-H and formal charge 0, as CCD component ALY does. Call this
+        method before ``attach``, so that the site starts from the
+        neutral form and the product carries the correct charge.
 
         Examples
         --------
@@ -1481,8 +1490,10 @@ class Protein(Compound):
             )
             return
         proton_name = protons[0]
-        _remove_pruning_ports(self, atom, [_atom_in_residue(residue, proton_name)])
-        _stamp_template(residue, variant.deprotonated_at(proton_name))
+        _remove_particles_and_ports(
+            self, atom, [_atom_in_residue(residue, proton_name)]
+        )
+        _assign_template(residue, variant.deprotonated_at(proton_name))
         self._record_leaving_atoms(atom, [proton_name])
         self._warn_if_variant_is_absent(residue, atom_name, proton_name)
         self._warn_on_split_charge(residue)
@@ -2032,7 +2043,7 @@ class Protein(Compound):
         orientation = sum(h.pos - atom.pos for h in hydrogens)
         if np.linalg.norm(orientation) < 1e-8:
             orientation = hydrogens[0].pos - atom.pos
-        _remove_pruning_ports(root, atom, hydrogens)
+        _remove_particles_and_ports(root, atom, hydrogens)
         self._record_leaving_atoms(atom, [h.name for h in hydrogens])
         return Port(anchor=atom, orientation=orientation, separation=separation / 2)
 

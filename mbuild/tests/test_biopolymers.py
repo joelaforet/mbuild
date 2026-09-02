@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -522,8 +523,6 @@ class TestProtein(BaseTest):
         # SER before the TER has no OXT atom and the NME after it has
         # no H2 atom. The test loads such a file, checks the bond
         # between the SER C atom and the NME N atom, and reads the log.
-        import logging
-
         with caplog.at_level(logging.WARNING, logger="mbuild"):
             protein = Protein(get_fn("capped_ser_extrater.pdb"))
         carbon = protein.get_atom(178, "C", chain_id="A")
@@ -554,8 +553,6 @@ class TestProtein(BaseTest):
         # the matched templates never asked for. The test writes a
         # glycine pair that carries every leaving atom, keeps the TER,
         # and checks both the missing bond and the empty log.
-        import logging
-
         complete = Path("gly_complete.pdb")
         complete.write_text(_gly_gly_with_ter(complete=True))
         with caplog.at_level(logging.WARNING, logger="mbuild"):
@@ -640,8 +637,6 @@ class TestProtein(BaseTest):
         # NZ of the bundled 6m03 asset, reads the state back, and calls
         # the method a second time to check that a rerun warns and
         # changes nothing.
-        import logging
-
         protein = protein_6m03
         residue = protein.get_residue(12, chain_id="A")
         nz = protein.get_atom(12, "NZ", chain_id="A")
@@ -674,8 +669,6 @@ class TestProtein(BaseTest):
         # cannot read back. The test deprotonates TRP 31 NE1, which the
         # library does not hold, then CYS 16 SG, which it does, and
         # reads the log after each call.
-        import logging
-
         protein = protein_6m03
         with caplog.at_level(logging.WARNING, logger="mbuild"):
             protein.deprotonate(31, "NE1", chain_id="A")
@@ -695,8 +688,6 @@ class TestProtein(BaseTest):
         # negative and one positive nitrogen. The test deprotonates
         # ARG 4 NH1 of the bundled 6m03 asset, reads the log, and reads
         # the per-atom charges back.
-        import logging
-
         protein = protein_6m03
         with caplog.at_level(logging.WARNING, logger="mbuild"):
             protein.deprotonate(4, "NH1", chain_id="A")
@@ -830,8 +821,6 @@ class TestProtein(BaseTest):
         # instead of blocking the call. The test attaches a fragment to
         # a charged LYS 5 NZ without deprotonating it, reads the log,
         # and checks the new bond.
-        import logging
-
         protein = protein_6m03
         with caplog.at_level(logging.WARNING, logger="mbuild"):
             protein.attach(
@@ -858,8 +847,6 @@ class TestProtein(BaseTest):
         # anchor more negative; the remedy fits a positive anchor only.
         # The test deprotonates ARG 4 NH1 to reach a negative anchor,
         # attaches a fragment to that atom, and reads the log.
-        import logging
-
         protein = protein_6m03
         protein.deprotonate(4, "NH1", chain_id="A")
         caplog.clear()
@@ -884,8 +871,6 @@ class TestProtein(BaseTest):
         # rigid and a fragment placed inside the protein would otherwise
         # fail silently until the MD run fails. The test attaches
         # triphenylmethane at a buried lysine and checks the log.
-        import logging
-
         protein = protein_6m03
         bulky = mb.load("C(c1ccccc1)(c1ccccc1)c1ccccc1", smiles=True)
         with caplog.at_level(logging.WARNING, logger="mbuild"):
@@ -911,7 +896,6 @@ class TestProtein(BaseTest):
         # The test blocks the module in sys.modules, attaches a bulky
         # fragment that triggers the automatic relax path, and checks
         # the record, the warning, and the error.
-        import logging
         import sys
 
         protein = protein_6m03
@@ -1593,8 +1577,6 @@ class TestProteinExports(BaseTest):
         # packing box. The test saves a protein whose file carries no
         # CRYST1 record, once without a box and once with one, and
         # reads the log each time.
-        import logging
-
         protein = Protein(get_fn("8ciq.pdb"))
         with caplog.at_level(logging.WARNING, logger="mbuild"):
             mb.biopolymers.save(protein, "no_box.gro")
