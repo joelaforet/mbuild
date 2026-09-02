@@ -624,7 +624,6 @@ class TestProtein(BaseTest):
         with pytest.raises(MBuildError, match=r"chains \['A', 'B'\]"):
             protein.get_residue(221)
 
-    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_deprotonate_neutralizes_the_site(self, protein_6m03, caplog):
         # Tests that deprotonate() removes the acidic proton of the
         # named atom and rewrites the residue chemistry: the matched
@@ -660,6 +659,7 @@ class TestProtein(BaseTest):
         assert sum(1 for p in nz.direct_bonds() if p.element.symbol == "H") == hydrogens
         assert protein.net_formal_charge == net_before - 1
 
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_attach(self, protein_6m03, acetone):
         # Tests that attach() substitutes one hydrogen on each side,
         # bonds the named atoms at the requested separation, adds the
@@ -803,6 +803,7 @@ class TestProtein(BaseTest):
         carbon = protein.get_atom(307, "C1", chain_id="A")
         assert protein.bond_graph.has_edge(nz, carbon)
 
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_attach_warns_on_clashes(self, protein_6m03, caplog):
         # Tests that attaching a bulky fragment into a crowded site logs
         # a clash warning. This is needed because port alignment is
@@ -1238,6 +1239,7 @@ class TestProteinExports(BaseTest):
         with pytest.raises(MBuildError, match="must belong to a Residue"):
             protein.save_pdb("orphan.pdb")
 
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_save_pdb_modified_protein_does_not_reload(self, protein_6m03, acetone):
         # Tests that a written modified protein fails to reload with an
         # error that names the fragment residue. This is needed because
