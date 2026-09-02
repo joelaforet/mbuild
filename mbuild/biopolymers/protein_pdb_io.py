@@ -47,7 +47,7 @@ class _PdbResidue:
         return f"{self.resname} {self.chain_id}:{self.resnum}{self.icode}"
 
 
-def _decode_index(field, width):
+def _decode_index(field, width, line_number):
     """Decode an atom serial or a residue number from its PDB columns.
 
     The wwPDB Format Guide v3.30, section 9 (Coordinate Section,
@@ -80,6 +80,10 @@ def _decode_index(field, width):
     width : int
         The number of columns of the field: 5 for an atom serial
         number, 4 for a residue sequence number.
+    line_number : int
+        The number of the line the field comes from, counted from 1.
+        The error message names it, so that the user can find the
+        record in a file of millions of lines.
 
     Returns
     -------
@@ -100,7 +104,8 @@ def _decode_index(field, width):
         shifted = int(text, 16)
     except ValueError:
         raise MBuildError(
-            f"PDB field {field!r} is not a decimal or hexadecimal number."
+            f"PDB field {field!r} on line {line_number} is not a decimal "
+            "or hexadecimal number."
         )
     return shifted + 10**width - 10 * 16 ** (width - 1)
 
@@ -127,7 +132,7 @@ def _parse_pdb(text):
     skipped_alt_loc_keys = {}
     in_extra_model = False
     last_key = None
-    for line in text.splitlines():
+    for line_number, line in enumerate(text.splitlines(), start=1):
         record_type = line[:6]
         if record_type == "ENDMDL":
             in_extra_model = True
@@ -135,7 +140,7 @@ def _parse_pdb(text):
             logger.warning("PDB file has multiple models; only model 1 is read.")
         elif record_type in ("ATOM  ", "HETATM") and not in_extra_model:
             record = _PdbRecord(
-                serial=_decode_index(line[6:11], 5),
+                serial=_decode_index(line[6:11], 5, line_number),
                 name=line[12:16].strip(),
                 # The wwPDB Format Guide v3.30, section 9
                 # (Coordinate Section, ATOM), declares the residue
@@ -148,7 +153,7 @@ def _parse_pdb(text):
                 # is not strict (_pdb_data.py).
                 resname=line[17:21].strip(),
                 chain_id=line[21].strip(),
-                resnum=_decode_index(line[22:26], 4),
+                resnum=_decode_index(line[22:26], 4, line_number),
                 icode=line[26].strip(),
                 pos=np.array(
                     [float(line[30:38]), float(line[38:46]), float(line[46:54])]
@@ -188,7 +193,9 @@ def _parse_pdb(text):
             residues[-1].ter_after = True
         elif record_type == "CONECT":
             fields = [line[start : start + 5].strip() for start in (6, 11, 16, 21, 26)]
-            serials = [_decode_index(value, 5) for value in fields if value]
+            serials = [
+                _decode_index(value, 5, line_number) for value in fields if value
+            ]
             for partner in serials[1:]:
                 conects.add(frozenset((serials[0], partner)))
         elif record_type == "CRYST1":

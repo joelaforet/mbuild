@@ -644,6 +644,21 @@ class TestProtein(BaseTest):
         protein = Protein(str(with_conect))
         assert protein.n_particles == 795
 
+    def test_index_decoding_error_names_the_line(self):
+        # Tests that a residue number which is neither decimal nor
+        # hexadecimal raises an error that names the line and the
+        # field. This is needed because a prepared system holds
+        # millions of records, and a message without the line number
+        # leaves the user no way to find the bad record. The test
+        # writes a glycine pair, corrupts the residue number columns of
+        # the third record, and asserts on the error text.
+        lines = _gly_gly_with_ter().splitlines()
+        lines[2] = lines[2][:22] + "1Q2W" + lines[2][26:]
+        corrupt = Path("bad_index.pdb")
+        corrupt.write_text("\n".join(lines) + "\n")
+        with pytest.raises(MBuildError, match=r"'1Q2W' on line 3"):
+            Protein(str(corrupt))
+
     def test_multichain_no_ter_1p3q(self):
         # Tests that a four-chain PDB without TER records loads into
         # four chains and that no peptide bond crosses a chain
