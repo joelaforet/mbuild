@@ -824,6 +824,27 @@ class TestProtein(BaseTest):
         protein.record_bond(nz, protein.get_atom(401, "C1", chain_id="A"))
         assert protein.bond_records()[-1]["leaving_atoms"] == (["HZ1", "HZ2"], [])
 
+    def test_record_bond_rejects_bonds_it_cannot_describe(self, protein_6m03):
+        # Tests the three conditions record_bond refuses: an atom that
+        # is not in a residue of this protein, two atoms that are not
+        # bonded, and two atoms of one residue. This is needed because
+        # cross_bonds drives save_pdb and bond_records, so a record
+        # that does not describe a real bond between two residues sends
+        # a downstream tool a modification that is not there. The test
+        # calls record_bond once per condition and reads the errors.
+        protein = protein_6m03
+        nz = protein.get_atom(5, "NZ", chain_id="A")
+
+        outside = mb.Compound(name="CX", element="C")
+        with pytest.raises(MBuildError, match="not in a residue"):
+            protein.record_bond(nz, outside)
+
+        with pytest.raises(MBuildError, match="are not bonded"):
+            protein.record_bond(nz, protein.get_atom(12, "NZ", chain_id="A"))
+
+        with pytest.raises(MBuildError, match="both in residue"):
+            protein.record_bond(nz, protein.get_atom(5, "CE", chain_id="A"))
+
     def test_port_cleanup_leaves_consistent_state(self):
         # Tests that the port creation path removes the auto-generated
         # ports and keeps the atom's remaining bonds. This is needed
