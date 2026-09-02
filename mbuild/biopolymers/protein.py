@@ -25,6 +25,7 @@ example with pdbfixer or reduce) at the desired pH.
 """
 
 import logging
+import os
 from collections import deque
 from dataclasses import dataclass, replace
 
@@ -40,7 +41,10 @@ from mbuild.utils.io import import_
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Protein", "Chain", "Residue", "residue_labels"]
+__all__ = ["Protein", "Chain", "Residue", "residue_labels", "save", "to_gmso"]
+
+#: File extensions that ``conversion.save`` routes through GMSO.
+_GMSO_EXTENSIONS = frozenset((".gro", ".gsd", ".data", ".xyz", ".mcf", ".top"))
 
 
 class Chain(Compound):
@@ -806,9 +810,6 @@ class Protein(Compound):
     # ------------------------------------------------------------------
     # Canonical Compound verbs, routed to residue-aware behavior
     # ------------------------------------------------------------------
-    #: File extensions that ``conversion.save`` routes through GMSO.
-    _GMSO_EXTENSIONS = frozenset((".gro", ".gsd", ".data", ".xyz", ".mcf", ".top"))
-
     def save(self, filename, **kwargs):
         """Save the protein; ``.pdb`` files route to ``save_pdb``.
 
@@ -816,10 +817,11 @@ class Protein(Compound):
         identifiers, or CONECT records, so a plain ``save`` would write
         a file that silently loses the protein's identity.
 
-        GMSO-routed extensions (.gro, .gsd, .data, .xyz, .mcf, .top) are
-        written from this class's ``to_gmso`` override, because
-        ``conversion.save`` calls the module-level converter, which
-        collapses the protein into one residue.
+        Every other extension goes to the module-level ``save``, which
+        routes the GMSO formats (.gro, .gsd, .data, .xyz, .mcf, .top)
+        through the module-level ``to_gmso``. ``conversion.save`` calls
+        the module-level GMSO converter, so a method override alone
+        would not reach those formats.
 
         Parameters
         ----------
@@ -830,8 +832,6 @@ class Protein(Compound):
             Passed to the selected writer. For ``.pdb`` files only
             ``overwrite`` is accepted.
         """
-        import os
-
         if str(filename).lower().endswith(".pdb"):
             unexpected = set(kwargs) - {"overwrite"}
             if unexpected:
@@ -841,26 +841,7 @@ class Protein(Compound):
                     "would be ignored."
                 )
             return self.save_pdb(filename, overwrite=kwargs.get("overwrite", False))
-        extension = os.path.splitext(str(filename))[-1].lower()
-        if extension in self._GMSO_EXTENSIONS:
-            overwrite = kwargs.pop("overwrite", False)
-            if os.path.exists(filename) and not overwrite:
-                raise IOError(f"{filename} exists; not overwriting")
-            # conversion.save consumes these two and does not hand them
-            # to the GMSO writers; drop them the same way.
-            kwargs.pop("residues", None)
-            kwargs.pop("include_ports", None)
-            topology = self.to_gmso(box=kwargs.pop("box", None))
-            if extension == ".gro":
-                # The gro writer reads site.molecule before
-                # site.residue, and molecule holds the chain label.
-                # Clear it so the writer takes the per-residue name
-                # that this class's to_gmso set.
-                for site in topology.sites:
-                    site.molecule = None
-            topology.save(filename=filename, overwrite=overwrite, **kwargs)
-            return
-        return super().save(filename, **kwargs)
+        return save(self, filename, **kwargs)
 
     def to_parmed(self, **kwargs):
         """Create a ParmEd structure with residues taken from hierarchy.
@@ -911,58 +892,20 @@ class Protein(Compound):
     def to_gmso(self, **kwargs):
         """Create a GMSO topology that keeps residue identity.
 
-        The generic converter numbers residues by counting the
-        occurrences of each residue name, so the numbers restart at 0
-        per name and do not match the PDB file. This override rewrites
-        every site's residue with the label that ``residue_labels``
-        gives, so GMSO's residue metadata matches the structure. The
-        label holds the residue name and the PDB number, except that a
-        residue whose ``(name, number)`` pair repeats in this protein
-        gets a shifted number, because GMSO merges residues that share
-        a name and a number. Chains stay available through each site's
-        molecule/group labels.
-
-        Not carried over, because GMSO's data model has no slot for
-        them: formal charges (a GMSO site charge is a partial charge,
-        so it stays unset for a typing engine to fill), bond orders,
-        insertion codes, and the HETATM flag.
+        The work is in the module-level ``to_gmso``, which also serves
+        a packed system that holds this protein as a child.
 
         Parameters
         ----------
         **kwargs
-            Passed to ``Compound.to_gmso``.
+            Passed to the module-level ``to_gmso``.
 
         Returns
         -------
         gmso.Topology
             The topology with per-site residue names and numbers.
         """
-        gmso = import_("gmso")  # noqa: F841
-        from gmso.abc.abstract_site import Residue as GMSOResidue
-
-        topology = super().to_gmso(**kwargs)
-        labels = residue_labels(self)
-        particles = list(self.particles())
-        sites = list(topology.sites)
-        # The guard compares site count, per-site names, and per-site
-        # positions. Names alone cannot detect a reorder of same-name
-        # residues; positions can, because every atom sits at its own
-        # coordinates.
-        aligned = len(sites) == len(particles) and np.allclose(
-            topology.positions.to_value("nm"), self.xyz, atol=1e-6
-        )
-        if not aligned or any(
-            site.name != particle.name for site, particle in zip(sites, particles)
-        ):
-            raise MBuildError(
-                "Site order of the GMSO topology does not match the "
-                "protein's particles; cannot restore residue identity."
-            )
-        for site, particle in zip(sites, particles):
-            label = labels.get(particle)
-            if label is not None:
-                site.residue = GMSOResidue(name=label[0], number=label[1])
-        return topology
+        return to_gmso(self, **kwargs)
 
     def to_trajectory(self, include_ports=False, chains=None, residues=None, box=None):
         """Create an mdtraj Trajectory that keeps chains and residues.
@@ -1967,3 +1910,115 @@ def residue_labels(compound):
     return {
         particle: labels[id(residue)] for particle, residue in particle_residue.items()
     }
+
+
+def to_gmso(compound, box=None, **kwargs):
+    """Create a GMSO topology whose sites keep residue identity.
+
+    The generic converter numbers residues by counting the occurrences
+    of each residue name, so the numbers restart at 0 per name and do
+    not match the PDB file. This function rewrites every site's residue
+    with the label that ``residue_labels`` gives. The label holds the
+    residue name and the PDB number, except that a residue whose
+    ``(name, number)`` pair repeats gets a shifted number, because GMSO
+    merges residues that share a name and a number. Chains stay
+    available through each site's molecule/group labels.
+
+    The function takes a compound instead of a ``Protein`` because
+    ``mb.solvate`` and ``mb.fill_box`` return a plain ``Compound`` that
+    holds the protein as a child. Sites of particles outside a
+    ``Residue`` (solvent, ions) keep the residue that the generic
+    converter gave them.
+
+    Not carried over, because GMSO's data model has no slot for them:
+    formal charges (a GMSO site charge is a partial charge, so it stays
+    unset for a typing engine to fill), bond orders, insertion codes,
+    and the HETATM flag.
+
+    Parameters
+    ----------
+    compound : mbuild.Compound
+        The compound to convert. It may be a ``Protein`` or any
+        compound that holds ``Residue`` compounds below it.
+    box : mbuild.Box, optional
+        The unit cell written to the topology.
+    **kwargs
+        Passed to ``Compound.to_gmso``.
+
+    Returns
+    -------
+    gmso.Topology
+        The topology with per-site residue names and numbers.
+    """
+    gmso = import_("gmso")  # noqa: F841
+    from gmso.abc.abstract_site import Residue as GMSOResidue
+
+    # Compound.to_gmso, not compound.to_gmso: Protein.to_gmso calls
+    # this function, so the bound call would recurse.
+    topology = Compound.to_gmso(compound, box=box, **kwargs)
+    labels = residue_labels(compound)
+    particles = list(compound.particles())
+    sites = list(topology.sites)
+    # The guard compares site count, per-site names, and per-site
+    # positions. Names alone cannot detect a reorder of same-name
+    # residues; positions can, because every atom sits at its own
+    # coordinates.
+    aligned = len(sites) == len(particles) and np.allclose(
+        topology.positions.to_value("nm"), compound.xyz, atol=1e-6
+    )
+    if not aligned or any(
+        site.name != particle.name for site, particle in zip(sites, particles)
+    ):
+        raise MBuildError(
+            "Site order of the GMSO topology does not match the "
+            "compound's particles; cannot restore residue identity."
+        )
+    for site, particle in zip(sites, particles):
+        label = labels.get(particle)
+        if label is not None:
+            site.residue = GMSOResidue(name=label[0], number=label[1])
+    return topology
+
+
+def save(compound, filename, **kwargs):
+    """Save a compound that holds residues, through GMSO where possible.
+
+    ``conversion.save`` calls the module-level GMSO converter, which
+    numbers residues per name, so a saved file describes the wrong
+    residues. This function routes the GMSO extensions (.gro, .gsd,
+    .data, .xyz, .mcf, .top) through the ``to_gmso`` above and hands
+    every other extension to ``Compound.save``.
+
+    Use it for a packed system, for example the result of
+    ``mb.solvate``. A ``Protein.save`` call reaches this function on
+    its own.
+
+    Parameters
+    ----------
+    compound : mbuild.Compound
+        The compound to write.
+    filename : str
+        Path of the file to write. The extension selects the writer.
+    **kwargs
+        Passed to the selected writer.
+    """
+    extension = os.path.splitext(str(filename))[-1].lower()
+    if extension not in _GMSO_EXTENSIONS:
+        return Compound.save(compound, filename, **kwargs)
+    overwrite = kwargs.pop("overwrite", False)
+    if os.path.exists(filename) and not overwrite:
+        raise IOError(f"{filename} exists; not overwriting")
+    # conversion.save consumes these two and does not hand them to the
+    # GMSO writers; drop them the same way.
+    kwargs.pop("residues", None)
+    kwargs.pop("include_ports", None)
+    topology = to_gmso(compound, box=kwargs.pop("box", None))
+    if extension == ".gro":
+        # The gro writer reads site.molecule before site.residue, and
+        # molecule holds the chain label. Clear it so the writer takes
+        # the per-residue name that to_gmso set. Only the gro branch
+        # clears it: GMSO's top writer groups sites by molecule, and
+        # _get_unique_molecules raises when molecule is None.
+        for site in topology.sites:
+            site.molecule = None
+    topology.save(filename=filename, overwrite=overwrite, **kwargs)

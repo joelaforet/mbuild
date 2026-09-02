@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import mbuild as mb
@@ -1276,6 +1277,18 @@ class TestProteinExports(BaseTest):
 
 
 class TestProteinSolvation(BaseTest):
+    @pytest.fixture
+    def protein_8ciq(self):
+        return Protein(get_fn("8ciq.pdb"))
+
+    @pytest.fixture
+    def water_sol(self):
+        from mbuild.lib.molecules.water import WaterSPC
+
+        water = WaterSPC()
+        water.name = "SOL"
+        return water
+
     def test_gro_residue_ids_unique_across_chains(self):
         # Tests that a .gro file written from a four-chain protein
         # carries one residue id for every residue. This is needed
@@ -1293,6 +1306,63 @@ class TestProteinSolvation(BaseTest):
             len({line[:10] for line in atom_lines})
             == len(list(protein.residues()))
             == 228
+        )
+
+    @pytest.mark.skipif(mb.packing.PACKMOL is None, reason="PACKMOL is not installed")
+    def test_solvate_keeps_chain_residue_hierarchy(self, protein_8ciq, water_sol):
+        # Tests that the solute of a solvated system is still a
+        # Protein that carries its chain, its residues and its bond
+        # records, and that PACKMOL moved it as a rigid body. This is
+        # needed because the recipe workflow attaches and relaxes
+        # before it packs, so save_pdb, bond_records and the residue
+        # accessors must still work on system.children[0]. The test
+        # solvates 8ciq in ten waters and compares the solute against
+        # the protein it was built from.
+        before = protein_8ciq.xyz.copy()
+        system = mb.solvate(protein_8ciq, water_sol, 10, mb.Box([6.0, 6.0, 6.0]))
+        solute = system.children[0]
+        assert isinstance(solute, Protein)
+        assert [chain.chain_id for chain in solute.chains] == ["A"]
+        labels = [(residue.name, residue.resnum) for residue in solute.residues()]
+        assert labels[0] == ("ALA", 1) and labels[-1] == ("VAL", 35)
+        assert len(solute.bond_records()) == 3
+        # PACKMOL holds the solute with its "fixed" restraint, so the
+        # only change is the shift to the centre of the box.
+        shift = solute.xyz - before
+        assert np.allclose(shift, shift[0], atol=1e-6)
+
+    @pytest.mark.skipif(mb.packing.PACKMOL is None, reason="PACKMOL is not installed")
+    def test_solvated_gro_keeps_residue_names(self, protein_8ciq, water_sol):
+        # Tests that mb.biopolymers.save writes the protein residue
+        # names of a packed system to a .gro file, and that the plain
+        # Compound.save writes the chain name instead. This is needed
+        # because conversion.save_in_gmso calls the module-level GMSO
+        # converter, which no method on Protein can reach once the
+        # protein is only a child of the packed system: every protein
+        # atom then landed in one residue named "Chain". The test
+        # solvates 8ciq in ten waters and reads the residue column of
+        # both files.
+        system = mb.solvate(protein_8ciq, water_sol, 10, mb.Box([6.0, 6.0, 6.0]))
+
+        def residue_names(path):
+            lines = path.read_text().splitlines()
+            atom_lines = lines[2 : 2 + int(lines[1])]
+            names = []
+            for earlier, line in zip([None] + atom_lines, atom_lines):
+                if earlier is None or line[:10] != earlier[:10]:
+                    names.append(line[5:10].strip())
+            return names
+
+        plain = Path("plain.gro")
+        system.save(str(plain))
+        assert residue_names(plain) == ["Chain"] + ["SOL"] * 10
+
+        routed = Path("routed.gro")
+        mb.biopolymers.save(system, str(routed))
+        assert (
+            residue_names(routed)
+            == [residue.name for residue in system.children[0].residues()]
+            + ["SOL"] * 10
         )
 
 
