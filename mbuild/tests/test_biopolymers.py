@@ -409,6 +409,62 @@ class TestCCDLibrary(BaseTest):
         template = parse_ccd_cif(text)
         assert [atom.synonyms for atom in template.atoms] == [(), (), ("CB",)]
 
+    def test_negative_nitrogen_definition_keeps_its_variants(
+        self, tmp_path, monkeypatch
+    ):
+        # Tests that a component whose definition carries a negatively
+        # charged nitrogen keeps at least its base variant. This is
+        # needed because the protonation filter dropped every variant
+        # with a negative nitrogen, which is correct for a histidine
+        # ring but deletes the pyrrole nitrogens of a heme. The whole
+        # template then disappeared, and heme proteins failed to load.
+        # The test writes a minimal component with a negative nitrogen
+        # into the user cache directory, loads it, and checks that the
+        # variant keeps the charge.
+        from mbuild.biopolymers import ccd
+
+        text = "\n".join(
+            (
+                "data_ZZZ",
+                "_chem_comp.id ZZZ",
+                "loop_",
+                "_chem_comp_atom.comp_id",
+                "_chem_comp_atom.atom_id",
+                "_chem_comp_atom.type_symbol",
+                "_chem_comp_atom.charge",
+                "ZZZ NA N -1",
+                "ZZZ C1 C 0",
+                "loop_",
+                "_chem_comp_bond.comp_id",
+                "_chem_comp_bond.atom_id_1",
+                "_chem_comp_bond.atom_id_2",
+                "_chem_comp_bond.value_order",
+                "ZZZ NA C1 SING",
+            )
+        )
+        (tmp_path / "ZZZ.cif").write_text(text)
+        monkeypatch.setattr(ccd, "USER_CCD_CACHE_DIR", tmp_path)
+        variants = CCDLibrary()["ZZZ"]
+        assert variants
+        assert variants[0].name_to_atom["NA"].formal_charge == -1
+
+    def test_empty_variant_list_names_the_residue(self, tmp_path, monkeypatch):
+        # Tests that a residue left with no template variant raises an
+        # MBuildError that names the residue. This is needed because
+        # the loader indexes the first variant, so an empty list raised
+        # a bare IndexError that named neither the residue nor the
+        # cause. The test points the user cache at a tmp copy of the
+        # bundled ALA definition and replaces the variant generator
+        # with one that returns nothing.
+        from mbuild.biopolymers import ccd
+
+        source = ccd.CCD_CACHE_DIR / "ALA.cif"
+        (tmp_path / "ZZZ.cif").write_text(source.read_text().replace("ALA", "ZZZ"))
+        monkeypatch.setattr(ccd, "USER_CCD_CACHE_DIR", tmp_path)
+        monkeypatch.setattr(ccd, "_protonation_variants", lambda template: [])
+        with pytest.raises(MBuildError, match="ZZZ"):
+            CCDLibrary()["ZZZ"]
+
     def test_default_libraries_share_parsed_templates(self):
         # Tests that two CCDLibrary instances share the parsed variant
         # list of one cif file. This is needed because every Protein()

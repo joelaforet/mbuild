@@ -776,6 +776,13 @@ def _protonation_variants(template):
     doubly-deprotonated arginine (both HH12 and HH22 removed) and any
     histidine left with a negatively charged ring nitrogen that the
     zwitterion fix cannot rewrite.
+
+    The negative-nitrogen rule applies only to a charge that the
+    variant creates. A CCD definition can carry a negatively charged
+    nitrogen of its own. The four pyrrole nitrogens of a heme group
+    are one example. The base charges are therefore the reference, and
+    a nitrogen that is already negative in the definition keeps that
+    charge in every variant.
     """
     acidic = [
         proton
@@ -795,11 +802,19 @@ def _protonation_variants(template):
             for heavy_name, proton_name in basic:
                 variants.append(variant.protonated_at(heavy_name, proton_name))
     variants = [_fix_his_zwitterion(variant) for variant in variants]
+    base_negative_nitrogens = {
+        atom.name
+        for atom in template.atoms
+        if atom.formal_charge < 0 and atom.element == "N"
+    }
     return [
         variant
         for variant in variants
         if not any(
-            atom.formal_charge < 0 and atom.element == "N" for atom in variant.atoms
+            atom.formal_charge < 0
+            and atom.element == "N"
+            and atom.name not in base_negative_nitrogens
+            for atom in variant.atoms
         )
     ]
 
@@ -861,6 +876,11 @@ class CCDLibrary:
         The search paths are tried in order; a missing file falls back
         to the RCSB download when ``download=True``. Parsed variant
         lists are cached class-wide, keyed by file path and mtime.
+
+        Raises
+        ------
+        MBuildError
+            If the protonation rules leave no template variant.
         """
         text = None
         cache_key = None
@@ -884,6 +904,16 @@ class CCDLibrary:
             )
         base = _add_synonyms(_add_disulfide(_fix_caps(parse_ccd_cif(text))))
         variants = _protonation_variants(base)
+        # Callers index the first variant as the reference template.
+        # An empty list makes that index raise a bare IndexError, which
+        # does not name the residue. The check keeps the failure
+        # readable if a later protonation rule rejects every variant.
+        if not variants:
+            raise MBuildError(
+                f"Residue {resname}: the protonation rules left no usable "
+                "template variant. Check the cif definition of this "
+                "component, and the acidic and basic atom tables."
+            )
         if cache_key is not None:
             CCDLibrary._parse_cache[cache_key] = variants
         return variants
