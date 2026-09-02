@@ -41,6 +41,13 @@ def _wrap_in_residue(compound, fragment_resname):
     whose order is 0.0. The loop below therefore reads ``bond_order``
     from each bond and writes the same value back.
     """
+    # The residue name is cut to three characters. The wwPDB Format
+    # Guide v3.30, section 9 (Coordinate Section, ATOM), declares the
+    # residue name in columns 18-20 and column 21 blank. The reader of
+    # this recipe also accepts a four-character name, because a
+    # membrane builder writes lipid names that fill column 21. A
+    # fragment name is generated here, so it stays inside the three
+    # declared columns, and every PDB reader accepts it.
     resname = (fragment_resname or compound.name or "LIG")[:3].upper()
     if not resname.isalnum():
         resname = "LIG"
@@ -261,6 +268,7 @@ def prepare_fragment(compound, resname):
     if isinstance(copied, Residue):
         # A Residue input takes the requested name. Residue children of
         # a Compound keep the names they came with.
+        # Three characters, for the reason given in _wrap_in_residue.
         copied.name = (resname or copied.name)[:3].upper()
     copied, residues = _as_residues(copied, resname)
     for residue in residues:
@@ -321,6 +329,7 @@ def fragment_from_sdf(filename, resname):
         )
     orders = {bond_type: order for order, bond_type in _rdkit_bond_orders().items()}
     conformer = molecule.GetConformer()
+    # Three characters, for the reason given in _wrap_in_residue.
     residue = Residue(resname=(resname or "LIG")[:3].upper(), hetatm=True)
     particles = []
     for atom in molecule.GetAtoms():
