@@ -33,7 +33,11 @@ import numpy as np
 
 from mbuild import clone
 from mbuild.biopolymers.ccd import CCDLibrary
-from mbuild.biopolymers.protein_pdb_io import _parse_pdb
+from mbuild.biopolymers.protein_pdb_io import (
+    _check_residue_membership,
+    _parse_pdb,
+    _pdb_name_field,
+)
 from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
 from mbuild.port import Port
@@ -981,26 +985,14 @@ class Protein(Compound):
         particle_index = {}
         particle_residue = self._particle_residues()
         particles = list(self.particles())
-        orphans = [p for p in particles if p not in particle_residue]
-        if orphans:
-            raise MBuildError(
-                "Every atom of a Protein must belong to a Residue, but "
-                f"{[p.name for p in orphans[:5]]} "
-                f"{'(and more) ' if len(orphans) > 5 else ''}do not. Add "
-                "atoms through attach() or into a Residue, not directly "
-                "onto the Protein."
-            )
+        _check_residue_membership(particles, particle_residue)
         for particle in particles:
             chain_id, residue = particle_residue[particle]
             atom = Chem.Atom(particle.element.atomic_number)
             atom.SetFormalCharge(residue.atom_formal_charges.get(particle.name, 0))
             atom.SetNoImplicit(True)
             info = Chem.AtomPDBResidueInfo()
-            info.SetName(
-                particle.name.center(4)
-                if len(particle.name) >= 4
-                else f" {particle.name:<3s}"
-            )
+            info.SetName(_pdb_name_field(particle.name))
             info.SetResidueName(residue.name)
             info.SetResidueNumber(residue.resnum)
             info.SetChainId(chain_id or " ")

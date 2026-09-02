@@ -158,20 +158,8 @@ def write_pdb(protein, filename, overwrite=False):
 
     # The layout above only visits particles inside a Chain -> Residue
     # path. A particle outside that path would be absent from the file
-    # and its bonds would be absent from the CONECT records. Raise
-    # instead of writing an incomplete file. The message matches the
-    # guard in Protein.to_rdkit.
-    orphans = [
-        particle for particle in protein.particles() if particle not in particle_serial
-    ]
-    if orphans:
-        raise MBuildError(
-            "Every atom of a Protein must belong to a Residue, but "
-            f"{[p.name for p in orphans[:5]]} "
-            f"{'(and more) ' if len(orphans) > 5 else ''}do not. Add "
-            "atoms through attach() or into a Residue, not directly "
-            "onto the Protein."
-        )
+    # and its bonds would be absent from the CONECT records.
+    _check_residue_membership(protein.particles(), particle_serial)
 
     lines.extend(
         _conect_lines(protein, particle_serial, particle_residue, residue_order)
@@ -270,13 +258,60 @@ def _atom_and_ter_lines(protein):
     return lines, particle_serial, particle_residue, residue_order
 
 
+def _check_residue_membership(particles, assigned):
+    """Raise when a particle of a protein sits outside every Residue.
+
+    ``Protein.to_rdkit`` and ``write_pdb`` both resolve each particle
+    through its residue, so a particle outside a ``Chain -> Residue``
+    path would leave the export, together with its bonds. Both exports
+    stop here instead of writing an incomplete structure.
+
+    Parameters
+    ----------
+    particles : iterable of mbuild.Compound
+        The particles of the protein.
+    assigned : container
+        The particles that a Residue claims. The check reports every
+        particle that is not in it.
+    """
+    orphans = [particle for particle in particles if particle not in assigned]
+    if orphans:
+        raise MBuildError(
+            "Every atom of a Protein must belong to a Residue, but "
+            f"{[p.name for p in orphans[:5]]} "
+            f"{'(and more) ' if len(orphans) > 5 else ''}do not. Add "
+            "atoms through attach() or into a Residue, not directly "
+            "onto the Protein."
+        )
+
+
+def _pdb_name_field(name):
+    """Return the atom name in the four columns a PDB record gives it.
+
+    The wwPDB Format Guide v3.30, section 9 (Coordinate Section, ATOM),
+    puts the atom name in columns 13-16 and the element symbol,
+    right-justified, in columns 13-14. A name of three characters or
+    less therefore starts in column 14, and a four-character name fills
+    the field. ``Protein.to_rdkit`` writes the same field into the
+    RDKit PDB residue info, so both exports name atoms alike.
+
+    Parameters
+    ----------
+    name : str
+        The atom name.
+
+    Returns
+    -------
+    str
+        The padded name field.
+    """
+    return name.center(4) if len(name) >= 4 else f" {name:<3s}"
+
+
 def _pdb_atom_line(serial, particle, residue, chain_id):
     """Format one ATOM or HETATM record for the particle."""
     record = "HETATM" if residue.hetatm else "ATOM  "
-    name = particle.name
-    # PDB alignment: names shorter than 4 characters are right-shifted
-    # by one column (element starts in column 14).
-    name_field = name.center(4) if len(name) >= 4 else f" {name:<3s}"
+    name_field = _pdb_name_field(particle.name)
     x, y, z = particle.pos * 10.0
     element = particle.element.symbol.upper() if particle.element else ""
     return (
