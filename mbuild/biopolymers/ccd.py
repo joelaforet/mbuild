@@ -909,6 +909,10 @@ class CCDLibrary:
         # An empty list makes that index raise a bare IndexError, which
         # does not name the residue. The check keeps the failure
         # readable if a later protonation rule rejects every variant.
+        # The current rules cannot empty the list: the base variant
+        # creates no charge, so the filter always keeps it. The check
+        # is defensive, and only a new rule can reach it. Its test
+        # replaces _protonation_variants for that reason.
         if not variants:
             raise MBuildError(
                 f"Residue {resname}: the protonation rules left no usable "

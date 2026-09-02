@@ -454,9 +454,10 @@ class TestCCDLibrary(BaseTest):
         # MBuildError that names the residue. This is needed because
         # the loader indexes the first variant. An empty list then
         # raised a bare IndexError, which named neither the residue nor
-        # the cause. The test points the user cache at a tmp copy of the
-        # bundled ALA definition and replaces the variant generator
-        # with one that returns nothing.
+        # the cause. The guard is defensive: the current rules always
+        # keep the base variant. The test points the user cache at a
+        # tmp copy of the bundled ALA definition and replaces the
+        # variant generator with one that returns nothing.
         from mbuild.biopolymers import ccd
 
         source = ccd.CCD_CACHE_DIR / "ALA.cif"
