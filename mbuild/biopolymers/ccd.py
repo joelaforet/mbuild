@@ -779,9 +779,10 @@ def _protonation_variants(template):
 
     The negative-nitrogen rule applies only to a charge that the
     variant creates. A CCD definition can carry a negatively charged
-    nitrogen of its own. The four pyrrole nitrogens of a heme group
-    are one example. The base charges are therefore the reference, and
-    a nitrogen that is already negative in the definition keeps that
+    nitrogen of its own. The HEM definition is one example. It gives
+    -1 to two of the four pyrrole nitrogens, NA and NC; NB and ND
+    carry 0. The base charges are therefore the reference, and a
+    nitrogen that is already negative in the definition keeps that
     charge in every variant.
     """
     acidic = [
