@@ -845,6 +845,35 @@ class TestProtein(BaseTest):
         assert protein.bond_graph.has_edge(nz, carbon)
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach_names_no_remedy_for_a_negative_anchor(
+        self, protein_6m03, acetone, caplog
+    ):
+        # Tests that attach() states the charge but names no remedy when
+        # the anchor atom holds a negative charge. This is needed
+        # because deprotonate() removes a proton, so it makes a negative
+        # anchor more negative; the remedy fits a positive anchor only.
+        # The test deprotonates ARG 4 NH1 to reach a negative anchor,
+        # attaches a fragment to that atom, and reads the log.
+        import logging
+
+        protein = protein_6m03
+        protein.deprotonate(4, "NH1", chain_id="A")
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein.attach(
+                acetone,
+                "C1",
+                resnum=4,
+                atom_name="NH1",
+                chain_id="A",
+                fragment_resname="ACT",
+                relax=False,
+            )
+        state = "NH1 has formal charge -1 before this bond and -1 after it"
+        assert state in caplog.text
+        assert "deprotonate(4" not in caplog.text
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_attach_warns_on_clashes(self, protein_6m03, caplog):
         # Tests that attaching a bulky fragment into a crowded site logs
         # a clash warning. This is needed because port alignment is

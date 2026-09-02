@@ -1819,6 +1819,11 @@ class Protein(Compound):
         remedy and the call proceeds, because other chemistries do keep
         a charge on the anchor atom.
 
+        The remedy is named for a positive charge only. ``deprotonate``
+        removes a proton, which makes a negative anchor more negative.
+        For a negative anchor the warning states the charge and names no
+        remedy.
+
         Parameters
         ----------
         residue : Residue
@@ -1831,16 +1836,20 @@ class Protein(Compound):
         charge = residue.atom_formal_charges.get(atom_name, 0)
         if not charge:
             return
+        state = (
+            f"{_residue_label(residue)} atom {atom_name} has formal charge "
+            f"{charge:+d} before this bond and {charge:+d} after it."
+        )
+        if charge < 0:
+            logger.warning(state)
+            return
         chain_id = _chain_of(residue).chain_id
-        label = _residue_label(residue)
         call = f'deprotonate({resnum}, "{atom_name}"'
         if chain_id:
             call = f'{call}, chain_id="{chain_id}"'
         logger.warning(
-            f"{label} atom {atom_name} has formal charge {charge:+d} before "
-            f"this bond and {charge:+d} after it. Call {call}) before "
-            "attach() if a neutral product is correct for the chemistry you "
-            "model."
+            f"{state} Call {call}) before attach() if a neutral product is "
+            "correct for the chemistry you model."
         )
 
     def _attachment_site(self, resnum, atom_name, chain_id, icode, bond_order):
