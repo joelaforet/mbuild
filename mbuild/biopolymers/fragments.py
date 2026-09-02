@@ -313,17 +313,23 @@ def prepare_fragment(compound, resname):
     Raises
     ------
     ValueError
-        If ``resname`` is longer than three characters.
+        If ``resname`` is longer than three characters. A Residue
+        input that gets no ``resname`` keeps its own name, and that
+        name has the same limit.
     """
     _check_resname(resname)
     if isinstance(compound, str):
         return fragment_from_smiles(compound, resname)
     copied = clone(compound)
     if isinstance(copied, Residue):
-        # A Residue input takes the requested name. Residue children of
-        # a Compound keep the names they came with. Only the fallback
-        # name can be too long; see _MAX_RESNAME_LENGTH.
-        copied.name = (resname or copied.name)[:_MAX_RESNAME_LENGTH].upper()
+        # A Residue input takes the requested name. Without one it
+        # keeps the name the caller built it with. Both names come
+        # from the caller, so the used name is checked here and a name
+        # that is too long raises. Residue children of a Compound keep
+        # the names they came with.
+        chosen = resname or copied.name
+        _check_resname(chosen)
+        copied.name = chosen.upper()
     copied, residues = _as_residues(copied, resname)
     for residue in residues:
         if not residue.link_atoms:

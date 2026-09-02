@@ -2341,19 +2341,20 @@ class TestFragments(BaseTest):
 
     def test_long_fragment_resname_is_rejected(self, protein_6m03):
         # Tests that a fragment residue name of more than three
-        # characters raises a ValueError that names the limit and the
-        # collision risk, at every entry point that takes such a name.
-        # This is needed because the name was cut to three characters
-        # with no message, so "OCTL" and "OCTYL" both became "OCT",
-        # which is the assigned CCD code for n-octane. A longer name
-        # therefore produced the collision it was picked to avoid. The
-        # test passes a four-character name to each entry point and
-        # reads back the message.
+        # characters raises a ValueError. The message names the limit
+        # and the collision risk. Every entry point that takes such a
+        # name is checked, and so is the name of a Residue the caller
+        # built. This is needed because the name was cut to three
+        # characters with no message, so "OCTL" and "OCTYL" both
+        # became "OCT", the assigned CCD code for n-octane. The test
+        # passes a name that is too long to each entry point and reads
+        # back the message.
         from mbuild.biopolymers import (
             fragment_from_sdf,
             fragment_from_smiles,
             prepare_fragment,
         )
+        from mbuild.biopolymers.protein import Residue
         from mbuild.lib.moieties import CH3
 
         with pytest.raises(ValueError, match="OCTL") as error:
@@ -2374,3 +2375,10 @@ class TestFragments(BaseTest):
                 fragment_resname="OCTL",
                 relax=False,
             )
+
+        # A Residue the caller built carries its own name. Without a
+        # resname argument that name is used, so it gets the check too.
+        built = Residue(resname="OCTYL")
+        built.add(CH3())
+        with pytest.raises(ValueError, match="OCTYL"):
+            prepare_fragment(built, None)
