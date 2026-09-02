@@ -23,6 +23,23 @@ file with bond records for downstream parameterization. Worked examples
 live in the demos repository:
 https://github.com/joelaforet/mbuild_protein_demos
 
+Prepare a charged site before you bond to it. ``attach`` removes one
+hydrogen from the anchor atom and puts the new bond in its place, so
+the formal charge of that atom does not change. A lysine side-chain
+amine is protonated at neutral pH, and only the neutral amine acylates,
+so call ``Protein.deprotonate`` first:
+
+.. code-block:: python
+
+    protein.deprotonate(63, "NZ", chain_id="A")
+    protein.attach(fragment, resnum=63, atom_name="NZ", chain_id="A")
+
+A written modified protein does not load again in mBuild. The attached
+fragment has no CCD entry, and mBuild declares no modification bond in
+the file, so the loader cannot match the fragment residue. Hand the PDB
+file and ``bond_records()`` to a downstream tool, which builds the
+residue definition for the modification.
+
 .. autoclass:: mbuild.biopolymers.protein.Protein
     :members:
 
