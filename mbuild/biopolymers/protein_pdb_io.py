@@ -47,6 +47,61 @@ class _PdbResidue:
         return f"{self.resname} {self.chain_id}:{self.resnum}{self.icode}"
 
 
+def _decode_index(field, width):
+    """Decode an atom serial or a residue number from its PDB columns.
+
+    The wwPDB Format Guide v3.30, section 9 (Coordinate Section,
+    ATOM/HETATM), gives the atom serial number five columns (7-11) and
+    the residue sequence number four columns (23-26). A system with
+    more than 99999 atoms, or a chain with more than 9999 residues,
+    does not fit in those columns. OpenMM writes a value that does not
+    fit in hexadecimal, in ``openmm/app/pdbfile.py::_formatIndex``: a
+    value below ``10 ** width`` fills the field in decimal, and a
+    larger value fills it with
+    ``value - 10 ** width + 10 * 16 ** (width - 1)`` in hexadecimal.
+    Atom serials therefore run 99999, A0000, A0001 up to AFFFF, then
+    B0000. Residue numbers run 9999, A000, A001, and so on. Any system
+    above 99999 atoms or 9999 residues carries such fields.
+
+    This function inverts that rule. A field that reads as a decimal
+    number keeps its decimal value, so a file inside the column widths
+    reads as before. Every other field is read as hexadecimal and
+    shifted back. The OpenMM rule takes the shifted value modulo
+    ``16 ** width``, so the encoding repeats. This function decodes the
+    first cycle, which holds 493215 atoms and 34575 residues.
+
+    Parameters
+    ----------
+    field : str
+        The text of the field, with or without its column padding.
+    width : int
+        The number of columns of the field: 5 for an atom serial
+        number, 4 for a residue sequence number.
+
+    Returns
+    -------
+    int
+        The decoded number.
+
+    Raises
+    ------
+    MBuildError
+        If the field is neither a decimal nor a hexadecimal number.
+    """
+    text = field.strip()
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        shifted = int(text, 16)
+    except ValueError:
+        raise MBuildError(
+            f"PDB field {field!r} is not a decimal or hexadecimal number."
+        )
+    return shifted + 10**width - 10 * 16 ** (width - 1)
+
+
 def _parse_pdb(text):
     """Parse ATOM/HETATM/TER/CONECT/CRYST1 records of the first model.
 
@@ -77,11 +132,11 @@ def _parse_pdb(text):
                 logger.warning("Using alternate location 'A' atoms only.")
                 seen_altloc_a = True
             record = _PdbRecord(
-                serial=int(line[6:11]),
+                serial=_decode_index(line[6:11], 5),
                 name=line[12:16].strip(),
                 resname=line[17:20].strip(),
                 chain_id=line[21].strip(),
-                resnum=int(line[22:26]),
+                resnum=_decode_index(line[22:26], 4),
                 icode=line[26].strip(),
                 pos=np.array(
                     [float(line[30:38]), float(line[38:46]), float(line[46:54])]

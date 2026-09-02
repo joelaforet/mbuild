@@ -488,6 +488,21 @@ class TestProtein(BaseTest):
             == inserted
         )
 
+    def test_hexadecimal_serial_and_resseq_2mum(self):
+        # Tests that a PDB whose atom serials and residue numbers are
+        # written in hexadecimal loads with the decoded values. This is
+        # needed because OpenMM switches both fields to hexadecimal
+        # when they overflow their columns, so every system above 99999
+        # atoms or 9999 residues carries them, and the decimal-only
+        # reader raised ValueError on such a file. The test loads the
+        # prepared 2MUM structure whose serials read A0001 upward and
+        # whose residue numbers read A001 upward, then checks the
+        # particle count and the number of the first residue, which
+        # the field A001 encodes as 10001.
+        protein = Protein(get_fn("2MUM_composed_function.pdb"))
+        assert protein.n_particles == 795
+        assert list(protein.residues())[0].resnum == 10001
+
     def test_multichain_no_ter_1p3q(self):
         # Tests that a four-chain PDB without TER records loads into
         # four chains and that no peptide bond crosses a chain
