@@ -644,6 +644,34 @@ class TestProtein(BaseTest):
         protein = Protein(str(with_conect))
         assert protein.n_particles == 795
 
+    def test_hexadecimal_indices_round_trip(self):
+        # Tests that a structure whose residue numbers overflow their
+        # four columns is written and read back unchanged, and that a
+        # number above the encodable range raises. This is needed
+        # because the writer raised on every residue number above 9999,
+        # so a file that the reader accepts could not be written again.
+        # The test loads the prepared 2MUM structure, adds 10000 to
+        # every residue number, writes the protein, reads it back, and
+        # compares the particle count and the numbers with their
+        # insertion codes. It then sets a number above the range of the
+        # encoding and asserts on the error.
+        protein = Protein(get_fn("2MUM_icode.pdb"))
+        for residue in protein.residues():
+            residue.resnum += 10000
+        numbers = [(r.resnum, r.icode) for r in protein.residues()]
+        assert numbers[0][0] == 10001
+
+        protein.save_pdb("2mum_hex_roundtrip.pdb")
+        reloaded = Protein("2mum_hex_roundtrip.pdb")
+        assert reloaded.n_particles == protein.n_particles
+        assert [(r.resnum, r.icode) for r in reloaded.residues()] == numbers
+
+        # The encoding repeats above 10 ** 4 + 6 * 16 ** 3 = 34576, so
+        # a residue number of 34576 could not be read back.
+        next(iter(protein.residues())).resnum = 34576
+        with pytest.raises(MBuildError, match="residue number 34576"):
+            protein.save_pdb("2mum_hex_overflow.pdb")
+
     def test_index_decoding_error_names_the_line(self):
         # Tests that a residue number which is neither decimal nor
         # hexadecimal raises an error that names the line and the

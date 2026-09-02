@@ -110,6 +110,54 @@ def _decode_index(field, width, line_number):
     return shifted + 10**width - 10 * 16 ** (width - 1)
 
 
+def _encode_index(value, width, name):
+    """Format an atom serial or a residue number into its PDB columns.
+
+    This function is the inverse of ``_decode_index``. It follows
+    OpenMM's ``openmm/app/pdbfile.py::_formatIndex``. A value below
+    ``10 ** width`` fills the field in decimal. A larger value fills it
+    with ``value - 10 ** width + 10 * 16 ** (width - 1)`` in
+    hexadecimal. A reader that knows the rule, such as this module or
+    OpenMM, reads the file back.
+
+    The OpenMM rule takes the shifted value modulo ``16 ** width``, so
+    the encoding repeats above ``10 ** width + 6 * 16 ** (width - 1)``.
+    A repeated value cannot be decoded, so this function raises instead
+    of writing a file that no reader can read back.
+
+    Parameters
+    ----------
+    value : int
+        The atom serial number or residue sequence number.
+    width : int
+        The number of columns of the field: 5 for an atom serial
+        number, 4 for a residue sequence number.
+    name : str
+        The name of the field, for the error message.
+
+    Returns
+    -------
+    str
+        The field, of exactly ``width`` characters.
+
+    Raises
+    ------
+    MBuildError
+        If the value is above the range the encoding covers.
+    """
+    if value < 10**width:
+        return f"{value:{width}d}"
+    limit = 10**width + 6 * 16 ** (width - 1)
+    if value >= limit:
+        raise MBuildError(
+            f"PDB {name} {value} is too large to write. The field has "
+            f"{width} columns, and the hexadecimal encoding of OpenMM "
+            f"covers values below {limit} only. Above that value the "
+            "encoding repeats, so no reader could read the file back."
+        )
+    return f"{value - 10**width + 10 * 16 ** (width - 1):{width}X}"
+
+
 def _parse_pdb(text):
     """Parse ATOM/HETATM/TER/CONECT/CRYST1 records of the first model.
 
@@ -340,24 +388,17 @@ def _atom_and_ter_lines(protein):
             # The order key holds the chain, so the peptide-bond test
             # in _conect_lines cannot pair residues across a TER.
             residue_order[id(residue)] = (chain.chain_id, index)
-            if residue.resnum > 9999:
-                raise MBuildError(
-                    "PDB residue numbers larger than 9999 are not supported."
-                )
             for particle in residue.particles():
                 serial += 1
-                if serial > 99999:
-                    raise MBuildError(
-                        "PDB atom serials larger than 99999 are not supported."
-                    )
                 particle_serial[particle] = serial
                 particle_residue[particle] = residue
                 lines.append(_pdb_atom_line(serial, particle, residue, chain.chain_id))
         if residue is not None:
             serial += 1
             lines.append(
-                f"TER   {serial:5d}      {residue.name:<4.4s}"
-                f"{chain.chain_id or ' ':1s}{residue.resnum:4d}"
+                f"TER   {_encode_index(serial, 5, 'atom serial')}      "
+                f"{residue.name:<4.4s}{chain.chain_id or ' ':1s}"
+                f"{_encode_index(residue.resnum, 4, 'residue number')}"
                 f"{residue.icode or ' ':1s}"
             )
     return lines, particle_serial, particle_residue, residue_order
@@ -427,8 +468,11 @@ def _pdb_atom_line(serial, particle, residue, chain_id):
     x, y, z = particle.pos * 10.0
     element = particle.element.symbol.upper() if particle.element else ""
     return (
-        f"{record}{serial:5d} {name_field[:4]} {residue.name:<4.4s}"
-        f"{chain_id or ' ':1.1s}{residue.resnum:4d}{residue.icode or ' ':1.1s}"
+        f"{record}{_encode_index(serial, 5, 'atom serial')} "
+        f"{name_field[:4]} {residue.name:<4.4s}"
+        f"{chain_id or ' ':1.1s}"
+        f"{_encode_index(residue.resnum, 4, 'residue number')}"
+        f"{residue.icode or ' ':1.1s}"
         f"   {x:8.3f}{y:8.3f}{z:8.3f}{1.0:6.2f}{0.0:6.2f}"
         f"          {element:>2.2s}"
     )
@@ -484,5 +528,7 @@ def _conect_lines(protein, particle_serial, particle_residue, residue_order):
         for start in range(0, len(bonded), 4):
             chunk = bonded[start : start + 4]
             yield (
-                "CONECT" + f"{serial:5d}" + "".join(f"{other:5d}" for other in chunk)
+                "CONECT"
+                + _encode_index(serial, 5, "atom serial")
+                + "".join(_encode_index(other, 5, "atom serial") for other in chunk)
             )
