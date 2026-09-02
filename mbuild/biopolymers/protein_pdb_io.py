@@ -133,7 +133,16 @@ def _parse_pdb(text):
             record = _PdbRecord(
                 serial=_decode_index(line[6:11], 5),
                 name=line[12:16].strip(),
-                resname=line[17:20].strip(),
+                # The wwPDB Format Guide v3.30, section 9
+                # (Coordinate Section, ATOM), declares the residue
+                # name in columns 18-20 and column 21 blank. A
+                # four-character name, such as a lipid name that a
+                # membrane builder writes, fills column 21 too, so
+                # the field is read over all four columns and
+                # stripped. A three-character name is unchanged.
+                # openff-pablo reads the same four columns when it
+                # is not strict (_pdb_data.py).
+                resname=line[17:21].strip(),
                 chain_id=line[21].strip(),
                 resnum=_decode_index(line[22:26], 4),
                 icode=line[26].strip(),
@@ -324,7 +333,7 @@ def _atom_and_ter_lines(protein):
         if residue is not None:
             serial += 1
             lines.append(
-                f"TER   {serial:5d}      {residue.name:<3s} "
+                f"TER   {serial:5d}      {residue.name:<4.4s}"
                 f"{chain.chain_id or ' ':1s}{residue.resnum:4d}"
                 f"{residue.icode or ' ':1s}"
             )
@@ -382,13 +391,20 @@ def _pdb_name_field(name):
 
 
 def _pdb_atom_line(serial, particle, residue, chain_id):
-    """Format one ATOM or HETATM record for the particle."""
+    """Format one ATOM or HETATM record for the particle.
+
+    The residue name fills columns 18-21. The wwPDB Format Guide v3.30,
+    section 9 (Coordinate Section, ATOM), declares the name in columns
+    18-20 and column 21 blank, so a name of three characters or less
+    gives the same record as before. A four-character name fills
+    column 21, which is the field that ``_parse_pdb`` reads back.
+    """
     record = "HETATM" if residue.hetatm else "ATOM  "
     name_field = _pdb_name_field(particle.name)
     x, y, z = particle.pos * 10.0
     element = particle.element.symbol.upper() if particle.element else ""
     return (
-        f"{record}{serial:5d} {name_field[:4]} {residue.name:<3.3s} "
+        f"{record}{serial:5d} {name_field[:4]} {residue.name:<4.4s}"
         f"{chain_id or ' ':1.1s}{residue.resnum:4d}{residue.icode or ' ':1.1s}"
         f"   {x:8.3f}{y:8.3f}{z:8.3f}{1.0:6.2f}{0.0:6.2f}"
         f"          {element:>2.2s}"

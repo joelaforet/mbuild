@@ -413,6 +413,22 @@ class TestProtein(BaseTest):
         with pytest.raises(MBuildError, match="download=True"):
             Protein(str(bad_residue))
 
+    def test_four_character_residue_name_is_read_whole(self):
+        # Tests that a four-character residue name reaches the template
+        # lookup whole. This is needed because the reader took columns
+        # 18-20 only, so a name such as the lipid name DLPC became DLP
+        # and matched a different component with no error at all: a
+        # silent wrong answer. The test renames the N-terminal serine
+        # of the good asset to a four-character name, which fills
+        # column 21 too, and reads the name back from the
+        # unknown-residue error.
+        wide = Path("wide_resname.pdb")
+        wide.write_text(
+            open(get_fn("6m03_protonated.pdb")).read().replace("SER A   1", "DLPCA   1")
+        )
+        with pytest.raises(MBuildError, match="'DLPC' is not in the CCD"):
+            Protein(str(wide))
+
     def test_alternate_locations_keep_the_first_conformer(self, caplog):
         # Tests that a residue with two alternate locations loads with
         # the first conformer only and logs one warning that names the
