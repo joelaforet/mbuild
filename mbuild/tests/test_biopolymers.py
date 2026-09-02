@@ -476,6 +476,38 @@ class TestProtein(BaseTest):
         assert "SER A:1" in caplog.text
         assert protein.get_atom(1, "CB", chain_id="A").pos[0] == pytest.approx(-0.2645)
 
+    def test_alternate_location_letters_differ_per_residue(self, caplog):
+        # Tests that two residues whose disorder groups use different
+        # altLoc letters both keep their first conformer. This is
+        # needed because the reader chose one letter for the whole
+        # file, so a residue that used other letters lost every
+        # disordered record and left the structure without an error.
+        # The test writes a glycine pair whose CA atom carries an 'A'
+        # and a 'B' record in residue 1, and a 'C' and a 'D' record in
+        # residue 2, then checks the particle count, the x position of
+        # each kept CA record, and the warning text.
+        lines = []
+        for line in _gly_gly_with_ter(complete=True).splitlines():
+            if line.startswith("ATOM  ") and line[12:16].strip() == "CA":
+                first, second = ("A", "B") if line[22:26] == "   1" else ("C", "D")
+                shifted = f"{float(line[30:38]) + 1.0:8.3f}"
+                lines.append(line[:16] + first + line[17:])
+                lines.append(line[:16] + second + line[17:30] + shifted + line[38:])
+            else:
+                lines.append(line)
+        letters = Path("altloc_letters.pdb")
+        letters.write_text("\n".join(lines) + "\n")
+
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein = Protein(str(letters))
+        assert protein.n_particles == 20
+        # The kept records are the 'A' record of residue 1 and the 'C'
+        # record of residue 2, so both CA atoms hold the unshifted x.
+        assert protein.get_atom(1, "CA", chain_id="A").pos[0] == pytest.approx(0.7516)
+        assert protein.get_atom(2, "CA", chain_id="A").pos[0] == pytest.approx(0.4120)
+        assert "GLY A:1 keeps 'A'" in caplog.text
+        assert "GLY A:2 keeps 'C'" in caplog.text
+
     def test_monatomic_ion_templates(self):
         # Tests that a PDB which holds one ion of each bundled
         # monatomic component loads with the formal charge of every

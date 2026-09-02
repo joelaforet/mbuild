@@ -111,9 +111,10 @@ def _parse_pdb(text):
     A disordered atom carries an alternate location indicator in
     column 17, which the wwPDB Format Guide v3.30, section 9
     (Coordinate Section, ATOM), names altLoc. One conformer only is
-    read: the records whose altLoc is blank, plus the records that
-    carry the first non-blank altLoc of the file. The other conformers
-    are skipped, and one warning names the residues that lose them.
+    read per residue. A residue keeps the records whose altLoc is
+    blank. It also keeps the records that carry its own first
+    non-blank altLoc. The other conformers are skipped, and one
+    warning names the residues that lose them.
 
     Returns a tuple ``(residues, conects, box)``: the ``_PdbResidue``
     groups in file order, the CONECT pairs as a set of frozensets of
@@ -122,7 +123,7 @@ def _parse_pdb(text):
     residues = []
     conects = set()
     box = None
-    kept_alt_loc = None
+    kept_alt_loc_by_key = {}
     skipped_alt_loc_keys = {}
     in_extra_model = False
     last_key = None
@@ -159,15 +160,17 @@ def _parse_pdb(text):
             key = (record.resname, record.chain_id, record.resnum, record.icode)
             # A crystal structure gives a disordered atom one record
             # per conformer, each with its own altLoc letter. The
-            # loader builds one structure, so it keeps the blank
-            # records and the first non-blank letter of the file and
-            # it skips the rest. openff-pablo keeps the same pair
+            # loader builds one structure, so every residue keeps its
+            # blank records and its own first non-blank letter, and it
+            # skips the rest. The letters belong to the disorder group
+            # of one residue. A letter chosen over the whole file would
+            # drop every record of a residue that uses other letters.
+            # openff-pablo keeps the same pair
             # (_pdb_data.py, _allowed_alt_locs).
             alt_loc = line[16].strip()
             if alt_loc:
-                if kept_alt_loc is None:
-                    kept_alt_loc = alt_loc
-                if alt_loc != kept_alt_loc:
+                kept = kept_alt_loc_by_key.setdefault(key, alt_loc)
+                if alt_loc != kept:
                     skipped_alt_loc_keys[key] = None
                     continue
             if key != last_key:
@@ -191,9 +194,12 @@ def _parse_pdb(text):
             if any(length > 0.2 for length in lengths):
                 box = Box(lengths=lengths, angles=angles)
     if skipped_alt_loc_keys:
-        labels = ", ".join(_PdbResidue(*key).label for key in skipped_alt_loc_keys)
+        labels = ", ".join(
+            f"{_PdbResidue(*key).label} keeps {kept_alt_loc_by_key[key]!r}"
+            for key in skipped_alt_loc_keys
+        )
         logger.warning(
-            f"Alternate location {kept_alt_loc!r} is read for {labels}. "
+            f"One alternate location is read per residue: {labels}. "
             "The other conformers of these residues are skipped."
         )
     if not residues:
