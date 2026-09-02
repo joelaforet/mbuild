@@ -6,6 +6,7 @@ RCSB-conformant files that residue-template loaders ingest.
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -144,35 +145,99 @@ def write_pdb(protein, filename, overwrite=False):
     overwrite : bool, optional, default=False
         Overwrite the file if it exists.
     """
-    import os
-
     if os.path.exists(filename) and not overwrite:
         raise IOError(f"{filename} exists; not overwriting")
 
     lines = []
     if protein.box is not None:
-        a, b, c = (length * 10.0 for length in protein.box.lengths)
-        alpha, beta, gamma = protein.box.angles
-        lines.append(
-            f"CRYST1{a:9.3f}{b:9.3f}{c:9.3f}"
-            f"{alpha:7.2f}{beta:7.2f}{gamma:7.2f} P 1           1"
+        lines.append(_cryst1_line(protein.box))
+    atom_lines, particle_serial, particle_residue, residue_order = _atom_and_ter_lines(
+        protein
+    )
+    lines.extend(atom_lines)
+
+    # The layout above only visits particles inside a Chain -> Residue
+    # path. A particle outside that path would be absent from the file
+    # and its bonds would be absent from the CONECT records. Raise
+    # instead of writing an incomplete file. The message matches the
+    # guard in Protein.to_rdkit.
+    orphans = [
+        particle for particle in protein.particles() if particle not in particle_serial
+    ]
+    if orphans:
+        raise MBuildError(
+            "Every atom of a Protein must belong to a Residue, but "
+            f"{[p.name for p in orphans[:5]]} "
+            f"{'(and more) ' if len(orphans) > 5 else ''}do not. Add "
+            "atoms through attach() or into a Residue, not directly "
+            "onto the Protein."
         )
 
+    lines.extend(
+        _conect_lines(protein, particle_serial, particle_residue, residue_order)
+    )
+    lines.append("END")
+
+    with open(filename, "w") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
+def _cryst1_line(box):
+    """Format the CRYST1 record of a unit cell.
+
+    Parameters
+    ----------
+    box : mbuild.Box
+        The unit cell. Its lengths are in nanometres; the record holds
+        angstroms.
+
+    Returns
+    -------
+    str
+        The CRYST1 line, with space group P 1 and Z value 1.
+    """
+    a, b, c = (length * 10.0 for length in box.lengths)
+    alpha, beta, gamma = box.angles
+    return (
+        f"CRYST1{a:9.3f}{b:9.3f}{c:9.3f}"
+        f"{alpha:7.2f}{beta:7.2f}{gamma:7.2f} P 1           1"
+    )
+
+
+def _atom_and_ter_lines(protein):
+    """Lay out the coordinate section of the file.
+
+    Residues are written sorted by number: template readers form
+    polymer links only between record-adjacent residues, so backbone
+    order in the file must follow residue numbers, not attachment
+    order. Adjacency is a property of the record order alone. The
+    wwPDB Format Guide v3.30, section 9 (Coordinate Section,
+    ATOM/HETATM/TER), states that the records of one chain follow each
+    other in sequence order and that a TER record closes the chain, so
+    a reader takes the polymer sequence from the record order and the
+    TER records.
+
+    Parameters
+    ----------
+    protein : mbuild.biopolymers.Protein
+        The protein to lay out.
+
+    Returns
+    -------
+    tuple
+        ``(lines, particle_serial, particle_residue, residue_order)``.
+        ``lines`` holds the ATOM, HETATM and TER records. The three
+        maps give the serial and the residue of every written
+        particle, and the ``(chain id, position)`` key of every
+        residue, which ``_conect_lines`` reads.
+    """
+    lines = []
     serial = 0
     particle_serial = {}
     particle_residue = {}
     residue_order = {}
     for chain in protein.chains:
         residue = None
-        # Residues are written sorted by number: template readers form
-        # polymer links only between record-adjacent residues, so
-        # backbone order in the file must follow residue numbers,
-        # not attachment order. Adjacency is a property of the record
-        # order alone. The wwPDB Format Guide v3.30, section 9
-        # (Coordinate Section, ATOM/HETATM/TER), states that the
-        # records of one chain follow each other in sequence order and
-        # that a TER record closes the chain, so a reader takes the
-        # polymer sequence from the record order and the TER records.
         for index, residue in enumerate(
             sorted(
                 protein.residues(chain.chain_id),
@@ -202,32 +267,7 @@ def write_pdb(protein, filename, overwrite=False):
                 f"{chain.chain_id or ' ':1s}{residue.resnum:4d}"
                 f"{residue.icode or ' ':1s}"
             )
-
-    # The loops above only visit particles inside a Chain -> Residue
-    # path. A particle outside that path would be absent from the file
-    # and its bonds would be absent from the CONECT records. Raise
-    # instead of writing an incomplete file. The message matches the
-    # guard in Protein.to_rdkit.
-    orphans = [
-        particle for particle in protein.particles() if particle not in particle_serial
-    ]
-    if orphans:
-        raise MBuildError(
-            "Every atom of a Protein must belong to a Residue, but "
-            f"{[p.name for p in orphans[:5]]} "
-            f"{'(and more) ' if len(orphans) > 5 else ''}do not. Add "
-            "atoms through attach() or into a Residue, not directly "
-            "onto the Protein."
-        )
-
-    for line in _conect_lines(
-        protein, particle_serial, particle_residue, residue_order
-    ):
-        lines.append(line)
-    lines.append("END")
-
-    with open(filename, "w") as handle:
-        handle.write("\n".join(lines) + "\n")
+    return lines, particle_serial, particle_residue, residue_order
 
 
 def _pdb_atom_line(serial, particle, residue, chain_id):
