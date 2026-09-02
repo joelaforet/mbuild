@@ -134,9 +134,12 @@ class TestCCDLibrary(BaseTest):
             }
             for bond in ours.bonds:
                 assert their_orders[frozenset((bond.atom1, bond.atom2))] == bond.order
-            # Every name our matcher accepts, pablo's must accept too
-            # (in any of its variants); otherwise a file mBuild loads
-            # could fail downstream.
+            # The first-hit names stay a subset of pablo's names, in
+            # any of its variants. The fallback matcher accepts a wider
+            # set of input spellings than this, for example the
+            # digit-first name 3HB, which pablo rejects. A file that
+            # only the fallback reads still round-trips, because
+            # save_pdb writes the canonical names that pablo reads.
             their_names = {
                 name
                 for variant in pablo.STD_CCD_CACHE[resname]
