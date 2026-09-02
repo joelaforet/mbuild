@@ -165,6 +165,49 @@ def fragment_from_smiles(smiles, resname):
     return residue
 
 
+def _as_residues(compound, resname):
+    """Return a fragment compound and its residues, wrapping if needed.
+
+    A Residue input is its own single residue. A Compound that holds
+    Residue children keeps those residues. Any other Compound is
+    wrapped into one new flat Residue named after ``resname``. Atom
+    names are made unique inside each residue, not across the fragment,
+    so every residue keeps its own ``atom_formal_charges`` and
+    ``link_atoms`` keys.
+
+    The compound is changed in place, so callers clone first.
+
+    Parameters
+    ----------
+    compound : mbuild.Compound
+        The fragment.
+    resname : str or None
+        Residue name for a wrapped compound.
+
+    Returns
+    -------
+    compound : mbuild.Compound
+        The input compound, or the new Residue that wraps it. A wrapped
+        input is replaced, so callers must use the returned object.
+    residues : list of Residue
+        The residues of the returned compound.
+    """
+    if isinstance(compound, Residue):
+        # successors() does not yield the compound itself, so a Residue
+        # input needs its own arm.
+        residues = [compound]
+    else:
+        residues = [
+            child for child in compound.successors() if isinstance(child, Residue)
+        ]
+        if not residues:
+            compound = _wrap_in_residue(compound, resname)
+            residues = [compound]
+    for residue in residues:
+        _ensure_unique_atom_names(residue)
+    return compound, residues
+
+
 def prepare_fragment(compound, resname):
     """Return a fragment as a named Residue with final atom names.
 
@@ -207,19 +250,11 @@ def prepare_fragment(compound, resname):
         return fragment_from_smiles(compound, resname)
     copied = clone(compound)
     if isinstance(copied, Residue):
-        # successors() does not yield the compound itself, so this arm
-        # is the residue detection for a Residue input, as in attach().
-        residues = [copied]
+        # A Residue input takes the requested name. Residue children of
+        # a Compound keep the names they came with.
         copied.name = (resname or copied.name)[:3].upper()
-    else:
-        residues = [
-            child for child in copied.successors() if isinstance(child, Residue)
-        ]
-        if not residues:
-            copied = _wrap_in_residue(copied, resname)
-            residues = [copied]
+    copied, residues = _as_residues(copied, resname)
     for residue in residues:
-        _ensure_unique_atom_names(residue)
         if not residue.link_atoms:
             # mBuild's tagged-SMILES idiom: particle tags mark the sites.
             for particle in residue.particles():

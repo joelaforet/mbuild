@@ -1278,58 +1278,22 @@ class Protein(Compound):
         # fragments.py imports Residue from this module, so a top-level
         # import of fragments here would be circular. Import inside the
         # method instead.
-        from mbuild.biopolymers.fragments import (
-            _ensure_unique_atom_names,
-            _wrap_in_residue,
-        )
+        from mbuild.biopolymers.fragments import _as_residues
 
         bond_order = int(bond_order)
-        site_residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
-        site_atom = self._atom_of(site_residue, atom_name)
-        site_hydrogens = self._bonded_hydrogens(
-            site_atom, site_residue.name, bond_order
+        site_residue, site_atom, site_hydrogens = self._attachment_site(
+            resnum, atom_name, chain_id, icode, bond_order
         )
-
-        added = clone(fragment)
-        if isinstance(added, Residue):
-            frag_residues = [added]
-        else:
-            frag_residues = [
-                child for child in added.successors() if isinstance(child, Residue)
-            ]
-            if not frag_residues:
-                added = _wrap_in_residue(added, fragment_resname)
-                frag_residues = [added]
-        for residue in frag_residues:
-            _ensure_unique_atom_names(residue)
-
-        if fragment_atom_name is None:
-            linked = [
-                (label, residue)
-                for residue in frag_residues
-                for label in residue.link_atoms
-            ]
-            if len(linked) != 1:
-                raise MBuildError(
-                    "attach() bonds one site, but the fragment carries "
-                    f"{len(linked)} attachment points. Pass "
-                    "fragment_atom_name or mark exactly one site with * "
-                    "in the SMILES."
-                )
-            label, link_residue = linked[0]
-            fragment_atom_name = link_residue.link_atoms[label]
-            fragment_resnum = link_residue.resnum
-
-        frag_atom, frag_residue = self._find_fragment_atom(
-            frag_residues, fragment_atom_name, fragment_resnum
-        )
-        frag_hydrogens = self._bonded_hydrogens(
-            frag_atom, frag_residue.name, bond_order
+        added, frag_residues = _as_residues(clone(fragment), fragment_resname)
+        frag_atom, frag_residue, frag_hydrogens = self._fragment_site(
+            frag_residues, fragment_atom_name, fragment_resnum, bond_order
         )
 
         # One hydrogen leaves per bond order unit on each side (the
         # polymer.add_monomer convention); the port points along the sum
-        # of the removed-hydrogen vectors.
+        # of the removed-hydrogen vectors. Both ports are opened while
+        # the fragment is still detached, so that each removal runs on
+        # its own compound.
         site_port = self._port_along_hydrogens(
             self, site_atom, site_hydrogens, separation
         )
@@ -1339,23 +1303,8 @@ class Protein(Compound):
         )
         added.add(frag_port, label="attach_frag")
 
-        # Renumber fragment residues into the site's chain.
-        chain = _chain_of(site_residue)
-        next_resnum = max(r.resnum for r in self.residues(chain.chain_id)) + 1
-        for offset, residue in enumerate(frag_residues):
-            residue.resnum = next_resnum + offset
-            residue.hetatm = True
-        chain.add(added)
-
-        from mbuild.coordinate_transform import force_overlap
-
-        force_overlap(
-            move_this=added,
-            from_positions=frag_port,
-            to_positions=site_port,
-            add_bond=True,
-            bond_order=float(bond_order),
-        )
+        self._adopt_fragment(added, frag_residues, site_residue)
+        self._align_on_ports(added, frag_port, site_port, bond_order)
 
         # The record is appended before the relaxation step, so the
         # protein state stays complete and consistent when relaxation
@@ -1371,29 +1320,164 @@ class Protein(Compound):
         )
         self.cross_bonds.append(record)
 
-        clashes = self._warn_on_clashes(added, site_atom, frag_atom)
-        if clashes and relax:
-            try:
-                import mbuild.simulation  # noqa: F401
-            except ImportError as error:
-                # The automatic path only warns: the attachment itself
-                # is complete, and the user can relax later on a system
-                # with the simulation dependencies installed.
-                logger.warning(
-                    "Cannot relax the placed fragment: mbuild.simulation "
-                    f"is not importable ({error}). Install the simulation "
-                    "dependencies (hoomd, openmm) or call "
-                    "relax_fragments() elsewhere. The fragment keeps its "
-                    "rigid placement."
-                )
-            else:
-                logger.info("Relaxing the placed fragment with the protein held fixed.")
-                self.relax_fragments(residues=frag_residues)
-                clashes = self._warn_on_clashes(added, site_atom, frag_atom)
-                if not clashes:
-                    logger.info("Fragment overlaps resolved by relaxation.")
-
+        self._relax_if_clashing(added, site_atom, frag_atom, frag_residues, relax)
         return record
+
+    def _attachment_site(self, resnum, atom_name, chain_id, icode, bond_order):
+        """Return the protein-side residue, atom, and leaving hydrogens.
+
+        Parameters
+        ----------
+        resnum : int
+            Residue number of the attachment site.
+        atom_name : str
+            Name of the protein atom that forms the new bond.
+        chain_id : str or None
+            Chain of the site; required when residue numbers repeat
+            across chains.
+        icode : str
+            Insertion code of the site.
+        bond_order : int
+            Order of the new bond. One hydrogen leaves per unit.
+
+        Returns
+        -------
+        residue : Residue
+            The residue that holds the attachment atom.
+        atom : mbuild.Compound
+            The attachment atom.
+        hydrogens : list of mbuild.Compound
+            The hydrogens that leave that atom.
+        """
+        residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
+        atom = self._atom_of(residue, atom_name)
+        hydrogens = self._bonded_hydrogens(atom, residue.name, bond_order)
+        return residue, atom, hydrogens
+
+    @staticmethod
+    def _fragment_site(frag_residues, atom_name, fragment_resnum, bond_order):
+        """Return the fragment-side atom, residue, and leaving hydrogens.
+
+        With no atom name, the fragment must carry exactly one labeled
+        attachment site in ``Residue.link_atoms``, and that site forms
+        the bond.
+
+        Parameters
+        ----------
+        frag_residues : list of Residue
+            The residues of the cloned fragment.
+        atom_name : str or None
+            Name of the fragment atom that forms the new bond.
+        fragment_resnum : int or None
+            Residue number, inside the fragment, of that atom.
+        bond_order : int
+            Order of the new bond. One hydrogen leaves per unit.
+
+        Returns
+        -------
+        atom : mbuild.Compound
+            The fragment attachment atom.
+        residue : Residue
+            The fragment residue that holds it.
+        hydrogens : list of mbuild.Compound
+            The hydrogens that leave that atom.
+        """
+        if atom_name is None:
+            linked = [
+                (label, residue)
+                for residue in frag_residues
+                for label in residue.link_atoms
+            ]
+            if len(linked) != 1:
+                raise MBuildError(
+                    "attach() bonds one site, but the fragment carries "
+                    f"{len(linked)} attachment points. Pass "
+                    "fragment_atom_name or mark exactly one site with * "
+                    "in the SMILES."
+                )
+            label, link_residue = linked[0]
+            atom_name = link_residue.link_atoms[label]
+            fragment_resnum = link_residue.resnum
+
+        atom, residue = Protein._find_fragment_atom(
+            frag_residues, atom_name, fragment_resnum
+        )
+        hydrogens = Protein._bonded_hydrogens(atom, residue.name, bond_order)
+        return atom, residue, hydrogens
+
+    def _adopt_fragment(self, added, frag_residues, site_residue):
+        """Renumber the fragment residues and add them to the chain.
+
+        The fragment residues continue the residue numbering of the
+        site's chain and are marked as HETATM records, so that a
+        written PDB separates them from the standard residues.
+        """
+        chain = _chain_of(site_residue)
+        next_resnum = max(r.resnum for r in self.residues(chain.chain_id)) + 1
+        for offset, residue in enumerate(frag_residues):
+            residue.resnum = next_resnum + offset
+            residue.hetatm = True
+        chain.add(added)
+
+    @staticmethod
+    def _align_on_ports(added, frag_port, site_port, bond_order):
+        """Move the fragment onto the site port and bond the anchors.
+
+        ``force_overlap`` superposes the fragment port on the site port
+        and adds the bond between the two port anchor atoms.
+        """
+        from mbuild.coordinate_transform import force_overlap
+
+        force_overlap(
+            move_this=added,
+            from_positions=frag_port,
+            to_positions=site_port,
+            add_bond=True,
+            bond_order=float(bond_order),
+        )
+
+    def _relax_if_clashing(self, added, site_atom, frag_atom, frag_residues, relax):
+        """Relax the placed fragment when it overlaps other atoms.
+
+        Port alignment is rigid, so a bulky fragment can land inside the
+        protein. The relaxation moves only the fragment residues. It
+        needs the simulation dependencies; without them the method warns
+        and keeps the rigid placement.
+
+        Parameters
+        ----------
+        added : mbuild.Compound
+            The placed fragment.
+        site_atom : mbuild.Compound
+            The protein atom of the new bond.
+        frag_atom : mbuild.Compound
+            The fragment atom of the new bond.
+        frag_residues : list of Residue
+            The residues that relaxation may move.
+        relax : bool
+            False leaves the rigid placement in place.
+        """
+        clashes = self._warn_on_clashes(added, site_atom, frag_atom)
+        if not (clashes and relax):
+            return
+        try:
+            import mbuild.simulation  # noqa: F401
+        except ImportError as error:
+            # The automatic path only warns: the attachment itself
+            # is complete, and the user can relax later on a system
+            # with the simulation dependencies installed.
+            logger.warning(
+                "Cannot relax the placed fragment: mbuild.simulation "
+                f"is not importable ({error}). Install the simulation "
+                "dependencies (hoomd, openmm) or call "
+                "relax_fragments() elsewhere. The fragment keeps its "
+                "rigid placement."
+            )
+            return
+        logger.info("Relaxing the placed fragment with the protein held fixed.")
+        self.relax_fragments(residues=frag_residues)
+        if not self._warn_on_clashes(added, site_atom, frag_atom):
+            logger.info("Fragment overlaps resolved by relaxation.")
 
     @staticmethod
     def _port_along_hydrogens(root, atom, hydrogens, separation):
