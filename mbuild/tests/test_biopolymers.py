@@ -230,12 +230,17 @@ class TestCCDLibrary(BaseTest):
             unmatched = set(ours.name_to_atom) - their_names
             assert not unmatched, f"{resname}: {unmatched}"
 
-    def test_unknown_residue_raises(self):
+    def test_unknown_residue_raises(self, tmp_path, monkeypatch):
         # Tests that an unknown residue code raises a KeyError that names
         # the code and the download option. This is needed because the
         # loader is strict: it must fail loudly on residues it cannot
-        # match instead of guessing. The test looks up a nonsense code
-        # with downloads disabled.
+        # match instead of guessing. The test points the user download
+        # cache at an empty tmp directory, so a definition downloaded
+        # in an earlier session cannot make the code known, then looks
+        # up a nonsense code with downloads disabled.
+        from mbuild.biopolymers import ccd
+
+        monkeypatch.setattr(ccd, "USER_CCD_CACHE_DIR", tmp_path)
         library = CCDLibrary()
         with pytest.raises(KeyError, match="XXX"):
             library["XXX"]
@@ -390,7 +395,7 @@ class TestProtein(BaseTest):
         }
         assert orders == {1.0, 2.0}
 
-    def test_load_strict_errors(self):
+    def test_load_strict_errors(self, tmp_path, monkeypatch):
         # Tests that the loader fails loudly, with the residue named in
         # the message, on a bad atom name and on an unknown residue code.
         # This is needed because the loader must never guess chemistry:
@@ -399,7 +404,12 @@ class TestProtein(BaseTest):
         # one residue name of the good asset and asserts on the errors.
         # It also asserts that the list of accepted names holds H3, the
         # extra proton of the N-terminal serine, which only one variant
-        # carries.
+        # carries. The user download cache points at an empty tmp
+        # directory, so a definition downloaded in an earlier session
+        # cannot make the corrupt residue name known.
+        from mbuild.biopolymers import ccd
+
+        monkeypatch.setattr(ccd, "USER_CCD_CACHE_DIR", tmp_path)
         text = open(get_fn("6m03_protonated.pdb")).read()
 
         bad_atom = Path("bad_atom.pdb")
@@ -413,7 +423,7 @@ class TestProtein(BaseTest):
         with pytest.raises(MBuildError, match="download=True"):
             Protein(str(bad_residue))
 
-    def test_four_character_residue_name_is_read_whole(self):
+    def test_four_character_residue_name_is_read_whole(self, tmp_path, monkeypatch):
         # Tests that a four-character residue name reaches the template
         # lookup whole. This is needed because the reader took columns
         # 18-20 only, so a name such as the lipid name DLPC became DLP
@@ -421,7 +431,12 @@ class TestProtein(BaseTest):
         # silent wrong answer. The test renames the N-terminal serine
         # of the good asset to a four-character name, which fills
         # column 21 too, and reads the name back from the
-        # unknown-residue error.
+        # unknown-residue error. The user download cache points at an
+        # empty tmp directory, so a definition downloaded in an earlier
+        # session cannot make the name known.
+        from mbuild.biopolymers import ccd
+
+        monkeypatch.setattr(ccd, "USER_CCD_CACHE_DIR", tmp_path)
         wide = Path("wide_resname.pdb")
         wide.write_text(
             open(get_fn("6m03_protonated.pdb")).read().replace("SER A   1", "DLPCA   1")
@@ -1447,7 +1462,9 @@ class TestProteinExports(BaseTest):
             protein.save_pdb("orphan.pdb")
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_save_pdb_modified_protein_does_not_reload(self, protein_6m03, acetone):
+    def test_save_pdb_modified_protein_does_not_reload(
+        self, protein_6m03, acetone, tmp_path, monkeypatch
+    ):
         # Tests that a written modified protein fails to reload with the
         # library error for an unknown residue. This is needed because
         # save_pdb is the handoff artifact of this recipe and users try
@@ -1456,7 +1473,13 @@ class TestProteinExports(BaseTest):
         # the fragment residue. The test attaches a fragment, writes the
         # file, and asserts on the library message. The test encodes a
         # present limitation. Delete it when mBuild can declare a
-        # modification bond that the loader reads back.
+        # modification bond that the loader reads back. The user
+        # download cache points at an empty tmp directory, so an ACT
+        # definition downloaded in an earlier session cannot make the
+        # fragment residue known.
+        from mbuild.biopolymers import ccd
+
+        monkeypatch.setattr(ccd, "USER_CCD_CACHE_DIR", tmp_path)
         protein = protein_6m03
         protein.attach(
             acetone,
