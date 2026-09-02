@@ -334,13 +334,19 @@ class TestProtein(BaseTest):
         # digit-first names are PDB format version 2 names that
         # Amber-style tools still write, and the first-hit name lookup
         # rejects every one of them, so such a file could not load at
-        # all. The test loads the bundled capped-arginine asset and
-        # reads back the residue names and the arginine atom names.
+        # all. The test loads the bundled capped-arginine asset, reads
+        # back the residue names and the arginine atom names, and
+        # checks the position of one renamed hydrogen: a swapped
+        # assignment keeps the name set but moves the atoms.
         protein = Protein(get_fn("capped_arg_altresonance.pdb"))
         residues = list(protein.residues())
         assert [residue.name for residue in residues] == ["ACE", "ARG", "NME"]
         names = {particle.name for particle in residues[1].particles()}
         assert {"HB2", "HB3", "HH11", "HH12"} <= names
+        # The record named 2HB sits at (0.336, -0.947, 2.140) angstrom
+        # in the asset, so HB2 must carry that position in nanometers.
+        hb2 = next(residues[1].particles_by_name("HB2"))
+        assert np.allclose(hb2.pos, [0.0336, -0.0947, 0.2140])
 
     def test_v2_glycine_alpha_hydrogens(self):
         # Tests that a glycine written with the alpha-hydrogen names
@@ -351,8 +357,9 @@ class TestProtein(BaseTest):
         # name of HA3, so a first-hit lookup gives both records the
         # atom HA2 and the residue matches no variant. The test renames
         # the alpha hydrogens of every glycine in the bundled
-        # protonated asset, loads the result, and reads back the atom
-        # names of a glycine.
+        # protonated asset, loads the result, reads back the atom names
+        # of a glycine, and checks the position of one of them: a
+        # swapped assignment keeps the name set but moves the atoms.
         text = open(get_fn("6m03_protonated.pdb")).read()
         renamed = Path("6m03_v2_glycine.pdb")
         renamed.write_text(
@@ -363,6 +370,10 @@ class TestProtein(BaseTest):
         assert protein.n_particles == 4682
         glycine = next(r for r in protein.residues() if r.name == "GLY")
         assert {"HA2", "HA3"} <= {p.name for p in glycine.particles()}
+        # The first glycine is GLY A 2. Its renamed HA1 record sits at
+        # (-2.640, -4.080, -12.616) angstrom, and it supplies HA2.
+        ha2 = next(glycine.particles_by_name("HA2"))
+        assert np.allclose(ha2.pos, [-0.2640, -0.4080, -1.2616])
 
     def test_insertion_codes_2mum(self):
         # Tests that a PDB with insertion codes loads with the inserted
