@@ -172,6 +172,39 @@ class TestCCDLibrary(BaseTest):
         variants = library["ZZZ"]
         assert variants and variants[0].name == "ZZZ"
 
+    def test_download_writes_the_user_cache(self, tmp_path, monkeypatch):
+        # Tests that a residue code found in no search path is fetched
+        # from RCSB, parsed into templates, and written into the user
+        # cache directory. This is needed because the download is the
+        # only way to load a residue that mBuild does not bundle, and
+        # no test covered it, so a change to the response handling or
+        # to the cache location would pass unnoticed. The test replaces
+        # urllib.request.urlopen with a stub that returns the bundled
+        # ALA definition renamed to ZZZ, points the cache constant at a
+        # tmp directory, and checks the template and the written file.
+        import urllib.request
+
+        from mbuild.biopolymers import ccd
+
+        source = ccd.CCD_CACHE_DIR / "ALA.cif"
+        payload = source.read_text().replace("ALA", "ZZZ").encode()
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return payload
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda url: Response())
+        monkeypatch.setattr(ccd, "USER_CCD_CACHE_DIR", tmp_path)
+        variants = CCDLibrary(download=True)["ZZZ"]
+        assert variants[0].name == "ZZZ"
+        assert (tmp_path / "ZZZ.cif").read_bytes() == payload
+
     def test_cif_parser_reads_adjacent_loops(self):
         # Tests that the CIF parser reads a loop_ block that follows
         # another loop_ block with no '#' or blank separator. This is
