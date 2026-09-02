@@ -37,7 +37,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from mbuild import clone
-from mbuild.biopolymers.ccd import CCDLibrary
+from mbuild.biopolymers.ccd import _ACIDIC_PROTONS, CCDLibrary
 from mbuild.biopolymers.protein_pdb_io import (
     _check_residue_membership,
     _parse_pdb,
@@ -213,6 +213,65 @@ def _atom_in_residue(residue, atom_name):
     go stale after ``remove()``.
     """
     return next(residue.particles_by_name(atom_name), None)
+
+
+def _stamp_template(residue, variant):
+    """Write a template variant and its formal charges onto a residue.
+
+    Only the atoms the residue holds contribute to the charges. A
+    residue inside a chain is missing the leaving atoms of its peptide
+    bonds, and those absent atoms must add no charge.
+
+    Parameters
+    ----------
+    residue : Residue
+        The residue to write. Its particles must already be added.
+    variant : mbuild.biopolymers.ccd.ResidueTemplate
+        The matched template variant.
+    """
+    name_to_atom = variant.name_to_atom
+    charges = {}
+    for particle in residue.particles():
+        atom = name_to_atom.get(particle.name)
+        if atom is not None and atom.formal_charge:
+            charges[particle.name] = atom.formal_charge
+    residue.template = variant
+    residue.atom_formal_charges = charges
+    residue.formal_charge = sum(charges.values())
+
+
+def _remove_pruning_ports(root, atom, particles):
+    """Remove particles bonded to an atom and drop the opened ports.
+
+    ``Compound.remove`` leaves one auto-generated port on the atom per
+    severed bond. Those ports are removed here, so the atom keeps only
+    the ports the caller made.
+
+    Parameters
+    ----------
+    root : mbuild.Compound
+        The compound that owns the bond graph, for example the Protein
+        or a detached fragment.
+    atom : mbuild.Compound
+        The atom the removed particles are bonded to.
+    particles : list of mbuild.Compound
+        The particles to remove.
+    """
+    residue = atom.parent
+    old_ports = {p for p in residue.children if isinstance(p, Port)}
+    root.remove(particles)
+    # Compound.remove removes a Port with three constant-cost
+    # operations and then rescans every particle of the root in
+    # _prune_ghost_ports. The ports removed here were created by the
+    # remove() call above and anchor an atom that is still present, so
+    # that rescan finds nothing. Apply the same three operations
+    # directly and skip the second full-protein scan.
+    for port in [
+        p for p in residue.children if isinstance(p, Port) and p not in old_ports
+    ]:
+        root._remove(port)
+        port.parent.children.remove(port)
+        root._remove_references(port)
 
 
 def _ter_is_advisory(earlier, later):
@@ -755,15 +814,6 @@ class Protein(Compound):
                 icode=group.icode,
                 hetatm=group.records[0].hetatm,
             )
-            residue.template = match.variant
-            residue.formal_charge = sum(
-                atom.formal_charge for atom in match.record_atoms.values()
-            )
-            residue.atom_formal_charges = {
-                atom.name: atom.formal_charge
-                for atom in match.record_atoms.values()
-                if atom.formal_charge
-            }
             residues.append(residue)
 
             particles = {}
@@ -775,6 +825,7 @@ class Protein(Compound):
                 particles[atom.name] = particle
                 serial_to_particle[record.serial] = particle
             residue.add([particles[name] for name in particles])
+            _stamp_template(residue, match.variant)
             for bond in match.variant.bonds:
                 if bond.atom1 in particles and bond.atom2 in particles:
                     residue.add_bond(
@@ -1204,6 +1255,79 @@ class Protein(Compound):
     # ------------------------------------------------------------------
     # Functionalization
     # ------------------------------------------------------------------
+    def deprotonate(self, resnum, atom_name, chain_id=None, icode=""):
+        """Remove the acidic proton of one atom and update its charge.
+
+        The proton comes from the residue's matched template variant:
+        the acidic proton that the variant bonds to ``atom_name``. The
+        residue is then re-matched to the variant that describes the
+        result, so ``template``, ``formal_charge`` and
+        ``atom_formal_charges`` all describe the deprotonated residue.
+
+        The call changes nothing and logs a warning when the named atom
+        carries no acidic proton, for example because it is already
+        deprotonated. A notebook cell that calls this method therefore
+        runs a second time without an error.
+
+        Parameters
+        ----------
+        resnum : int
+            Residue number of the target residue.
+        atom_name : str
+            Name of the heavy atom that loses the proton.
+        chain_id : str, optional
+            Chain of the target residue; required when residue numbers
+            repeat across chains.
+        icode : str, optional
+            Insertion code of the target residue.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        MBuildError
+            When the residue or the atom does not exist. The error
+            comes from ``get_residue`` and ``get_atom``.
+
+        Notes
+        -----
+        A protonated amine is not the reactive species in an acylation.
+        The neutral amine is the reactive species, and the product is a
+        neutral amide. Call this method before ``attach`` so that the
+        site starts from the neutral form and the product carries the
+        correct charge.
+
+        Examples
+        --------
+        >>> protein.deprotonate(63, "NZ", chain_id="A")
+        >>> protein.attach(fragment, resnum=63, atom_name="NZ", chain_id="A")
+        """
+        residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
+        atom = self._atom_of(residue, atom_name)
+        variant = residue.template
+        protons = (
+            [
+                name
+                for name in _ACIDIC_PROTONS.get(residue.name, ())
+                if name in variant.bonded_names(atom_name)
+                and _atom_in_residue(residue, name) is not None
+            ]
+            if variant is not None
+            else []
+        )
+        if not protons:
+            logger.warning(
+                f"Atom {atom_name} of residue {residue.name} {residue.resnum} "
+                "carries no acidic proton, so nothing changed. The atom is "
+                "already deprotonated, or its protons are not acidic."
+            )
+            return
+        proton_name = protons[0]
+        _remove_pruning_ports(self, atom, [_atom_in_residue(residue, proton_name)])
+        _stamp_template(residue, variant.deprotonated_at(proton_name))
+
     def add_port_at(
         self,
         resnum,
@@ -1630,21 +1754,7 @@ class Protein(Compound):
         orientation = sum(h.pos - atom.pos for h in hydrogens)
         if np.linalg.norm(orientation) < 1e-8:
             orientation = hydrogens[0].pos - atom.pos
-        residue = atom.parent
-        old_ports = {p for p in residue.children if isinstance(p, Port)}
-        root.remove(hydrogens)
-        # Compound.remove removes a Port with three constant-cost
-        # operations and then rescans every particle of the root in
-        # _prune_ghost_ports. The ports removed here were created by
-        # the remove() call above and anchor an atom that is still
-        # present, so that rescan finds nothing. Apply the same three
-        # operations directly and skip the second full-protein scan.
-        for port in [
-            p for p in residue.children if isinstance(p, Port) and p not in old_ports
-        ]:
-            root._remove(port)
-            port.parent.children.remove(port)
-            root._remove_references(port)
+        _remove_pruning_ports(root, atom, hydrogens)
         self._leaving_atoms[atom] = tuple(sorted(h.name for h in hydrogens))
         return Port(anchor=atom, orientation=orientation, separation=separation / 2)
 

@@ -466,6 +466,41 @@ class TestProtein(BaseTest):
             protein.get_residue(221)
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_deprotonate_neutralizes_the_site(self, protein_6m03, caplog):
+        # Tests that deprotonate() removes the acidic proton of the
+        # named atom and rewrites the residue chemistry: the matched
+        # template variant, the residue formal charge, the sparse
+        # per-atom charge map, and the protein net charge. This is
+        # needed because acylation reacts the neutral amine, so a
+        # charged site must reach the neutral form before attach()
+        # bonds to it, and every consumer of the charge (to_rdkit,
+        # net_formal_charge) must agree. The test deprotonates LYS 12
+        # NZ of the bundled 6m03 asset, reads the state back, and calls
+        # the method a second time to check that a rerun warns and
+        # changes nothing.
+        import logging
+
+        protein = protein_6m03
+        residue = protein.get_residue(12, chain_id="A")
+        nz = protein.get_atom(12, "NZ", chain_id="A")
+        net_before = protein.net_formal_charge
+        n_hydrogens = sum(1 for p in nz.direct_bonds() if p.element.symbol == "H")
+
+        protein.deprotonate(12, "NZ", chain_id="A")
+
+        hydrogens = sum(1 for p in nz.direct_bonds() if p.element.symbol == "H")
+        assert hydrogens == n_hydrogens - 1
+        assert residue.formal_charge == 0
+        assert "NZ" not in residue.atom_formal_charges
+        assert residue.template.description.endswith("-HZ3")
+        assert protein.net_formal_charge == net_before - 1
+
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein.deprotonate(12, "NZ", chain_id="A")
+        assert "no acidic proton" in caplog.text
+        assert sum(1 for p in nz.direct_bonds() if p.element.symbol == "H") == hydrogens
+        assert protein.net_formal_charge == net_before - 1
+
     def test_attach(self, protein_6m03, acetone):
         # Tests that attach() substitutes one hydrogen on each side,
         # bonds the named atoms at the requested separation, adds the
