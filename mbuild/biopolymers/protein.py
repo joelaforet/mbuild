@@ -67,6 +67,13 @@ _ADVISORY_TER_MAX_C_N = 0.2
 #: changes the file that ``save`` writes.
 _BOXED_EXTENSIONS = frozenset((".gro", ".top"))
 
+#: Extensions whose GMSO writers need force-field parameters. Without
+#: them each writer fails inside GMSO, and no message names the cause:
+#: the top writer asserts "System not fully typed", the data writer
+#: raises an AttributeError that carries a 400-character bond repr, and
+#: the mcf writer raises a pydantic ValidationError.
+_TYPED_EXTENSIONS = frozenset((".data", ".mcf", ".top"))
+
 
 class Chain(Compound):
     """A protein chain. Children are ``Residue`` compounds.
@@ -2351,6 +2358,13 @@ def save(compound, filename, **kwargs):
         cell. A ``.gro`` or ``.top`` write without a box logs a
         warning, because the writer then takes the bounding box of the
         compound, and a packed system carries no box of its own.
+
+    Raises
+    ------
+    MBuildError
+        When a ``.data``, ``.mcf`` or ``.top`` write finds a topology
+        that carries no force-field parameters. Those three files hold
+        the parameters, so the topology must be typed first.
     """
     extension = os.path.splitext(str(filename))[-1].lower()
     if extension == ".pdb" and hasattr(compound, "save_pdb"):
@@ -2385,6 +2399,18 @@ def save(compound, filename, **kwargs):
             "box=mb.Box(...) to write the box you packed into."
         )
     topology = to_gmso(compound, box=box)
+    # is_typed() reports whether the topology carries any parameters at
+    # all, which is the state that mb.solvate and the loader leave. A
+    # partly typed topology still fails inside GMSO, and only the
+    # writer knows what it needs, so this check does not go further.
+    if extension in _TYPED_EXTENSIONS and not topology.is_typed():
+        raise MBuildError(
+            f"A {extension} file holds force-field parameters. The "
+            "topology of this compound carries none, so the writer "
+            "would fail inside GMSO. Build the topology with "
+            "mbuild.biopolymers.to_gmso(), apply a force field to it, "
+            "and save it from GMSO."
+        )
     if extension == ".gro":
         # The gro writer reads site.molecule before site.residue, and
         # molecule holds the chain label. Clear it so the writer takes

@@ -1403,6 +1403,22 @@ class TestProteinExports(BaseTest):
         protein.save(str(mol2), overwrite=True)
         assert len(parmed.load_file(str(mol2), structure=True).residues) == 306
 
+    def test_typed_only_extensions_name_the_missing_force_field(self):
+        # Tests that a .data, .mcf or .top write raises an MBuildError
+        # that names the extension when the topology carries no
+        # force-field parameters. This is needed because each of the
+        # three GMSO writers failed deep inside GMSO instead: the top
+        # writer asserted "System not fully typed", the data writer
+        # raised an AttributeError that carried a 400-character bond
+        # repr, and the mcf writer raised a pydantic ValidationError.
+        # The test saves an untyped protein to each of the three
+        # extensions.
+        protein = Protein(get_fn("8ciq.pdb"))
+        box = mb.Box([9.0, 9.0, 9.0])
+        for extension in (".data", ".mcf", ".top"):
+            with pytest.raises(MBuildError, match=f"A \\{extension} file"):
+                mb.biopolymers.save(protein, f"untyped{extension}", box=box)
+
     def test_module_save_routes_pdb_to_the_protein_writer(self):
         # Tests that the module-level save writes a Protein .pdb file
         # through save_pdb. This is needed because the module function
