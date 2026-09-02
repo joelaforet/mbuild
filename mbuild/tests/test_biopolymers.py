@@ -2338,3 +2338,39 @@ class TestFragments(BaseTest):
         two_sites = prepare_fragment("[*:1]CC[*:2]", "TWO")
         with pytest.raises(MBuildError, match="attachment points"):
             protein.attach(two_sites, resnum=90, atom_name="NZ", chain_id="A")
+
+    def test_long_fragment_resname_is_rejected(self, protein_6m03):
+        # Tests that a fragment residue name of more than three
+        # characters raises a ValueError that names the limit and the
+        # collision risk, at every entry point that takes such a name.
+        # This is needed because the name was cut to three characters
+        # with no message, so "OCTL" and "OCTYL" both became "OCT",
+        # which is the assigned CCD code for n-octane. A longer name
+        # therefore produced the collision it was picked to avoid. The
+        # test passes a four-character name to each entry point and
+        # reads back the message.
+        from mbuild.biopolymers import (
+            fragment_from_sdf,
+            fragment_from_smiles,
+            prepare_fragment,
+        )
+        from mbuild.lib.moieties import CH3
+
+        with pytest.raises(ValueError, match="OCTL") as error:
+            prepare_fragment(CH3(), "OCTL")
+        assert "the limit is 3" in str(error.value)
+        assert "CCD component code" in str(error.value)
+
+        with pytest.raises(ValueError, match="OCTL"):
+            fragment_from_smiles("*C(=O)CCCCCCC", "OCTL")
+        with pytest.raises(ValueError, match="OCTL"):
+            fragment_from_sdf("no_such_file.sdf", "OCTL")
+        with pytest.raises(ValueError, match="OCTL"):
+            protein_6m03.attach(
+                CH3(),
+                resnum=5,
+                atom_name="NZ",
+                chain_id="A",
+                fragment_resname="OCTL",
+                relax=False,
+            )

@@ -1816,7 +1816,9 @@ class Protein(Compound):
             fragment's residues.
         fragment_resname : str, optional
             Residue name given to a fragment that is not made of
-            Residue compounds and therefore gets wrapped.
+            Residue compounds and therefore gets wrapped. The name
+            takes three characters or fewer; a longer name raises a
+            ValueError.
         bond_order : int, optional, default=1
             Order of the new bond.
         separation : float, optional, default=0.15

@@ -22,6 +22,45 @@ logger = logging.getLogger(__name__)
 __all__ = ["fragment_from_sdf", "fragment_from_smiles", "prepare_fragment"]
 
 
+#: Longest residue name a caller may give a fragment. The wwPDB Format
+#: Guide v3.30, section 9 (Coordinate Section, ATOM), declares the
+#: residue name in columns 18-20 and column 21 blank. The reader of
+#: this recipe also accepts a four-character name, because a membrane
+#: builder writes lipid names that fill column 21. A fragment name is
+#: generated here, so it stays inside the three declared columns, and
+#: every PDB reader accepts it.
+_MAX_RESNAME_LENGTH = 3
+
+
+def _check_resname(resname):
+    """Raise if a caller-supplied fragment residue name is too long.
+
+    A longer name was cut to three characters without a message. Two
+    different names then produced the same residue name, which is the
+    collision that a longer name was picked to avoid.
+
+    Parameters
+    ----------
+    resname : str or None
+        The name the caller gave. None and the empty string pass, as
+        the caller asked for a generated name.
+
+    Raises
+    ------
+    ValueError
+        If the name is longer than three characters.
+    """
+    if resname and len(resname) > _MAX_RESNAME_LENGTH:
+        raise ValueError(
+            f"Fragment residue name {resname!r} is {len(resname)} "
+            f"characters; the limit is {_MAX_RESNAME_LENGTH}. The wwPDB "
+            "Format Guide declares the residue name in columns 18-20, so "
+            "a longer name does not fit. Pick a name of three characters "
+            "or fewer that does not collide with an assigned CCD "
+            "component code."
+        )
+
+
 def _wrap_in_residue(compound, fragment_resname):
     """Wrap a detached Compound into a single flat Residue.
 
@@ -41,14 +80,10 @@ def _wrap_in_residue(compound, fragment_resname):
     whose order is 0.0. The loop below therefore reads ``bond_order``
     from each bond and writes the same value back.
     """
-    # The residue name is cut to three characters. The wwPDB Format
-    # Guide v3.30, section 9 (Coordinate Section, ATOM), declares the
-    # residue name in columns 18-20 and column 21 blank. The reader of
-    # this recipe also accepts a four-character name, because a
-    # membrane builder writes lipid names that fill column 21. A
-    # fragment name is generated here, so it stays inside the three
-    # declared columns, and every PDB reader accepts it.
-    resname = (fragment_resname or compound.name or "LIG")[:3].upper()
+    # A caller-supplied name is checked by _check_resname, so only a
+    # generated fallback name can be too long here. The compound name
+    # is cut to the limit; see _MAX_RESNAME_LENGTH for the reason.
+    resname = (fragment_resname or compound.name or "LIG")[:_MAX_RESNAME_LENGTH].upper()
     if not resname.isalnum():
         resname = "LIG"
     residue = Residue(resname=resname, resnum=1, hetatm=True)
@@ -120,13 +155,20 @@ def fragment_from_smiles(smiles, resname):
     smiles : str
         The fragment as a SMILES string.
     resname : str
-        The residue name (up to 3 characters, e.g. "MYR").
+        The residue name, of three characters or fewer (e.g. "MYR").
 
     Returns
     -------
     Residue
         A detached residue with unique, stable atom names.
+
+    Raises
+    ------
+    ValueError
+        If ``resname`` is longer than three characters.
     """
+    _check_resname(resname)
+
     from rdkit import Chem
 
     from mbuild.conversion import from_rdkit
@@ -207,7 +249,13 @@ def _as_residues(compound, resname):
         input is replaced, so callers must use the returned object.
     residues : list of Residue
         The residues of the returned compound.
+
+    Raises
+    ------
+    ValueError
+        If ``resname`` is longer than three characters.
     """
+    _check_resname(resname)
     if isinstance(compound, Residue):
         # successors() does not yield the compound itself, so a Residue
         # input needs its own arm.
@@ -251,9 +299,9 @@ def prepare_fragment(compound, resname):
         The fragment, or a SMILES string for it. A Compound is cloned;
         the input is not changed.
     resname : str
-        The residue name (up to 3 characters, e.g. "MYR"). Applied only
-        when the fragment is wrapped or is itself a Residue; existing
-        Residue children keep their names.
+        The residue name, of three characters or fewer (e.g. "MYR").
+        Applied only when the fragment is wrapped or is itself a
+        Residue; existing Residue children keep their names.
 
     Returns
     -------
@@ -261,15 +309,21 @@ def prepare_fragment(compound, resname):
         A detached fragment with unique, stable atom names. A Compound
         with Residue children is returned as the Compound that holds
         them; other inputs return a Residue.
+
+    Raises
+    ------
+    ValueError
+        If ``resname`` is longer than three characters.
     """
+    _check_resname(resname)
     if isinstance(compound, str):
         return fragment_from_smiles(compound, resname)
     copied = clone(compound)
     if isinstance(copied, Residue):
         # A Residue input takes the requested name. Residue children of
-        # a Compound keep the names they came with.
-        # Three characters, for the reason given in _wrap_in_residue.
-        copied.name = (resname or copied.name)[:3].upper()
+        # a Compound keep the names they came with. Only the fallback
+        # name can be too long; see _MAX_RESNAME_LENGTH.
+        copied.name = (resname or copied.name)[:_MAX_RESNAME_LENGTH].upper()
     copied, residues = _as_residues(copied, resname)
     for residue in residues:
         if not residue.link_atoms:
@@ -297,15 +351,21 @@ def fragment_from_sdf(filename, resname):
         Path of an SDF file holding exactly one molecule with explicit
         hydrogens and coordinates.
     resname : str
-        The residue name (up to 3 characters).
+        The residue name, of three characters or fewer.
 
     Returns
     -------
     Residue
         A detached residue ready to pass to ``Protein.attach``.
+
+    Raises
+    ------
+    ValueError
+        If ``resname`` is longer than three characters.
     """
     from mbuild.utils.io import import_
 
+    _check_resname(resname)
     import_("rdkit")
     from rdkit import Chem
 
@@ -329,8 +389,10 @@ def fragment_from_sdf(filename, resname):
         )
     orders = {bond_type: order for order, bond_type in _rdkit_bond_orders().items()}
     conformer = molecule.GetConformer()
-    # Three characters, for the reason given in _wrap_in_residue.
-    residue = Residue(resname=(resname or "LIG")[:3].upper(), hetatm=True)
+    # Only the fallback name can be too long; see _MAX_RESNAME_LENGTH.
+    residue = Residue(
+        resname=(resname or "LIG")[:_MAX_RESNAME_LENGTH].upper(), hetatm=True
+    )
     particles = []
     for atom in molecule.GetAtoms():
         position = conformer.GetAtomPosition(atom.GetIdx())
