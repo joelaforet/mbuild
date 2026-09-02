@@ -40,7 +40,7 @@ from mbuild.utils.io import import_
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Protein", "Chain", "Residue"]
+__all__ = ["Protein", "Chain", "Residue", "residue_labels"]
 
 
 class Chain(Compound):
@@ -914,10 +914,13 @@ class Protein(Compound):
         The generic converter numbers residues by counting the
         occurrences of each residue name, so the numbers restart at 0
         per name and do not match the PDB file. This override rewrites
-        every site's residue with the hierarchy's residue name and
-        real PDB number, so GMSO's residue metadata matches the
-        structure. Chains stay
-        available through each site's molecule/group labels.
+        every site's residue with the label that ``residue_labels``
+        gives, so GMSO's residue metadata matches the structure. The
+        label holds the residue name and the PDB number, except that a
+        residue whose ``(name, number)`` pair repeats in this protein
+        gets a shifted number, because GMSO merges residues that share
+        a name and a number. Chains stay available through each site's
+        molecule/group labels.
 
         Not carried over, because GMSO's data model has no slot for
         them: formal charges (a GMSO site charge is a partial charge,
@@ -938,7 +941,7 @@ class Protein(Compound):
         from gmso.abc.abstract_site import Residue as GMSOResidue
 
         topology = super().to_gmso(**kwargs)
-        particle_residue = self._particle_residues()
+        labels = residue_labels(self)
         particles = list(self.particles())
         sites = list(topology.sites)
         # The guard compares site count, per-site names, and per-site
@@ -956,10 +959,9 @@ class Protein(Compound):
                 "protein's particles; cannot restore residue identity."
             )
         for site, particle in zip(sites, particles):
-            entry = particle_residue.get(particle)
-            if entry is not None:
-                _, residue = entry
-                site.residue = GMSOResidue(name=residue.name, number=residue.resnum)
+            label = labels.get(particle)
+            if label is not None:
+                site.residue = GMSOResidue(name=label[0], number=label[1])
         return topology
 
     def to_trajectory(self, include_ports=False, chains=None, residues=None, box=None):
@@ -1902,3 +1904,66 @@ class Protein(Compound):
             }
             for bond in self.cross_bonds
         ]
+
+
+def residue_labels(compound):
+    """Return a map of particle -> ``(residue name, residue number)``.
+
+    The number in the label is unique for every ``Residue`` compound
+    below ``compound``. GMSO stores a site residue by value, so two
+    residues that share a name and a number are one residue to GMSO, and
+    every writer that numbers residues from that value merges them. The
+    four-chain protein in ``1p3q_noter.pdb`` has 228 residues and writes
+    151 residue numbers to a ``.gro`` file for this reason.
+
+    The first residue with a given ``(name, resnum)`` pair keeps its PDB
+    number. Each later residue with the same pair moves into an offset
+    block: its number grows by the span of the residue numbers of
+    ``compound`` once for every earlier repeat. The block is as wide as
+    the span, so a shifted number cannot equal the number of any other
+    residue with the same name. The walk order sets the block index, so
+    two calls on the same compound return the same labels.
+
+    Parameters
+    ----------
+    compound : mbuild.Compound
+        The compound to label. A particle that sits outside a
+        ``Residue`` gets no entry.
+
+    Returns
+    -------
+    dict
+        Map of particle -> ``(name, number)``.
+    """
+    particle_residue = {}
+    order = []
+    seen = set()
+    for particle in compound.particles():
+        residue = next(
+            (
+                ancestor
+                for ancestor in particle.ancestors()
+                if isinstance(ancestor, Residue)
+            ),
+            None,
+        )
+        if residue is None:
+            continue
+        particle_residue[particle] = residue
+        if id(residue) not in seen:
+            seen.add(id(residue))
+            order.append(residue)
+    if not order:
+        return {}
+    numbers = [residue.resnum for residue in order]
+    span = max(numbers) - min(numbers) + 1
+    repeats = {}
+    labels = {}
+    for residue in order:
+        key = (residue.name, residue.resnum)
+        block = repeats.get(key, 0)
+        repeats[key] = block + 1
+        labels[id(residue)] = (residue.name, residue.resnum + block * span)
+    return {
+        particle: labels[id(residue)] for particle, residue in particle_residue.items()
+    }

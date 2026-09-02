@@ -1275,6 +1275,27 @@ class TestProteinExports(BaseTest):
         assert "CH3" in {neighbor.name for neighbor in nz.bonded_atoms}
 
 
+class TestProteinSolvation(BaseTest):
+    def test_gro_residue_ids_unique_across_chains(self):
+        # Tests that a .gro file written from a four-chain protein
+        # carries one residue id for every residue. This is needed
+        # because GMSO stores a site residue by value, so residues
+        # that repeat a (name, number) pair across chains became one
+        # GMSO residue and the file described 151 residues instead of
+        # 228. The test loads the four-chain 1p3q structure, saves a
+        # .gro file, and counts the distinct residue columns of the
+        # atom lines.
+        protein = Protein(get_fn("1p3q_noter.pdb"))
+        out = Path("1p3q.gro")
+        protein.save(str(out))
+        atom_lines = out.read_text().splitlines()[2 : 2 + protein.n_particles]
+        assert (
+            len({line[:10] for line in atom_lines})
+            == len(list(protein.residues()))
+            == 228
+        )
+
+
 class TestFragments(BaseTest):
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_prepare_fragment(self, protein_6m03, acetone):
