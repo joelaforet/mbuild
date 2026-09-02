@@ -472,6 +472,15 @@ def _matches_agree(matches, group):
     C-terminal template when OXT itself is absent); they must agree on
     the charges of the atoms present, the bonds among them, and the
     expected links. Returns the first match; raises on disagreement.
+
+    The reference is the first match, and the match order is the
+    variant order of the CCDLibrary, which is the order in which
+    ``_protonation_variants`` generates the variants. That order does
+    not depend on the file, so the same residue always returns the same
+    match. A disagreement that reaches this point raises instead of
+    picking a variant, because the two variants give the atoms
+    different chemistry and the loader must never guess which one the
+    file means.
     """
     reference = matches[0]
 

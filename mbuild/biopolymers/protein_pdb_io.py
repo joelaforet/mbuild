@@ -167,7 +167,12 @@ def write_pdb(protein, filename, overwrite=False):
         # Residues are written sorted by number: template readers form
         # polymer links only between record-adjacent residues, so
         # backbone order in the file must follow residue numbers,
-        # not attachment order.
+        # not attachment order. Adjacency is a property of the record
+        # order alone. The wwPDB Format Guide v3.30, section 9
+        # (Coordinate Section, ATOM/HETATM/TER), states that the
+        # records of one chain follow each other in sequence order and
+        # that a TER record closes the chain, so a reader takes the
+        # polymer sequence from the record order and the TER records.
         for index, residue in enumerate(
             sorted(
                 protein.residues(chain.chain_id),
@@ -244,6 +249,13 @@ def _pdb_atom_line(serial, particle, residue, chain_id):
 
 def _conect_lines(protein, particle_serial, particle_residue, residue_order):
     """Yield CONECT lines, following the RCSB convention.
+
+    The wwPDB Format Guide v3.30, section 10 (Connectivity Section,
+    CONECT), states that CONECT records give the connectivity of
+    HETATM residues and of bonds that the standard residue chemistry
+    does not describe, such as disulfide bridges. It also states that
+    a CONECT record holds one atom serial plus up to four bonded
+    serials, so a wider set of partners needs more than one record.
 
     Every bond that touches a HETATM residue is listed, because PDB
     viewers (e.g. PyMOL) treat CONECT records as the complete bond
