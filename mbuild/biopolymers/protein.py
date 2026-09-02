@@ -1,10 +1,10 @@
 """Protein recipe: load protonated protein PDB files by template matching.
 
 The loader matches residues against chemical templates, in the same
-way modern residue-template PDB readers do, so a protein loaded (and
-later modified) with mBuild round-trips through such tools. (The
-matching model is verified compatible with the OpenFF Pablo reader by
-a parity test that runs wherever openff-pablo is installed.)
+way modern residue-template PDB readers do. A protein that mBuild
+loads, and later modifies, therefore round-trips through such tools. A
+parity test verifies the matching model against the OpenFF Pablo
+reader. The test runs wherever openff-pablo is installed.
 
 - Residues are matched against CCD templates **by atom name**; chemistry
   (bonds, bond orders, formal charges) comes from the matched template,
@@ -198,9 +198,8 @@ def _rdkit_bond_orders():
     keeps the two directions in agreement.
 
     The table is stricter than the map in ``mbuild.conversion`` by
-    intent: that map turns UNSPECIFIED into the order 0.0, and this
-    recipe needs a real bond order on every bond, so an absent key must
-    fail.
+    intent. That map turns UNSPECIFIED into the order 0.0. This recipe
+    needs a real bond order on every bond, so an absent key must fail.
 
     Returns
     -------
@@ -416,9 +415,9 @@ def _assign_records(group, variant):
     but not canonical. Digit-first names such as ``2HB`` are PDB format
     version 2 names, which Amber-style tools still write, and they fail
     the first reason. Glycine written with the version 2 alpha-hydrogen
-    names ``HA1``/``HA2`` fails the second, because the CCD gives the
-    version 3 atom ``HA2`` the alternative name ``HA1`` and the atom
-    ``HA3`` the alternative name ``HA2``. After either reason, a second
+    names ``HA1``/``HA2`` fails the second reason. The CCD gives the
+    version 3 atom ``HA2`` the alternative name ``HA1``, and it gives
+    the atom ``HA3`` the alternative name ``HA2``. After either reason, a second
     pass runs ``_assign_records_bipartite`` over the full candidate
     list of every record.
 
@@ -634,12 +633,13 @@ def _filter_crosslink_candidates(groups, all_candidates, conects):
     deprotonated thiolate variants (``expects_crosslink=False``). The
     two disagree on the SG formal charge, so ``_matches_agree`` would
     reject every disulfide-containing file. The CONECT records decide
-    between them: a candidate whose variant carries a crosslink atom is
-    kept only when its crosslink expectation equals the presence of an
-    SS CONECT to a crosslink-capable partner residue. A partner is
-    crosslink-capable when any of its own pre-filter candidates expects
-    the crosslink; capability is computed before any rejection, so two
-    bridged residues validate each other. Candidates whose variant has
+    between them. A candidate whose variant carries a crosslink atom
+    must agree with the file. Its crosslink expectation must equal the
+    presence of an SS CONECT to a crosslink-capable partner residue. A
+    partner is crosslink-capable when any of its own pre-filter
+    candidates expects the crosslink. Capability is computed before any
+    rejection, so two bridged residues validate each other. Candidates
+    whose variant has
     no crosslink atom are kept unchanged. This mirrors openff-pablo's
     ``filter_on_crosslinks`` rule.
 
@@ -721,19 +721,19 @@ def _filter_crosslink_candidates(groups, all_candidates, conects):
 def _matches_agree(matches, group):
     """Verify that all valid matches assign the same chemistry.
 
-    Matches may differ in absent atoms (e.g. a neutral vs deprotonated
-    C-terminal template when OXT itself is absent); they must agree on
-    the charges of the atoms present, the bonds among them, and the
-    expected links. Returns the first match; raises on disagreement.
+    Matches may differ in absent atoms. A neutral and a deprotonated
+    C-terminal template differ that way when OXT itself is absent. The
+    matches must agree on the charges of the atoms present, on the bonds
+    among them, and on the expected links. This function returns the
+    first match, and it raises on disagreement.
 
     The reference is the first match, and the match order is the
     variant order of the CCDLibrary, which is the order in which
     ``_protonation_variants`` generates the variants. That order does
     not depend on the file, so the same residue always returns the same
     match. A disagreement that reaches this point raises instead of
-    picking a variant, because the two variants give the atoms
-    different chemistry and the loader must never guess which one the
-    file means.
+    picking a variant. The two variants give the atoms different
+    chemistry, and the loader must never guess which one the file means.
     """
     reference = matches[0]
 
@@ -1117,17 +1117,17 @@ class Protein(Compound):
     def to_parmed(self, **kwargs):
         """Create a ParmEd structure with residues taken from hierarchy.
 
-        ``conversion.save`` passes ``residues=None`` explicitly, so the
-        default must fill in whenever the value is None, not only when
-        the key is absent — otherwise every ParmEd-routed format (mol2,
-        psf, ...) collapses the protein into one residue.
+        ``conversion.save`` passes ``residues=None`` explicitly. The
+        default must therefore fill in whenever the value is None, not
+        only when the key is absent. Otherwise every ParmEd-routed
+        format (mol2, psf, ...) collapses the protein into one residue.
 
         Raises MBuildError when a residue name equals an atom name
         present in the protein. The generic converter matches each
         atom's own name against the residue list before it checks the
-        atom's ancestors, so such a collision (for example a calcium
-        ion residue ``CA`` next to alpha-carbon atoms ``CA``) would
-        silently split those atoms into spurious residues. Rename the
+        atom's ancestors. Such a collision then splits those atoms into
+        spurious residues, and nothing says so. A calcium ion residue
+        ``CA`` next to alpha-carbon atoms ``CA`` is one example. Rename the
         residue before this export, or write a PDB with ``save_pdb``.
 
         Parameters
@@ -1220,9 +1220,10 @@ class Protein(Compound):
         """Create a sanitized RDKit molecule of the (modified) protein.
 
         Unlike the generic ``Compound.to_rdkit``, this export carries
-        the chemistry the recipe knows: formal charges from the matched
-        templates and fragment records, bond orders, explicit hydrogens,
-        one conformer, and PDB residue info on every atom. The result
+        the chemistry the recipe knows. It writes the formal charges of
+        the matched templates and the fragment records, the bond orders,
+        the explicit hydrogens, one conformer, and PDB residue info on
+        every atom. The result
         sanitizes, so it is directly usable by RDKit and by tools that
         consume RDKit molecules.
 
@@ -1598,26 +1599,27 @@ class Protein(Compound):
     ):
         """Bond a fragment Compound onto a residue of this protein.
 
-        ``bond_order`` hydrogens leave each side: hydrogens bonded to
-        the named protein atom, and hydrogens bonded to the named
-        fragment atom (one per unit of bond order, so a double bond
-        removes two from each atom).
+        ``bond_order`` hydrogens leave each side. They are hydrogens
+        bonded to the named protein atom, and hydrogens bonded to the
+        named fragment atom. One hydrogen leaves per unit of bond order,
+        so a double bond removes two from each atom.
+
         Ports along the removed-hydrogen vectors align the fragment
-        (``force_overlap``), a bond with ``bond_order`` forms between
-        the two named atoms, and the new inter-residue bond is recorded
-        in ``cross_bonds`` together with the removed (leaving) hydrogen
-        names — everything a downstream tool needs to describe the
-        modification (see ``bond_records``).
+        (``force_overlap``). A bond with ``bond_order`` then forms
+        between the two named atoms. The new inter-residue bond is
+        recorded in ``cross_bonds``, together with the removed (leaving)
+        hydrogen names. The record holds everything a downstream tool
+        needs to describe the modification (see ``bond_records``).
 
         The fragment is cloned; the original is not changed. Fragment
-        residues keep their identity: a fragment whose children are
-        ``Residue`` compounds (a single PTM residue, a linear polymer,
-        or a branched glycan) is added residue-per-residue metadata
-        intact; any other Compound is wrapped into one new ``Residue``.
-        To build branched, multiply-linked structures, call ``attach``
-        repeatedly — an attached residue is addressable like any other,
-        so a later call can target it. Every call records its bond, so
-        residues may carry any number of links inside mBuild.
+        residues keep their identity. A fragment whose children are
+        ``Residue`` compounds is added residue-per-residue, with the
+        metadata intact: a single PTM residue, a linear polymer, or a
+        branched glycan. Any other Compound is wrapped into one new
+        ``Residue``. To build branched, multiply-linked structures, call
+        ``attach`` repeatedly. An attached residue is addressable like
+        any other, so a later call can target it. Every call records its
+        bond, so residues may carry any number of links inside mBuild.
 
         Parameters
         ----------
@@ -1906,9 +1908,9 @@ class Protein(Compound):
         The port points along the sum of the removed-hydrogen vectors,
         or along the first hydrogen when the sum is degenerate.
         ``Compound.remove`` leaves one auto-generated port on the atom
-        per severed bond; those are pruned (the same cleanup
-        ``Polymer.add_monomer`` does) so the returned Port is the only
-        open port at the atom.
+        per severed bond. Those ports are removed here, the same cleanup
+        that ``Polymer.add_monomer`` does, so the returned Port is the
+        only open port at the atom.
 
         The removed names are written to the ``_leaving_atoms`` ledger
         under the anchor atom, which is where ``record_bond`` reads its
@@ -1957,8 +1959,9 @@ class Protein(Compound):
 
         Port alignment is rigid; a bulky fragment can land inside the
         protein. The check compares every added atom against every other
-        atom (excluding the new bond pair) and warns below ``cutoff`` nm,
-        so the user knows to relax the structure before simulating.
+        atom, and it leaves out the new bond pair. It warns below
+        ``cutoff`` nm, so the user knows to relax the structure before
+        simulating.
         """
         from scipy.spatial import cKDTree
 
@@ -2158,16 +2161,20 @@ class Protein(Compound):
 
         mBuild's generic PDB writer (ParmEd via ``save``) cannot express
         residue numbers, chain identifiers, HETATM records, or a
-        selective CONECT policy, so this recipe has its own writer. The
-        conventions follow the RCSB standard and residue-template
-        readers: ``ATOM`` for residues loaded
-        from ATOM records, ``HETATM`` for attached fragments and
-        heteroatoms, ``TER`` after every chain, ``CRYST1`` when a box is
-        set, and ``CONECT`` records **only** for bonds between
-        non-adjacent residues (disulfides, attached fragments, branch
-        links) — peptide bonds are implied by residue adjacency, and a
-        CONECT that the residue templates cannot explain makes strict
-        loaders fail.
+        selective CONECT policy. This recipe therefore has its own
+        writer. Its conventions follow the RCSB standard and the
+        residue-template readers:
+
+        - ``ATOM`` for residues loaded from ATOM records.
+        - ``HETATM`` for attached fragments and heteroatoms.
+        - ``TER`` after every chain.
+        - ``CRYST1`` when a box is set.
+        - ``CONECT`` records **only** for bonds between non-adjacent
+          residues: disulfides, attached fragments, and branch links.
+
+        A peptide bond is implied by residue adjacency, so it needs no
+        CONECT record. A CONECT that the residue templates cannot
+        explain makes a strict loader fail.
 
         Parameters
         ----------
@@ -2251,19 +2258,23 @@ def residue_labels(compound):
     """Return a map of particle -> ``(residue name, residue number)``.
 
     The number in the label is unique for every ``Residue`` compound
-    below ``compound``. GMSO stores a site residue by value, so two
-    residues that share a name and a number are one residue to GMSO, and
-    every writer that numbers residues from that value merges them. The
-    four-chain protein in ``1p3q_noter.pdb`` has 228 residues and writes
-    151 residue numbers to a ``.gro`` file for this reason.
+    below ``compound``. GMSO stores a site residue by value. Two
+    residues that share a name and a number are therefore one residue to
+    GMSO, and every writer that numbers residues from that value merges
+    them. The four-chain protein in ``1p3q_noter.pdb`` has 228 residues
+    and writes 151 residue numbers to a ``.gro`` file for this reason.
 
     The first residue with a given ``(name, resnum)`` pair keeps its PDB
     number. Each later residue with the same pair moves into an offset
-    block: its number grows by the span of the residue numbers of
-    ``compound`` once for every earlier repeat. The block is as wide as
+    block. Its number grows by the span of the residue numbers of
+    ``compound``, once for every earlier repeat. The block is as wide as
     the span, so a shifted number cannot equal the number of any other
     residue with the same name. The walk order sets the block index, so
     two calls on the same compound return the same labels.
+
+    The shifted numbers therefore grow with the number of copies. The
+    residue field of a ``.gro`` file holds five digits, so a system of
+    many copies of one protein can overflow that field.
 
     Parameters
     ----------
@@ -2306,10 +2317,10 @@ def to_gmso(compound, box=None, **kwargs):
     of each residue name, so the numbers restart at 0 per name and do
     not match the PDB file. This function rewrites every site's residue
     with the label that ``residue_labels`` gives. The label holds the
-    residue name and the PDB number, except that a residue whose
-    ``(name, number)`` pair repeats gets a shifted number, because GMSO
-    merges residues that share a name and a number. Chains stay
-    available through each site's molecule/group labels.
+    residue name and the PDB number. A residue whose ``(name, number)``
+    pair repeats gets a shifted number instead, because GMSO merges
+    residues that share a name and a number. Chains stay available
+    through each site's molecule/group labels.
 
     The function takes a compound instead of a ``Protein`` because
     ``mb.solvate`` and ``mb.fill_box`` return a plain ``Compound`` that
@@ -2317,10 +2328,10 @@ def to_gmso(compound, box=None, **kwargs):
     ``Residue`` (solvent, ions) keep the residue that the generic
     converter gave them.
 
-    Not carried over, because GMSO's data model has no slot for them:
-    formal charges (a GMSO site charge is a partial charge, so it stays
-    unset for a typing engine to fill), bond orders, insertion codes,
-    and the HETATM flag.
+    Four kinds of data are not carried over, because GMSO's data model
+    has no slot for them: formal charges, bond orders, insertion codes,
+    and the HETATM flag. A GMSO site charge is a partial charge, so it
+    stays unset for a typing engine to fill.
 
     Parameters
     ----------
