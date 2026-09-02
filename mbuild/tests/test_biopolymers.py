@@ -415,12 +415,13 @@ class TestCCDLibrary(BaseTest):
         # Tests that a component whose definition carries a negatively
         # charged nitrogen keeps at least its base variant. This is
         # needed because the protonation filter dropped every variant
-        # with a negative nitrogen, which is correct for a histidine
-        # ring but deletes the pyrrole nitrogens of a heme. The whole
-        # template then disappeared, and heme proteins failed to load.
-        # The test writes a minimal component with a negative nitrogen
-        # into the user cache directory, loads it, and checks that the
-        # variant keeps the charge.
+        # with a negative nitrogen. That rule is correct for a
+        # histidine ring. It also deletes the negative pyrrole
+        # nitrogens of a heme. The whole template then disappeared, and
+        # heme proteins failed to load. The test writes a minimal
+        # component with a negative nitrogen into the user cache
+        # directory, loads it, and checks that the variant keeps the
+        # charge.
         from mbuild.biopolymers import ccd
 
         text = "\n".join(
@@ -451,9 +452,9 @@ class TestCCDLibrary(BaseTest):
     def test_empty_variant_list_names_the_residue(self, tmp_path, monkeypatch):
         # Tests that a residue left with no template variant raises an
         # MBuildError that names the residue. This is needed because
-        # the loader indexes the first variant, so an empty list raised
-        # a bare IndexError that named neither the residue nor the
-        # cause. The test points the user cache at a tmp copy of the
+        # the loader indexes the first variant. An empty list then
+        # raised a bare IndexError, which named neither the residue nor
+        # the cause. The test points the user cache at a tmp copy of the
         # bundled ALA definition and replaces the variant generator
         # with one that returns nothing.
         from mbuild.biopolymers import ccd
