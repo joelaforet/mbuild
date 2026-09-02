@@ -413,6 +413,25 @@ class TestProtein(BaseTest):
         reloaded = Protein("1p3q_roundtrip.pdb")
         assert [chain.chain_id for chain in reloaded.chains] == chain_ids
 
+    def test_extra_ter_inside_one_chain(self, caplog):
+        # Tests that a TER record between two consecutive residues of
+        # one chain keeps the peptide bond and logs a warning. This is
+        # needed because a tool that writes a PDB file from a topology
+        # puts a TER at the end of each topology chain, so a capped
+        # structure carries a TER before its C-terminal cap; treating
+        # every TER as a chain break rejected such a file, because the
+        # SER before the TER has no OXT atom and the NME after it has
+        # no H2 atom. The test loads such a file, checks the bond
+        # between the SER C atom and the NME N atom, and reads the log.
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein = Protein(get_fn("capped_ser_extrater.pdb"))
+        carbon = protein.get_atom(178, "C", chain_id="A")
+        nitrogen = protein.get_atom(179, "N", chain_id="A")
+        assert protein.bond_graph.has_edge(carbon, nitrogen)
+        assert "SER A:178" in caplog.text and "NME A:179" in caplog.text
+
     def test_get_atom(self, protein_6m03):
         # Tests that residues and atoms are addressable by residue number
         # and atom name. This is needed because functionalization

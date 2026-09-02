@@ -14,9 +14,14 @@ a parity test that runs wherever openff-pablo is installed.)
   missing ``OXT``/``HXT`` means a peptide bond to the following residue,
   and a missing ``HG`` on cysteine means a disulfide, which additionally
   requires a ``CONECT`` record between the two ``SG`` atoms.
-- ``TER`` records are hard chain boundaries. Loading is strict: unknown
-  residues, unmatched atom names, and unexplained missing atoms raise
-  errors that name the residue and suggest a fix.
+- A ``TER`` record is a chain boundary when the chain identifier
+  changes or the residue numbering is not consecutive. A ``TER``
+  between two consecutive residues of one chain is advisory: the
+  loader keeps the peptide bond and logs a warning, because tools that
+  write a PDB file from a topology put a ``TER`` at the end of each
+  topology chain. Loading is strict: unknown residues, unmatched atom
+  names, and unexplained missing atoms raise errors that name the
+  residue and suggest a fix.
 
 mBuild's generic PDB path (mdtraj via ``mb.load``) is not reused here
 because it hides ``TER`` records and atom serials, both of which this
@@ -208,6 +213,47 @@ def _atom_in_residue(residue, atom_name):
     go stale after ``remove()``.
     """
     return next(residue.particles_by_name(atom_name), None)
+
+
+def _ter_is_advisory(earlier, later):
+    """Report whether a TER between two residues is advisory only.
+
+    The wwPDB Format Guide v3.30, section 9 (Coordinate Section, TER),
+    states that the TER record ends the chain of ATOM and HETATM
+    records that comes before it, so a strict reader ends the polymer
+    at every TER.
+
+    A preparation tool that writes the file from a topology puts a TER
+    at the end of each topology chain, not at the end of each PDB
+    chain. OpenMM's ``PDBFile.writeModel`` does this: it prints a TER
+    after the last residue of every ``Topology`` chain, and with
+    ``keepIds=True`` it takes the chain identifier from the chain
+    object, so two topology chains can carry one identifier. A cap
+    (ACE, NME) or a ligand that the topology holds in its own chain
+    then follows a TER inside one PDB chain. Every writer that goes
+    through OpenMM inherits this behavior.
+
+    A TER is therefore taken as a hard chain break only when the chain
+    identifier changes or the residue numbering is not consecutive. In
+    every other case the peptide bond is kept and the loader logs a
+    warning, because the atom records still describe one polymer: the
+    residue before the TER is missing its OXT and HXT atoms and the
+    residue after it is missing its H2 atom, which only a peptide bond
+    explains.
+
+    Parameters
+    ----------
+    earlier : _PdbResidue
+        The residue that carries the TER record.
+    later : _PdbResidue
+        The residue that follows it in the file.
+
+    Returns
+    -------
+    bool
+        True when the TER does not separate two chains.
+    """
+    return earlier.chain_id == later.chain_id and later.resnum == earlier.resnum + 1
 
 
 def _assign_records(group, variant):
@@ -647,17 +693,30 @@ class Protein(Compound):
             peptide_capable.append(variants[0].linking == "peptide")
 
         def linked(i, j):
-            return (
-                peptide_capable[i]
-                and peptide_capable[j]
-                and groups[i].chain_id == groups[j].chain_id
-                and not groups[i].ter_after
-            )
+            if not (peptide_capable[i] and peptide_capable[j]):
+                return False
+            if groups[i].chain_id != groups[j].chain_id:
+                return False
+            if not groups[i].ter_after:
+                return True
+            return _ter_is_advisory(groups[i], groups[j])
+
+        # The list is built once, so each advisory TER is reported once.
+        links = [linked(i, i + 1) for i in range(len(groups) - 1)]
+        for i, is_linked in enumerate(links):
+            if is_linked and groups[i].ter_after:
+                logger.warning(
+                    f"A TER record separates {groups[i].label} from "
+                    f"{groups[i + 1].label}, which are consecutive "
+                    "residues of one chain. The peptide bond between "
+                    "them is kept; see the PDB file if the two residues "
+                    "should be separate chains."
+                )
 
         all_candidates = []
         for i, group in enumerate(groups):
-            prior_possible = i > 0 and linked(i - 1, i)
-            posterior_possible = i < len(groups) - 1 and linked(i, i + 1)
+            prior_possible = i > 0 and links[i - 1]
+            posterior_possible = i < len(groups) - 1 and links[i]
             all_candidates.append(
                 _match_residue(
                     group,
