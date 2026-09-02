@@ -15,13 +15,14 @@ a parity test that runs wherever openff-pablo is installed.)
   and a missing ``HG`` on cysteine means a disulfide, which additionally
   requires a ``CONECT`` record between the two ``SG`` atoms.
 - A ``TER`` record is a chain boundary when the chain identifier
-  changes or the residue numbering is not consecutive. A ``TER``
-  between two consecutive residues of one chain is advisory: the
-  loader keeps the peptide bond and logs a warning, because tools that
-  write a PDB file from a topology put a ``TER`` at the end of each
-  topology chain. Loading is strict: unknown residues, unmatched atom
-  names, and unexplained missing atoms raise errors that name the
-  residue and suggest a fix.
+  changes. It is a boundary as well when the residue numbering does
+  not increase across it. It is also a boundary when the two residues
+  are too far apart for a peptide bond. Every other ``TER`` is
+  advisory: the loader keeps the peptide bond and logs a warning.
+  Tools that write a PDB file from a topology put a ``TER`` at the end
+  of each topology chain, which is the reason for this rule. Loading
+  is strict: unknown residues, unmatched atom names, and unexplained
+  missing atoms raise errors that name the residue and suggest a fix.
 
 mBuild's generic PDB path (mdtraj via ``mb.load``) is not reused here
 because it hides ``TER`` records and atom serials, both of which this
@@ -54,6 +55,13 @@ __all__ = ["Protein", "Chain", "Residue", "residue_labels", "save", "to_gmso"]
 
 #: File extensions that ``conversion.save`` routes through GMSO.
 _GMSO_EXTENSIONS = frozenset((".gro", ".gsd", ".data", ".xyz", ".mcf", ".top"))
+
+#: Longest C to N distance, in nm, that the loader accepts as a peptide
+#: bond across an advisory TER record. A peptide C-N bond is about
+#: 0.133 nm long. The limit adds a margin of about 50 percent for a
+#: strained or low-resolution structure. It still rejects two residues
+#: that only share a chain identifier and increasing residue numbers.
+_ADVISORY_TER_MAX_C_N = 0.2
 
 
 class Chain(Compound):
@@ -215,6 +223,26 @@ def _atom_in_residue(residue, atom_name):
     return next(residue.particles_by_name(atom_name), None)
 
 
+def _record_pos(group, atom_name):
+    """Return the position of a named PDB record of one residue, or None.
+
+    Parameters
+    ----------
+    group : _PdbResidue
+        The parsed residue whose records are searched.
+    atom_name : str
+        The record name to find, as the file writes it.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        The position in nm, or None when no record carries the name.
+    """
+    return next(
+        (record.pos for record in group.records if record.name == atom_name), None
+    )
+
+
 def _stamp_template(residue, variant):
     """Write a template variant and its formal charges onto a residue.
 
@@ -274,31 +302,44 @@ def _remove_pruning_ports(root, atom, particles):
         root._remove_references(port)
 
 
-def _ter_is_advisory(earlier, later):
-    """Report whether a TER between two residues is advisory only.
+def _ter_break_reason(earlier, later, earlier_variant, later_variant):
+    """Report why a TER between two residues ends the chain.
 
     The wwPDB Format Guide v3.30, section 9 (Coordinate Section, TER),
     states that the TER record ends the chain of ATOM and HETATM
-    records that comes before it, so a strict reader ends the polymer
-    at every TER.
+    records that comes before it. A strict reader therefore ends the
+    polymer at every TER.
 
     A preparation tool that writes the file from a topology puts a TER
-    at the end of each topology chain, not at the end of each PDB
-    chain. OpenMM's ``PDBFile.writeModel`` does this: it prints a TER
-    after the last residue of every ``Topology`` chain, and with
+    at the end of each topology chain. It does not put one at the end
+    of each PDB chain. OpenMM's ``PDBFile.writeModel`` prints a TER
+    after the last residue of every ``Topology`` chain. With
     ``keepIds=True`` it takes the chain identifier from the chain
     object, so two topology chains can carry one identifier. A cap
     (ACE, NME) or a ligand that the topology holds in its own chain
     then follows a TER inside one PDB chain. Every writer that goes
     through OpenMM inherits this behavior.
 
-    A TER is therefore taken as a hard chain break only when the chain
-    identifier changes or the residue numbering is not consecutive. In
-    every other case the peptide bond is kept and the loader logs a
-    warning, because the atom records still describe one polymer: the
-    residue before the TER is missing its OXT and HXT atoms and the
-    residue after it is missing its H2 atom, which only a peptide bond
-    explains.
+    The callers have already checked that the two residues share a
+    chain identifier. This function applies the two remaining tests.
+
+    The residue numbering must increase across the TER. The pair
+    ``(resnum, icode)`` of the later residue must be greater than the
+    pair of the earlier residue. Strict consecutiveness is not
+    required. OpenMM writes a numbering gap where a loop is missing,
+    and it writes insertion codes, and the loader accepts both shapes
+    when no TER is present.
+
+    The candidate peptide bond must also be short enough. The distance
+    from the C atom of the earlier residue to the N atom of the later
+    residue must stay below ``_ADVISORY_TER_MAX_C_N``. The numbering
+    alone cannot tell one polymer from two separate molecules that
+    share a chain identifier.
+
+    A TER that passes both tests is advisory. The atom records then
+    still describe one polymer. The residue before the TER is missing
+    its OXT and HXT atoms, and the residue after it is missing its H2
+    atom. Only a peptide bond explains that.
 
     Parameters
     ----------
@@ -306,13 +347,44 @@ def _ter_is_advisory(earlier, later):
         The residue that carries the TER record.
     later : _PdbResidue
         The residue that follows it in the file.
+    earlier_variant : mbuild.biopolymers.ccd.ResidueTemplate
+        The base template of the earlier residue. It names the atom
+        that carries the posterior peptide bond.
+    later_variant : mbuild.biopolymers.ccd.ResidueTemplate
+        The base template of the later residue. It names the atom that
+        carries the prior peptide bond.
 
     Returns
     -------
-    bool
-        True when the TER does not separate two chains.
+    str or None
+        The reason the TER ends the chain, or None when the TER is
+        advisory.
     """
-    return earlier.chain_id == later.chain_id and later.resnum == earlier.resnum + 1
+    if (later.resnum, later.icode) <= (earlier.resnum, earlier.icode):
+        return (
+            "the residue numbering does not increase across it "
+            f"({earlier.resnum}{earlier.icode} then "
+            f"{later.resnum}{later.icode})"
+        )
+    # The link atom names C and N are the same in PDB format version 2
+    # and version 3, so a record can be found by the template name here,
+    # before the records are assigned to template atoms.
+    carbon = _record_pos(earlier, earlier_variant.posterior_link_atom)
+    nitrogen = _record_pos(later, later_variant.prior_link_atom)
+    if carbon is None or nitrogen is None:
+        return (
+            f"{earlier.label} or {later.label} carries no backbone C or "
+            "N record, so the peptide bond cannot be measured"
+        )
+    distance = float(np.linalg.norm(carbon - nitrogen))
+    if distance > _ADVISORY_TER_MAX_C_N:
+        return (
+            f"the C atom of {earlier.label} and the N atom of "
+            f"{later.label} are {distance * 10:.2f} A apart, which is "
+            f"too far for a peptide bond (limit "
+            f"{_ADVISORY_TER_MAX_C_N * 10:.1f} A)"
+        )
+    return None
 
 
 def _assign_records(group, variant):
@@ -775,6 +847,11 @@ class Protein(Compound):
                 ) from error
             peptide_capable.append(variants[0].linking == "peptide")
 
+        # Reason text for each TER that ends the chain, keyed by the
+        # index of the residue that carries the TER. A residue next to
+        # such a TER can fail to match, and the reason explains why.
+        ter_notes = {}
+
         def linked(i, j):
             if not (peptide_capable[i] and peptide_capable[j]):
                 return False
@@ -782,32 +859,43 @@ class Protein(Compound):
                 return False
             if not groups[i].ter_after:
                 return True
-            return _ter_is_advisory(groups[i], groups[j])
+            reason = _ter_break_reason(
+                groups[i],
+                groups[j],
+                self.library[groups[i].resname][0],
+                self.library[groups[j].resname][0],
+            )
+            if reason is None:
+                return True
+            ter_notes[i] = (
+                f"A TER record separates {groups[i].label} from "
+                f"{groups[j].label}. The loader ends the chain at that "
+                f"TER, because {reason}."
+            )
+            return False
 
-        # The list is built once, so each advisory TER is reported once.
         links = [linked(i, i + 1) for i in range(len(groups) - 1)]
-        for i, is_linked in enumerate(links):
-            if is_linked and groups[i].ter_after:
-                logger.warning(
-                    f"A TER record separates {groups[i].label} from "
-                    f"{groups[i + 1].label}, which are consecutive "
-                    "residues of one chain. The peptide bond between "
-                    "them is kept; see the PDB file if the two residues "
-                    "should be separate chains."
-                )
 
         all_candidates = []
         for i, group in enumerate(groups):
             prior_possible = i > 0 and links[i - 1]
             posterior_possible = i < len(groups) - 1 and links[i]
-            all_candidates.append(
-                _match_residue(
+            try:
+                candidates = _match_residue(
                     group,
                     self.library[group.resname],
                     prior_possible,
                     posterior_possible,
                 )
-            )
+            except MBuildError as error:
+                # The residue is missing the leaving atoms of a peptide
+                # bond that the loader did not make. Name the TER, so
+                # the message says what ended the chain.
+                note = ter_notes.get(i) or ter_notes.get(i - 1)
+                if note is None:
+                    raise
+                raise MBuildError(f"{error.args[0]}\n{note}") from error
+            all_candidates.append(candidates)
         # A bridged cysteine matches both the crosslink variants and the
         # thiolate variants; the CONECT records decide between them
         # before the consensus check.
@@ -903,6 +991,17 @@ class Protein(Compound):
                     f"and {groups[i + 1].label}: backbone atom missing."
                 )
             self.add_bond((carbon, nitrogen), bond_order=1.0)
+            if groups[i].ter_after:
+                distance = float(np.linalg.norm(carbon.pos - nitrogen.pos))
+                logger.warning(
+                    f"A TER record separates {groups[i].label} from "
+                    f"{groups[i + 1].label}. The loader kept the peptide "
+                    "bond between them, because both residues are "
+                    "missing the leaving atoms of that bond and their C "
+                    f"and N atoms are {distance * 10:.2f} A apart. Split "
+                    "the two residues into two chains in the PDB file if "
+                    "they are separate molecules."
+                )
 
     def _bond_crosslinks(self, groups, matches, residues, conects):
         """Form the crosslink bonds and record them in ``cross_bonds``."""

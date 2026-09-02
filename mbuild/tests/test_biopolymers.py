@@ -15,6 +15,86 @@ from mbuild.utils.io import (
     has_rdkit,
 )
 
+#: Atoms of a glycine that is missing its OXT and HXT atoms, so it
+#: expects a peptide bond to the residue that follows it. The
+#: coordinates come from residue 1 of the openff-pablo polyglycines
+#: asset, in Angstrom, with the two extra amine hydrogens added.
+_GLY_EXPECTS_POSTERIOR = [
+    ("N", 7.341, 2.356, 3.392),
+    ("H", 7.627, 3.312, 3.718),
+    ("H2", 8.010, 1.800, 3.800),
+    ("H3", 6.500, 2.000, 3.700),
+    ("CA", 7.516, 2.347, 1.949),
+    ("HA2", 8.439, 2.929, 1.738),
+    ("HA3", 7.729, 1.293, 1.661),
+    ("C", 6.355, 2.899, 1.216),
+    ("O", 6.349, 2.964, -0.058),
+]
+
+#: Atoms of a glycine that is missing its H2 atom, so it expects a
+#: peptide bond to the residue before it. The coordinates come from
+#: residue 2 of the same asset, with the OXT atom added.
+_GLY_EXPECTS_PRIOR = [
+    ("N", 5.181, 3.391, 1.857),
+    ("H", 5.124, 3.366, 2.904),
+    ("CA", 4.120, 3.904, 1.015),
+    ("HA2", 3.779, 3.133, 0.287),
+    ("HA3", 4.566, 4.715, 0.402),
+    ("C", 2.970, 4.378, 1.803),
+    ("O", 3.014, 4.297, 3.061),
+    ("OXT", 1.900, 4.850, 1.200),
+]
+
+
+def _gly_gly_with_ter(resnum=2, icode=" ", offset=0.0, complete=False):
+    """Return PDB text for a glycine pair with a TER between them.
+
+    Both residues sit in chain A. The first is residue 1 and carries
+    the TER record, which the OpenMM writer formats as
+    ``TER   %5s      %3s %s%4s``.
+
+    Parameters
+    ----------
+    resnum : int, optional, default=2
+        Residue number of the second residue.
+    icode : str, optional, default=" "
+        Insertion code of the second residue.
+    offset : float, optional, default=0.0
+        Shift of the second residue along x, in Angstrom.
+    complete : bool, optional, default=False
+        Give both residues every leaving atom, so that neither residue
+        expects a peptide bond.
+
+    Returns
+    -------
+    str
+        The PDB text.
+    """
+    first = list(_GLY_EXPECTS_POSTERIOR)
+    second = list(_GLY_EXPECTS_PRIOR)
+    if complete:
+        first += [("OXT", 5.300, 3.400, 1.900), ("HXT", 5.400, 3.700, 2.800)]
+        second += [("H2", 5.900, 4.000, 1.500)]
+    lines = []
+    serial = 1
+    for number, code, atoms, shift in (
+        (1, " ", first, 0.0),
+        (resnum, icode, second, offset),
+    ):
+        for name, x, y, z in atoms:
+            field = f" {name:<3s}" if len(name) < 4 else name
+            lines.append(
+                f"ATOM  {serial:5d} {field} GLY A{number:4d}{code}   "
+                f"{x + shift:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00"
+                f"          {name[0]:>2s}"
+            )
+            serial += 1
+        if atoms is first:
+            lines.append(f"TER   {serial:5d}      GLY A{1:4d} ")
+            serial += 1
+    lines.append("END")
+    return "\n".join(lines) + "\n"
+
 
 class TestCCDLibrary(BaseTest):
     def test_base_template(self):
@@ -445,6 +525,70 @@ class TestProtein(BaseTest):
         nitrogen = protein.get_atom(179, "N", chain_id="A")
         assert protein.bond_graph.has_edge(carbon, nitrogen)
         assert "SER A:178" in caplog.text and "NME A:179" in caplog.text
+
+    def test_far_apart_pair_across_a_ter_does_not_bond(self):
+        # Tests that the loader ends the chain at a TER when the two
+        # residues are too far apart for a peptide bond, and that the
+        # error names the TER. This is needed because the advisory-TER
+        # rule read the chain identifier and the residue numbering
+        # only, so two separate molecules that share one chain and
+        # carry increasing numbers were bonded across 21 A. The test
+        # writes a glycine pair whose second residue is shifted by
+        # 20 A and asserts on the error text.
+        far = Path("gly_far.pdb")
+        far.write_text(_gly_gly_with_ter(offset=-20.0))
+        with pytest.raises(MBuildError, match="too far for a peptide bond") as info:
+            Protein(str(far))
+        assert "A TER record separates GLY A:1 from GLY A:2" in str(info.value)
+
+    def test_ter_warning_only_where_the_bond_is_made(self, caplog):
+        # Tests that no TER warning is logged when the two residues do
+        # not expect a peptide bond. This is needed because the warning
+        # was logged from the adjacency list, which only reports that a
+        # bond is possible, so the loader claimed to keep a bond that
+        # the matched templates never asked for. The test writes a
+        # glycine pair that carries every leaving atom, keeps the TER,
+        # and checks both the missing bond and the empty log.
+        import logging
+
+        complete = Path("gly_complete.pdb")
+        complete.write_text(_gly_gly_with_ter(complete=True))
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein = Protein(str(complete))
+        carbon = protein.get_atom(1, "C", chain_id="A")
+        nitrogen = protein.get_atom(2, "N", chain_id="A")
+        assert not protein.bond_graph.has_edge(carbon, nitrogen)
+        assert "TER" not in caplog.text
+
+    def test_numbering_gap_across_a_ter_loads(self):
+        # Tests that a TER between residue 1 and residue 3 of one chain
+        # stays advisory and keeps the peptide bond. This is needed
+        # because OpenMM writes a numbering gap where a loop is
+        # missing, and the first advisory-TER rule demanded strictly
+        # consecutive numbers, so such a file could not load at all.
+        # The test writes a glycine pair numbered 1 and 3 with a TER
+        # between them and checks the C to N bond.
+        gap = Path("gly_gap.pdb")
+        gap.write_text(_gly_gly_with_ter(resnum=3))
+        protein = Protein(str(gap))
+        carbon = protein.get_atom(1, "C", chain_id="A")
+        nitrogen = protein.get_atom(3, "N", chain_id="A")
+        assert protein.bond_graph.has_edge(carbon, nitrogen)
+
+    def test_insertion_code_across_a_ter_loads(self):
+        # Tests that a TER between residue 1 and residue 1A of one
+        # chain stays advisory and keeps the peptide bond. This is
+        # needed because OpenMM writes insertion codes, and the first
+        # advisory-TER rule compared residue numbers alone, so it read
+        # such a pair as a chain break and the file could not load. The
+        # test writes a glycine pair numbered 1 and 1A with a TER
+        # between them and checks the C to N bond.
+        inserted = Path("gly_icode.pdb")
+        inserted.write_text(_gly_gly_with_ter(resnum=1, icode="A"))
+        protein = Protein(str(inserted))
+        carbon = protein.get_atom(1, "C", chain_id="A")
+        nitrogen = protein.get_atom(1, "N", chain_id="A", icode="A")
+        assert protein.bond_graph.has_edge(carbon, nitrogen)
 
     def test_get_atom(self, protein_6m03):
         # Tests that residues and atoms are addressable by residue number
