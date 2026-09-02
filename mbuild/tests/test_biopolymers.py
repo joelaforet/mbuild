@@ -12,6 +12,7 @@ from mbuild.utils.io import (
     has_hoomd,
     has_openff_pablo,
     has_openmm,
+    has_packmol,
     has_rdkit,
 )
 
@@ -1669,7 +1670,7 @@ class TestProteinSolvation(BaseTest):
             == 228
         )
 
-    @pytest.mark.skipif(mb.packing.PACKMOL is None, reason="PACKMOL is not installed")
+    @pytest.mark.skipif(not has_packmol, reason="PACKMOL is not installed")
     def test_solvate_keeps_chain_residue_hierarchy(self, protein_8ciq, water_sol):
         # Tests that the solute of a solvated system is still a
         # Protein that carries its chain, its residues and its bond
@@ -1692,7 +1693,7 @@ class TestProteinSolvation(BaseTest):
         shift = solute.xyz - before
         assert np.allclose(shift, shift[0], atol=1e-6)
 
-    @pytest.mark.skipif(mb.packing.PACKMOL is None, reason="PACKMOL is not installed")
+    @pytest.mark.skipif(not has_packmol, reason="PACKMOL is not installed")
     def test_fill_box_fixed_orientation_does_not_rotate(self, protein_8ciq, water_sol):
         # Tests that mb.fill_box holds a protein rigid, and keeps its
         # chain and residue hierarchy, when the caller fixes the
@@ -1719,7 +1720,7 @@ class TestProteinSolvation(BaseTest):
         labels = [(residue.name, residue.resnum) for residue in solute.residues()]
         assert labels[0] == ("ALA", 1) and labels[-1] == ("VAL", 35)
 
-    @pytest.mark.skipif(mb.packing.PACKMOL is None, reason="PACKMOL is not installed")
+    @pytest.mark.skipif(not has_packmol, reason="PACKMOL is not installed")
     def test_solvated_gro_keeps_residue_names(self, protein_8ciq, water_sol):
         # Tests that mb.biopolymers.save writes the protein residue
         # names of a packed system to a .gro file, and that the plain
