@@ -63,8 +63,8 @@ def _decode_index(field, width, line_number):
     B0000. Residue numbers run 9999, A000, A001, and so on. Any system
     above 99999 atoms or 9999 residues carries such fields. Section 10
     (Connectivity Section, CONECT) gives the CONECT atom serials the
-    same five columns, and OpenMM encodes them by the same rule, so
-    those fields need this function too.
+    same five columns. OpenMM encodes them by the same rule, so those
+    fields need this function too.
 
     This function inverts that rule. A field that reads as a decimal
     number keeps its decimal value, so a file inside the column widths
@@ -223,10 +223,10 @@ def _parse_pdb(text):
             # altLoc values of the whole file. If the file holds one
             # value, pablo keeps that value. If the file holds more
             # than one, pablo keeps the blank value and the letter 'A'
-            # only, and it warns. In a file whose records carry blank,
-            # 'B' and 'C', pablo therefore keeps the blank records
-            # alone, and this reader keeps the blank records plus the
-            # first letter of each residue.
+            # only, and it warns. Take a file whose records carry
+            # blank, 'B' and 'C'. Pablo keeps the blank records alone.
+            # This reader keeps the blank records and the first letter
+            # of each residue.
             alt_loc = line[16].strip()
             if alt_loc:
                 kept = kept_alt_loc_by_key.setdefault(key, alt_loc)
@@ -459,8 +459,8 @@ def _pdb_atom_line(serial, particle, residue, chain_id):
 
     The residue name fills columns 18-21. The wwPDB Format Guide v3.30,
     section 9 (Coordinate Section, ATOM), declares the name in columns
-    18-20 and column 21 blank, so a name of three characters or less
-    gives the same record as before. A four-character name fills
+    18-20 and column 21 blank. A name of three characters or less
+    therefore gives the same record as before. A four-character name fills
     column 21, which is the field that ``_parse_pdb`` reads back.
     """
     record = "HETATM" if residue.hetatm else "ATOM  "

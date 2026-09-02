@@ -20,9 +20,9 @@ assign parameters. In particular:
 
 The bundled ``.cif`` files in ``mbuild/lib/biomolecules/ccd_cache`` are
 unmodified CCD component files (public domain), copied from the set that
-openff-pablo vendors. ``I.cif`` is the one exception: the CCD gives the
-component id ``I`` to a nucleotide, but OpenMM and PACKMOL write ``I``
-as the residue name of an iodide ion, so the bundled ``I.cif`` holds the
+openff-pablo vendors. ``I.cif`` is the one exception. The CCD gives the
+component id ``I`` to a nucleotide. OpenMM and PACKMOL write ``I`` as
+the residue name of an iodide ion, so the bundled ``I.cif`` holds the
 iodide ion. openff-pablo defines the same component by hand in
 ``_std_ccd_cache.py``.
 

@@ -262,9 +262,9 @@ class TestCCDLibrary(BaseTest):
         # the code and the download option. This is needed because the
         # loader is strict: it must fail loudly on residues it cannot
         # match instead of guessing. The test points the user download
-        # cache at an empty tmp directory, so a definition downloaded
-        # in an earlier session cannot make the code known, then looks
-        # up a nonsense code with downloads disabled.
+        # cache at an empty tmp directory. A definition downloaded in
+        # an earlier session therefore cannot make the code known. The
+        # test then looks up a nonsense code with downloads disabled.
         from mbuild.biopolymers import ccd
 
         monkeypatch.setattr(ccd, "USER_CCD_CACHE_DIR", tmp_path)
@@ -386,10 +386,10 @@ class TestCCDLibrary(BaseTest):
         # Tests that the CIF parser treats the '?' unknown-value token
         # and the '.' inapplicable-value token in the alternate atom
         # name column as no alternate name. This is needed because the
-        # parser kept the token itself as a synonym, so a PDB record
-        # whose atom is named '?' would have matched the atom, and the
-        # atom carried a synonym that names nothing. The test parses a
-        # minimal component with both tokens and checks the synonyms.
+        # parser kept the token itself as a synonym. A PDB record whose
+        # atom is named '?' then matched the atom, and the synonym
+        # named nothing. The test parses a minimal component with both
+        # tokens and checks the synonyms.
         from mbuild.biopolymers.ccd import parse_ccd_cif
 
         text = "\n".join(
@@ -480,8 +480,8 @@ class TestProtein(BaseTest):
     def test_four_character_residue_name_is_read_whole(self, tmp_path, monkeypatch):
         # Tests that a four-character residue name reaches the template
         # lookup whole. This is needed because the reader took columns
-        # 18-20 only, so a name such as the lipid name DLPC became DLP
-        # and matched a different component with no error at all: a
+        # 18-20 only. A name such as the lipid name DLPC became DLP. It
+        # then matched a different component with no error at all: a
         # silent wrong answer. The test renames the N-terminal serine
         # of the good asset to a four-character name, which fills
         # column 21 too, and reads the name back from the
@@ -534,11 +534,11 @@ class TestProtein(BaseTest):
         # Tests that two residues whose disorder groups use different
         # altLoc letters both keep their first conformer. This is
         # needed because the reader chose one letter for the whole
-        # file, so a residue that used other letters lost every
-        # disordered record and left the structure without an error.
-        # The test writes a glycine pair whose CA atom carries an 'A'
-        # and a 'B' record in residue 1, and a 'C' and a 'D' record in
-        # residue 2, then checks the particle count, the x position of
+        # file. A residue that used other letters lost every disordered
+        # record, and it left the structure with no error. The test
+        # writes a glycine pair. The CA atom carries an 'A' and a 'B'
+        # record in residue 1, and a 'C' and a 'D' record in residue 2.
+        # The test then checks the particle count, the x position of
         # each kept CA record, and the warning text.
         lines = []
         for line in _gly_gly_with_ter(complete=True).splitlines():
@@ -566,9 +566,9 @@ class TestProtein(BaseTest):
         # Tests that a PDB which holds one ion of each bundled
         # monatomic component loads with the formal charge of every
         # ion. This is needed because a prepared MD system carries
-        # counter-ions, the library held sodium and chloride only, and
-        # the CIF reader read the loop_ form of a category alone, so
-        # even those two templates carried no atoms and no ion could
+        # counter-ions, and the library held sodium and chloride only.
+        # The CIF reader also read the loop_ form of a category alone,
+        # so even those two templates carried no atoms and no ion could
         # load. The test writes one HETATM record per ion, each in its
         # own residue, and compares the residue charges: five cations,
         # five anions and neutral xenon.
@@ -669,9 +669,9 @@ class TestProtein(BaseTest):
         # Tests that a PDB whose atom serials and residue numbers are
         # written in hexadecimal loads with the decoded values. This is
         # needed because OpenMM switches both fields to hexadecimal
-        # when they overflow their columns, so every system above 99999
-        # atoms or 9999 residues carries them, and the decimal-only
-        # reader raised ValueError on such a file. The test writes a
+        # when they overflow their columns. Every system above 99999
+        # atoms or 9999 residues carries such fields, and the
+        # decimal-only reader raised ValueError on them. The test writes a
         # glycine pair whose serials read A0000 upward and whose
         # residue numbers read A001 and A002, then checks the particle
         # count and both residue numbers.
@@ -684,8 +684,8 @@ class TestProtein(BaseTest):
     def test_hexadecimal_conect_serials(self):
         # Tests that a CONECT record whose atom serials are written in
         # hexadecimal loads. This is needed because OpenMM applies the
-        # same overflow encoding to CONECT serials as to ATOM serials,
-        # and the decimal-only reader raised ValueError on the CONECT
+        # same overflow encoding to CONECT serials as to ATOM serials.
+        # The decimal-only reader raised ValueError on the CONECT
         # records of every system above 99999 atoms. The test appends a
         # CONECT record for the backbone N-CA bond of the first residue
         # of the same glycine pair, whose serials read A0000 and A0004,
@@ -703,9 +703,9 @@ class TestProtein(BaseTest):
         # number above the encodable range raises. This is needed
         # because the writer raised on every residue number above 9999,
         # so a file that the reader accepts could not be written again.
-        # The test loads the prepared 2MUM structure, adds 10000 to
-        # every residue number, writes the protein, reads it back, and
-        # compares the particle count and the numbers with their
+        # The test loads the prepared 2MUM structure and adds 10000 to
+        # every residue number. It writes the protein, reads it back,
+        # and compares the particle count and the numbers with their
         # insertion codes. It then sets a number above the range of the
         # encoding and asserts on the error.
         protein = Protein(get_fn("2MUM_icode.pdb"))
