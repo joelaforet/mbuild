@@ -817,8 +817,9 @@ class Protein(Compound):
         self.library = library or CCDLibrary(download=download)
         self.cross_bonds = []
         #: Map of anchor particle -> tuple of the hydrogen names that
-        #: were removed at that particle to open a port. Repeated ports
-        #: at one atom accumulate in the entry.
+        #: were removed at that particle, by a port that opened there or
+        #: by ``deprotonate``. Repeated removals at one atom accumulate
+        #: in the entry.
         #: ``record_bond`` reads it for its default leaving-atom lists.
         self._leaving_atoms = {}
         if filename is not None:
@@ -1415,6 +1416,11 @@ class Protein(Compound):
         deprotonated. A notebook cell that calls this method therefore
         runs a second time without an error.
 
+        The removed proton is written to the leaving-atom ledger, so a
+        later ``attach`` at the same atom records every hydrogen that
+        left it. A tool that rebuilds the residue from that record
+        therefore restores neither the proton nor the charge.
+
         Parameters
         ----------
         resnum : int
@@ -1473,6 +1479,7 @@ class Protein(Compound):
         proton_name = protons[0]
         _remove_pruning_ports(self, atom, [_atom_in_residue(residue, proton_name)])
         _stamp_template(residue, variant.deprotonated_at(proton_name))
+        self._record_leaving_atoms(atom, [proton_name])
         self._warn_if_variant_is_absent(residue, atom_name, proton_name)
         self._warn_on_split_charge(residue)
 
@@ -1779,13 +1786,19 @@ class Protein(Compound):
         # The record is appended before the relaxation step, so the
         # protein state stays complete and consistent when relaxation
         # fails: the fragment is already bonded at this point.
+        #
+        # The site side reads the leaving-atom ledger, not the hydrogens
+        # this call removed. The ledger also holds a proton that
+        # deprotonate() removed at the same atom, so the record names
+        # every hydrogen that left the site. A tool that rebuilds the
+        # residue from the record then restores no proton and no charge.
         record = InterResidueBond(
             residue1=site_residue,
             residue2=frag_residue,
             atom1_name=site_atom.name,
             atom2_name=frag_atom.name,
             order=bond_order,
-            leaving1=tuple(sorted(h.name for h in site_hydrogens)),
+            leaving1=self._leaving_atoms[site_atom],
             leaving2=tuple(sorted(h.name for h in frag_hydrogens)),
         )
         self.cross_bonds.append(record)
@@ -1998,18 +2011,34 @@ class Protein(Compound):
 
         The removed names are written to the ``_leaving_atoms`` ledger
         under the anchor atom, which is where ``record_bond`` reads its
-        default leaving-atom lists. A second port at the same atom adds
-        its removed names to the entry, so the entry always names every
-        hydrogen that left that atom.
+        default leaving-atom lists. A second port at the same atom, and
+        an earlier ``deprotonate`` call, add their removed names to the
+        entry, so the entry always names every hydrogen that left that
+        atom.
         """
         orientation = sum(h.pos - atom.pos for h in hydrogens)
         if np.linalg.norm(orientation) < 1e-8:
             orientation = hydrogens[0].pos - atom.pos
         _remove_pruning_ports(root, atom, hydrogens)
-        self._leaving_atoms[atom] = tuple(
-            sorted(self._leaving_atoms.get(atom, ()) + tuple(h.name for h in hydrogens))
-        )
+        self._record_leaving_atoms(atom, [h.name for h in hydrogens])
         return Port(anchor=atom, orientation=orientation, separation=separation / 2)
+
+    def _record_leaving_atoms(self, atom, names):
+        """Add removed hydrogen names to the leaving-atom ledger.
+
+        The names are held under the anchor atom, sorted, and merged
+        with the names an earlier removal at that atom wrote.
+
+        Parameters
+        ----------
+        atom : mbuild.Compound
+            The atom the hydrogens were bonded to.
+        names : list of str
+            Names of the removed hydrogens.
+        """
+        self._leaving_atoms[atom] = tuple(
+            sorted(self._leaving_atoms.get(atom, ()) + tuple(names))
+        )
 
     @staticmethod
     def _bonded_hydrogens(atom, residue_name, count):

@@ -1312,10 +1312,13 @@ class TestProteinExports(BaseTest):
         # because strict template loaders require the cross-residue
         # CONECT, fail on unexplained CONECTs (so peptide bonds must
         # not get them), and downstream tools format the records into
-        # their own vocabulary. The test attaches a fragment at LYS 5
-        # NZ, writes the file, and checks records.
+        # their own vocabulary. The test deprotonates LYS 5 NZ, attaches
+        # a fragment there, writes the file, and checks records. The
+        # record must name the proton that deprotonate() removed, so
+        # that a tool rebuilding the residue restores no charge.
         protein = protein_6m03
         fragment = acetone
+        protein.deprotonate(5, "NZ", chain_id="A")
         protein.attach(
             fragment,
             "C1",
@@ -1370,7 +1373,7 @@ class TestProteinExports(BaseTest):
                 "residue_names": ("LYS", "XCT"),
                 "residue_numbers": (5, 307),
                 "atom_names": ("NZ", "C1"),
-                "leaving_atoms": (["HZ1"], ["H1"]),
+                "leaving_atoms": (["HZ1", "HZ3"], ["H1"]),
                 "bond_order": 1,
             }
         ]
