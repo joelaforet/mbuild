@@ -1084,17 +1084,13 @@ class Protein(Compound):
     # Canonical Compound verbs, routed to residue-aware behavior
     # ------------------------------------------------------------------
     def save(self, filename, **kwargs):
-        """Save the protein; ``.pdb`` files route to ``save_pdb``.
+        """Save the protein through the module-level ``save``.
 
-        The generic ParmEd writer cannot express residue numbers, chain
-        identifiers, or CONECT records, so a plain ``save`` would write
-        a file that silently loses the protein's identity.
-
-        Every other extension goes to the module-level ``save``, which
-        routes the GMSO formats (.gro, .gsd, .data, .xyz, .mcf, .top)
-        through the module-level ``to_gmso``. ``conversion.save`` calls
-        the module-level GMSO converter, so a method override alone
-        would not reach those formats.
+        ``conversion.save`` calls the module-level GMSO converter, so a
+        method override alone would not reach the GMSO formats. The
+        module-level ``save`` holds every routing rule: it sends a
+        ``.pdb`` file to ``save_pdb`` and the GMSO formats (.gro, .gsd,
+        .data, .xyz, .mcf, .top) through the module-level ``to_gmso``.
 
         Parameters
         ----------
@@ -1105,15 +1101,6 @@ class Protein(Compound):
             Passed to the selected writer. For ``.pdb`` files only
             ``overwrite`` is accepted.
         """
-        if str(filename).lower().endswith(".pdb"):
-            unexpected = set(kwargs) - {"overwrite"}
-            if unexpected:
-                raise MBuildError(
-                    "Saving a Protein to .pdb uses save_pdb(), which takes "
-                    f"only 'overwrite'; the arguments {sorted(unexpected)} "
-                    "would be ignored."
-                )
-            return self.save_pdb(filename, overwrite=kwargs.get("overwrite", False))
         return save(self, filename, **kwargs)
 
     def to_parmed(self, **kwargs):
@@ -2345,8 +2332,9 @@ def save(compound, filename, **kwargs):
     ``conversion.save`` calls the module-level GMSO converter, which
     numbers residues per name, so a saved file describes the wrong
     residues. This function routes the GMSO extensions (.gro, .gsd,
-    .data, .xyz, .mcf, .top) through the ``to_gmso`` above and hands
-    every other extension to ``Compound.save``.
+    .data, .xyz, .mcf, .top) through the ``to_gmso`` above. A ``.pdb``
+    file goes to ``save_pdb`` when the compound provides that method.
+    Every other extension goes to ``Compound.save``.
 
     Use it for a packed system, for example the result of
     ``mb.solvate``. A ``Protein.save`` call reaches this function on
@@ -2365,6 +2353,19 @@ def save(compound, filename, **kwargs):
         compound, and a packed system carries no box of its own.
     """
     extension = os.path.splitext(str(filename))[-1].lower()
+    if extension == ".pdb" and hasattr(compound, "save_pdb"):
+        # A compound that carries its own PDB writer must use it. The
+        # generic ParmEd writer cannot express residue numbers, chain
+        # identifiers, HETATM records, or a selective CONECT policy, so
+        # it writes a blank chain column and no CONECT records.
+        unexpected = set(kwargs) - {"overwrite"}
+        if unexpected:
+            raise MBuildError(
+                "Saving a Protein to .pdb uses save_pdb(), which takes "
+                f"only 'overwrite'; the arguments {sorted(unexpected)} "
+                "would be ignored."
+            )
+        return compound.save_pdb(filename, overwrite=kwargs.get("overwrite", False))
     if extension not in _GMSO_EXTENSIONS:
         return Compound.save(compound, filename, **kwargs)
     overwrite = kwargs.pop("overwrite", False)

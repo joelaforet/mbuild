@@ -1403,6 +1403,23 @@ class TestProteinExports(BaseTest):
         protein.save(str(mol2), overwrite=True)
         assert len(parmed.load_file(str(mol2), structure=True).residues) == 306
 
+    def test_module_save_routes_pdb_to_the_protein_writer(self):
+        # Tests that the module-level save writes a Protein .pdb file
+        # through save_pdb. This is needed because the module function
+        # handed .pdb to Compound.save, so the file came from the
+        # generic ParmEd writer: it carried a blank chain column and no
+        # CONECT records, and a residue-template reader then lost the
+        # chain and the disulfides. The test saves the three-disulfide
+        # 8ciq structure through the module function and reads the
+        # chain column and the CONECT count.
+        protein = Protein(get_fn("8ciq.pdb"))
+        out = Path("module_routed.pdb")
+        mb.biopolymers.save(protein, str(out))
+        lines = out.read_text().splitlines()
+        atoms = [line for line in lines if line.startswith(("ATOM", "HETATM"))]
+        assert {line[21] for line in atoms} == {"A"}
+        assert sum(line.startswith("CONECT") for line in lines) == 6
+
     def test_gmso_routed_save_and_trajectory_keep_residues(self, protein_6m03):
         # Tests that a GMSO-routed save (.gro) and to_trajectory keep
         # the per-residue partitioning. This is needed because
