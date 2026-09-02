@@ -747,6 +747,35 @@ class TestProtein(BaseTest):
         assert np.isclose(np.linalg.norm(carbon.pos - nz.pos), 0.15, atol=1e-3)
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach_after_deprotonate_records_one_leaving_atom(
+        self, protein_6m03, acetone
+    ):
+        # Tests that a bond record names only the hydrogen that the bond
+        # displaces, and not the proton that an earlier deprotonate()
+        # call removed at the same atom. This is needed because a
+        # downstream residue library permits one leaving atom per
+        # linking atom, and the protonation state travels with the
+        # residue in its template. The test deprotonates LYS 5 NZ,
+        # attaches a fragment at that atom, and reads the leaving atoms
+        # of the record and the template description back.
+        protein = protein_6m03
+        protein.deprotonate(5, "NZ", chain_id="A")
+        record = protein.attach(
+            acetone,
+            "C1",
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="ACT",
+            relax=False,
+        )
+        assert record.leaving1 == ("HZ1",)
+        assert protein.bond_records()[-1]["leaving_atoms"] == (["HZ1"], ["H1"])
+        assert protein.get_residue(5, chain_id="A").template.description.endswith(
+            "-HZ3"
+        )
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_attach_chained(self, protein_6m03, acetone):
         # Tests that a residue added by attach() can itself be a later
         # attachment site. This is needed because multi-residue and
@@ -1342,13 +1371,10 @@ class TestProteinExports(BaseTest):
         # because strict template loaders require the cross-residue
         # CONECT, fail on unexplained CONECTs (so peptide bonds must
         # not get them), and downstream tools format the records into
-        # their own vocabulary. The test deprotonates LYS 5 NZ, attaches
-        # a fragment there, writes the file, and checks records. The
-        # record must name the proton that deprotonate() removed, so
-        # that a tool rebuilding the residue restores no charge.
+        # their own vocabulary. The test attaches a fragment at LYS 5
+        # NZ, writes the file, and checks records.
         protein = protein_6m03
         fragment = acetone
-        protein.deprotonate(5, "NZ", chain_id="A")
         protein.attach(
             fragment,
             "C1",
@@ -1403,7 +1429,7 @@ class TestProteinExports(BaseTest):
                 "residue_names": ("LYS", "XCT"),
                 "residue_numbers": (5, 307),
                 "atom_names": ("NZ", "C1"),
-                "leaving_atoms": (["HZ1", "HZ3"], ["H1"]),
+                "leaving_atoms": (["HZ1"], ["H1"]),
                 "bond_order": 1,
             }
         ]

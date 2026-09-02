@@ -868,9 +868,11 @@ class Protein(Compound):
         self.library = library or CCDLibrary(download=download)
         self.cross_bonds = []
         #: Map of anchor particle -> tuple of the hydrogen names that
-        #: were removed at that particle, by a port that opened there or
-        #: by ``deprotonate``. Repeated removals at one atom accumulate
-        #: in the entry.
+        #: were removed at that particle to open a port. Repeated ports
+        #: at one atom accumulate in the entry.
+        #: ``_port_along_hydrogens`` is the only writer, so the entry
+        #: names the hydrogens that a bond displaces and no other
+        #: removed atom.
         #: ``record_bond`` reads it for its default leaving-atom lists.
         self._leaving_atoms = {}
         if filename is not None:
@@ -1475,10 +1477,11 @@ class Protein(Compound):
         deprotonated. A notebook cell that calls this method therefore
         runs a second time without an error.
 
-        The removed proton is written to the leaving-atom ledger, so a
-        later ``attach`` at the same atom records every hydrogen that
-        left it. A tool that rebuilds the residue from that record
-        therefore restores neither the proton nor the charge.
+        The removed proton changes the protonation state of the
+        residue. The new state is recorded in ``residue.template``,
+        whose description names the absent proton. The proton is not a
+        leaving atom of a later bond, so it stays out of the
+        leaving-atom ledger and out of every bond record.
 
         Parameters
         ----------
@@ -1541,7 +1544,6 @@ class Protein(Compound):
             self, atom, [_atom_in_residue(residue, proton_name)]
         )
         _assign_template(residue, variant.deprotonated_at(proton_name))
-        self._record_leaving_atoms(atom, [proton_name])
         self._warn_if_variant_is_absent(residue, atom_name, proton_name)
         self._warn_on_split_charge(residue)
 
@@ -1865,11 +1867,10 @@ class Protein(Compound):
         # protein state stays complete and consistent when relaxation
         # fails: the fragment is already bonded at this point.
         #
-        # The site side reads the leaving-atom ledger, not the hydrogens
-        # this call removed. The ledger also holds a proton that
-        # deprotonate() removed at the same atom, so the record names
-        # every hydrogen that left the site. A tool that rebuilds the
-        # residue from the record then restores no proton and no charge.
+        # The site side reads the leaving-atom ledger, which names the
+        # hydrogens that ports at this atom removed. A proton that
+        # deprotonate() removed is not in the ledger, so the record
+        # names only the atoms that this bond displaces.
         record = InterResidueBond(
             residue1=site_residue,
             residue2=frag_residue,
@@ -2096,36 +2097,21 @@ class Protein(Compound):
         that ``Polymer.add_monomer`` does, so the returned Port is the
         only open port at the atom.
 
-        The removed names are written to the ``_leaving_atoms`` ledger
-        under the anchor atom, which is where ``record_bond`` reads its
-        default leaving-atom lists. A second port at the same atom, and
-        an earlier ``deprotonate`` call, add their removed names to the
-        entry, so the entry always names every hydrogen that left that
-        atom.
+        This method is the only writer of the ``_leaving_atoms``
+        ledger. The removed names are written under the anchor atom,
+        which is where ``record_bond`` reads its default leaving-atom
+        lists. A second port at the same atom adds its removed names to
+        the entry, so the entry always names every hydrogen that a bond
+        displaced at that atom.
         """
         orientation = sum(h.pos - atom.pos for h in hydrogens)
         if np.linalg.norm(orientation) < 1e-8:
             orientation = hydrogens[0].pos - atom.pos
         _remove_particles_and_ports(root, atom, hydrogens)
-        self._record_leaving_atoms(atom, [h.name for h in hydrogens])
-        return Port(anchor=atom, orientation=orientation, separation=separation / 2)
-
-    def _record_leaving_atoms(self, atom, names):
-        """Add removed hydrogen names to the leaving-atom ledger.
-
-        The names are held under the anchor atom, sorted, and merged
-        with the names an earlier removal at that atom wrote.
-
-        Parameters
-        ----------
-        atom : mbuild.Compound
-            The atom the hydrogens were bonded to.
-        names : list of str
-            Names of the removed hydrogens.
-        """
         self._leaving_atoms[atom] = tuple(
-            sorted(self._leaving_atoms.get(atom, ()) + tuple(names))
+            sorted(self._leaving_atoms.get(atom, ()) + tuple(h.name for h in hydrogens))
         )
+        return Port(anchor=atom, orientation=orientation, separation=separation / 2)
 
     @staticmethod
     def _bonded_hydrogens(atom, residue_name, count):
@@ -2395,6 +2381,11 @@ class Protein(Compound):
         removed on each side, and the bond order. Downstream tools
         format these records into their own vocabulary (residue
         definitions, crosslink declarations, templates).
+
+        A record names the atoms that the bond itself displaces. A
+        residue that was prepared in another protonation state carries
+        that state in its template, and not in the record of a bond at
+        the same atom. The two are separate properties of the product.
 
         Returns
         -------
