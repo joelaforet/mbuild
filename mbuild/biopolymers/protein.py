@@ -349,6 +349,8 @@ def _assign_records(group, variant):
         when ``reason`` is None.
     reason : str or None
         Why the variant does not fit, or None on success.
+    fallback : bool
+        True when the second pass produced the assignment.
     """
     name_to_atom = variant.name_to_atom
     record_atoms = {}
@@ -374,8 +376,9 @@ def _assign_records(group, variant):
         used.add(atom.name)
         record_atoms[id(record)] = atom
     if not names_disagree:
-        return record_atoms, reason
-    return _assign_records_bipartite(group, variant, reason)
+        return record_atoms, reason, False
+    record_atoms, reason = _assign_records_bipartite(group, variant, reason)
+    return record_atoms, reason, reason is None
 
 
 def _assign_records_bipartite(group, variant, reason):
@@ -452,12 +455,15 @@ def _match_residue(group, variants, prior_possible, posterior_possible):
     """Match one PDB residue against its template variants.
 
     Returns the valid matches. Raises MBuildError with the per-variant
-    rejection reasons when nothing matches.
+    rejection reasons when nothing matches. Logs at info level when the
+    second assignment pass rescued the residue, so that the tolerance
+    is visible in the log.
     """
     matches = []
     reasons = []
+    rescued = []
     for variant in variants:
-        record_atoms, reason = _assign_records(group, variant)
+        record_atoms, reason, fallback = _assign_records(group, variant)
         if reason is not None:
             reasons.append(f"{variant.description}: {reason}")
             continue
@@ -505,6 +511,12 @@ def _match_residue(group, variants, prior_possible, posterior_possible):
                 expects_crosslink=expects_crosslink,
             )
         )
+        if fallback and not rescued:
+            rescued = sorted(
+                record.name
+                for record in group.records
+                if record.name != record_atoms[id(record)].name
+            )
     if not matches:
         details = "\n  ".join(reasons)
         raise MBuildError(
@@ -512,6 +524,11 @@ def _match_residue(group, variants, prior_possible, posterior_possible):
             f"template variant:\n  {details}\n"
             "Check that the file is fully protonated (e.g. run pdbfixer "
             "or reduce) and uses standard PDB atom names."
+        )
+    if rescued:
+        logger.info(
+            f"Residue {group.label}: the first-hit atom names did not fit, "
+            f"and the second pass read {rescued} as alternative names."
         )
     return matches
 
