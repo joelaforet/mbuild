@@ -687,7 +687,8 @@ class Protein(Compound):
         self.library = library or CCDLibrary(download=download)
         self.cross_bonds = []
         #: Map of anchor particle -> tuple of the hydrogen names that
-        #: were removed at that particle to open a port.
+        #: were removed at that particle to open a port. Repeated ports
+        #: at one atom accumulate in the entry.
         #: ``record_bond`` reads it for its default leaving-atom lists.
         self._leaving_atoms = {}
         if filename is not None:
@@ -1787,14 +1788,17 @@ class Protein(Compound):
 
         The removed names are written to the ``_leaving_atoms`` ledger
         under the anchor atom, which is where ``record_bond`` reads its
-        default leaving-atom lists. A second port at the same atom
-        replaces the entry.
+        default leaving-atom lists. A second port at the same atom adds
+        its removed names to the entry, so the entry always names every
+        hydrogen that left that atom.
         """
         orientation = sum(h.pos - atom.pos for h in hydrogens)
         if np.linalg.norm(orientation) < 1e-8:
             orientation = hydrogens[0].pos - atom.pos
         _remove_pruning_ports(root, atom, hydrogens)
-        self._leaving_atoms[atom] = tuple(sorted(h.name for h in hydrogens))
+        self._leaving_atoms[atom] = tuple(
+            sorted(self._leaving_atoms.get(atom, ()) + tuple(h.name for h in hydrogens))
+        )
         return Port(anchor=atom, orientation=orientation, separation=separation / 2)
 
     @staticmethod

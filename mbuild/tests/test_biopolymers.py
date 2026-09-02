@@ -793,6 +793,26 @@ class TestProtein(BaseTest):
             "bond_order": 1,
         }
 
+        # Tests that two ports at one atom accumulate in the
+        # leaving-atom ledger. This is needed because a residue can
+        # carry more than one modification at the same atom, and a
+        # record that names only the last hydrogen tells a downstream
+        # loader that the other hydrogen is still there. The test opens
+        # a second port at the same NZ, bonds a second fragment to it,
+        # and reads the leaving atoms of the second record.
+        second_port = protein.add_port_at(12, "NZ", chain_id="A")
+        second = prepare_fragment(CH3(), "ME2")
+        second.resnum = 401
+        next(iter(protein.chains)).add(second)
+        force_overlap(
+            move_this=second,
+            from_positions=second.all_ports()[0],
+            to_positions=second_port,
+            add_bond=True,
+        )
+        protein.record_bond(nz, protein.get_atom(401, "C1", chain_id="A"))
+        assert protein.bond_records()[-1]["leaving_atoms"] == (["HZ1", "HZ2"], [])
+
     def test_port_cleanup_leaves_consistent_state(self):
         # Tests that the port creation path removes the auto-generated
         # ports and keeps the atom's remaining bonds. This is needed
