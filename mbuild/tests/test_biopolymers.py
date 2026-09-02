@@ -1494,6 +1494,33 @@ class TestProteinSolvation(BaseTest):
         assert np.allclose(shift, shift[0], atol=1e-6)
 
     @pytest.mark.skipif(mb.packing.PACKMOL is None, reason="PACKMOL is not installed")
+    def test_fill_box_fixed_orientation_does_not_rotate(self, protein_8ciq, water_sol):
+        # Tests that mb.fill_box holds a protein rigid, and keeps its
+        # chain and residue hierarchy, when the caller fixes the
+        # orientation of the solute. This is needed because fill_box
+        # rotates every compound by default, and a rotation scrambles a
+        # protein: with fix_orientation=[False, False] the centred
+        # coordinates of 8ciq move by up to 1.5 nm. The test packs 8ciq
+        # with ten waters, then compares the centred coordinates of the
+        # solute against the centred coordinates of the protein it was
+        # built from.
+        xyz = protein_8ciq.xyz
+        before = xyz - xyz.mean(axis=0)
+        system = mb.fill_box(
+            [protein_8ciq, water_sol],
+            [1, 10],
+            box=mb.Box([6.0, 6.0, 6.0]),
+            fix_orientation=[True, False],
+        )
+        solute = system.children[0]
+        assert isinstance(solute, Protein)
+        after = solute.xyz - solute.xyz.mean(axis=0)
+        assert np.allclose(after, before, atol=1e-6)
+        assert [chain.chain_id for chain in solute.chains] == ["A"]
+        labels = [(residue.name, residue.resnum) for residue in solute.residues()]
+        assert labels[0] == ("ALA", 1) and labels[-1] == ("VAL", 35)
+
+    @pytest.mark.skipif(mb.packing.PACKMOL is None, reason="PACKMOL is not installed")
     def test_solvated_gro_keeps_residue_names(self, protein_8ciq, water_sol):
         # Tests that mb.biopolymers.save writes the protein residue
         # names of a packed system to a .gro file, and that the plain
