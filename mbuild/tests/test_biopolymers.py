@@ -644,6 +644,34 @@ class TestProtein(BaseTest):
         with pytest.raises(MBuildError, match="bond_order must be"):
             protein.add_port_at(5, "NZ", chain_id="A", bond_order=0)
 
+        # Tests record_bond, which names the bond that force_overlap
+        # formed. This is needed because that path writes no record, so
+        # bond_records() reported nothing and a downstream loader could
+        # not learn about the modification. The test bonds a methyl
+        # fragment onto the port and reads back the record; its leaving
+        # atom must be the hydrogen that add_port_at removed above.
+        from mbuild.biopolymers.fragments import prepare_fragment
+        from mbuild.coordinate_transform import force_overlap
+        from mbuild.lib.moieties import CH3
+
+        fragment = prepare_fragment(CH3(), "MET")
+        fragment.resnum = 400
+        next(iter(protein.chains)).add(fragment)
+        force_overlap(
+            move_this=fragment,
+            from_positions=fragment.all_ports()[0],
+            to_positions=port,
+            add_bond=True,
+        )
+        protein.record_bond(nz, protein.get_atom(400, "C1", chain_id="A"))
+        assert protein.bond_records()[-1] == {
+            "residue_names": ("LYS", "MET"),
+            "residue_numbers": (12, 400),
+            "atom_names": ("NZ", "C1"),
+            "leaving_atoms": (["HZ1"], []),
+            "bond_order": 1,
+        }
+
     def test_port_cleanup_leaves_consistent_state(self):
         # Tests that the port creation path removes the auto-generated
         # ports and keeps the atom's remaining bonds. This is needed

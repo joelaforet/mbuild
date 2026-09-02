@@ -534,6 +534,10 @@ class Protein(Compound):
         super().__init__(name=name)
         self.library = library or CCDLibrary(download=download)
         self.cross_bonds = []
+        #: Map of anchor particle -> tuple of the hydrogen names that
+        #: were removed at that particle to open a port.
+        #: ``record_bond`` reads it for its default leaving-atom lists.
+        self._leaving_atoms = {}
         if filename is not None:
             self._load_pdb(filename)
 
@@ -563,6 +567,14 @@ class Protein(Compound):
             )
             for bond in self.cross_bonds
         ]
+        # The leaving-atom ledger holds default values for
+        # record_bond, not state the protein depends on, so an anchor
+        # that left this Protein is dropped instead of raising.
+        newone._leaving_atoms = {
+            clone_of[anchor]: names
+            for anchor, names in self._leaving_atoms.items()
+            if anchor in clone_of
+        }
         return newone
 
     # ------------------------------------------------------------------
@@ -1166,8 +1178,16 @@ class Protein(Compound):
         the named atom loses ``bond_order`` hydrogens, and a ``Port``
         pointing along the removed hydrogens is added to the residue.
         Use it with ``force_overlap`` for placements ``attach()`` does
-        not cover. Bonds formed this way are not recorded in
-        ``cross_bonds``.
+        not cover. ``force_overlap`` forms the bond but writes no
+        record, so call ``record_bond`` after it:
+
+        >>> port = protein.add_port_at(12, "NZ", chain_id="A")
+        >>> force_overlap(fragment, fragment_port, port, add_bond=True)
+        >>> protein.record_bond(port.anchor, fragment_atom)
+
+        ``record_bond`` takes the names of the hydrogens removed here
+        as the leaving atoms of the record, so ``bond_records``
+        describes such a bond the way it describes an ``attach`` bond.
 
         Parameters
         ----------
@@ -1198,6 +1218,78 @@ class Protein(Compound):
         port = self._port_along_hydrogens(self, atom, hydrogens, separation)
         residue.add(port, label="port[$]")
         return port
+
+    def record_bond(self, atom1, atom2, order=1, leaving1=None, leaving2=None):
+        """Record a bond formed outside ``attach`` in ``cross_bonds``.
+
+        ``add_port_at`` with ``force_overlap`` forms a bond but writes
+        no record, so ``bond_records`` does not report it and
+        ``save_pdb`` cannot describe it to a downstream loader. This
+        method adds the record for a bond that already exists.
+
+        The leaving atom names default to the hydrogens that
+        ``add_port_at`` removed at each atom. Pass ``leaving1`` or
+        ``leaving2`` when the bond replaced other atoms.
+
+        Parameters
+        ----------
+        atom1, atom2 : mbuild.Compound
+            The two bonded atoms. They must be bonded already, and they
+            must sit in two different residues of this protein.
+        order : int, optional, default=1
+            Order of the bond.
+        leaving1 : sequence of str, optional
+            Names of the atoms removed from the residue of ``atom1``.
+        leaving2 : sequence of str, optional
+            Names of the atoms removed from the residue of ``atom2``.
+
+        Returns
+        -------
+        InterResidueBond
+            The record, as appended to ``cross_bonds``.
+
+        Raises
+        ------
+        MBuildError
+            When an atom is not in a residue of this protein, when the
+            two atoms are not bonded, or when both sit in one residue.
+        """
+        residues = self._particle_residues()
+        for atom in (atom1, atom2):
+            if atom not in residues:
+                raise MBuildError(
+                    f"Atom {atom.name} is not in a residue of this "
+                    "Protein, so a bond to it cannot be recorded."
+                )
+        if atom2 not in atom1.direct_bonds():
+            raise MBuildError(
+                f"Atoms {atom1.name} and {atom2.name} are not bonded. "
+                "Form the bond first (for example with force_overlap), "
+                "then record it."
+            )
+        residue1 = residues[atom1][1]
+        residue2 = residues[atom2][1]
+        if residue1 is residue2:
+            raise MBuildError(
+                f"Atoms {atom1.name} and {atom2.name} are both in residue "
+                f"{residue1.name} {residue1.resnum}. cross_bonds holds "
+                "bonds between two residues."
+            )
+        record = InterResidueBond(
+            residue1=residue1,
+            residue2=residue2,
+            atom1_name=atom1.name,
+            atom2_name=atom2.name,
+            order=int(order),
+            leaving1=tuple(
+                self._leaving_atoms.get(atom1, ()) if leaving1 is None else leaving1
+            ),
+            leaving2=tuple(
+                self._leaving_atoms.get(atom2, ()) if leaving2 is None else leaving2
+            ),
+        )
+        self.cross_bonds.append(record)
+        return record
 
     def attach(
         self,
@@ -1479,8 +1571,7 @@ class Protein(Compound):
         if not self._warn_on_clashes(added, site_atom, frag_atom):
             logger.info("Fragment overlaps resolved by relaxation.")
 
-    @staticmethod
-    def _port_along_hydrogens(root, atom, hydrogens, separation):
+    def _port_along_hydrogens(self, root, atom, hydrogens, separation):
         """Remove the hydrogens and return a Port pointing along them.
 
         The port points along the sum of the removed-hydrogen vectors,
@@ -1489,6 +1580,11 @@ class Protein(Compound):
         per severed bond; those are pruned (the same cleanup
         ``Polymer.add_monomer`` does) so the returned Port is the only
         open port at the atom.
+
+        The removed names are written to the ``_leaving_atoms`` ledger
+        under the anchor atom, which is where ``record_bond`` reads its
+        default leaving-atom lists. A second port at the same atom
+        replaces the entry.
         """
         orientation = sum(h.pos - atom.pos for h in hydrogens)
         if np.linalg.norm(orientation) < 1e-8:
@@ -1508,6 +1604,7 @@ class Protein(Compound):
             root._remove(port)
             port.parent.children.remove(port)
             root._remove_references(port)
+        self._leaving_atoms[atom] = tuple(sorted(h.name for h in hydrogens))
         return Port(anchor=atom, orientation=orientation, separation=separation / 2)
 
     @staticmethod
