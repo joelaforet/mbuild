@@ -2022,8 +2022,9 @@ class Protein(Compound):
         """Write a prepared PDB file for downstream residue-template loaders.
 
         Bonds made through ``add_port_at`` + ``force_overlap`` get
-        CONECT records but no ``cross_bonds`` record, so downstream
-        loaders need residue definitions for them from you.
+        CONECT records but no ``cross_bonds`` record, unless you call
+        ``record_bond`` first. Without that record, downstream loaders
+        need residue definitions for such a bond from you.
 
         mBuild's generic PDB writer (ParmEd via ``save``) cannot express
         residue numbers, chain identifiers, HETATM records, or a
