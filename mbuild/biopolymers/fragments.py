@@ -250,12 +250,11 @@ def _as_residues(compound, resname):
     residues : list of Residue
         The residues of the returned compound.
 
-    Raises
-    ------
-    ValueError
-        If ``resname`` is longer than three characters.
+    Notes
+    -----
+    ``resname`` is not checked here. Each caller checks the name
+    before it starts, so the error comes before any other work.
     """
-    _check_resname(resname)
     if isinstance(compound, Residue):
         # successors() does not yield the compound itself, so a Residue
         # input needs its own arm.

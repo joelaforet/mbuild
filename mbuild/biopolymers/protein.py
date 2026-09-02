@@ -1836,8 +1836,13 @@ class Protein(Compound):
         # fragments.py imports Residue from this module, so a top-level
         # import of fragments here would be circular. Import inside the
         # method instead.
-        from mbuild.biopolymers.fragments import _as_residues
+        from mbuild.biopolymers.fragments import _as_residues, _check_resname
 
+        # The name is checked first, before the attachment site is
+        # read and before any warning is logged. The check ran inside
+        # _as_residues before, so the charge warning of a valid site
+        # reached the user ahead of the error about the name.
+        _check_resname(fragment_resname)
         bond_order = int(bond_order)
         site_residue, site_atom, site_hydrogens = self._attachment_site(
             resnum, atom_name, chain_id, icode, bond_order
