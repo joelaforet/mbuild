@@ -165,8 +165,15 @@ def _parse_pdb(text):
             # skips the rest. The letters belong to the disorder group
             # of one residue. A letter chosen over the whole file would
             # drop every record of a residue that uses other letters.
-            # openff-pablo keeps the same pair
-            # (_pdb_data.py, _allowed_alt_locs).
+            # openff-pablo follows another rule
+            # (_pdb_data.py, _allowed_alt_locs). It collects the
+            # altLoc values of the whole file. If the file holds one
+            # value, pablo keeps that value. If the file holds more
+            # than one, pablo keeps the blank value and the letter 'A'
+            # only, and it warns. In a file whose records carry blank,
+            # 'B' and 'C', pablo therefore keeps the blank records
+            # alone, and this reader keeps the blank records plus the
+            # first letter of each residue.
             alt_loc = line[16].strip()
             if alt_loc:
                 kept = kept_alt_loc_by_key.setdefault(key, alt_loc)
