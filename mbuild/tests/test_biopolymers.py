@@ -614,6 +614,36 @@ class TestProtein(BaseTest):
             )
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach_warns_when_the_anchor_keeps_its_charge(
+        self, protein_6m03, acetone, caplog
+    ):
+        # Tests that attach() warns when the anchor atom holds a formal
+        # charge that the new bond does not change, and that it still
+        # forms the bond. This is needed because one hydrogen leaves the
+        # anchor and the new bond takes its place, so a lysine at +1
+        # gives a protonated amide, which is not a real species; the
+        # recipe stays permissive and names deprotonate() as the remedy
+        # instead of blocking the call. The test attaches a fragment to
+        # a charged LYS 5 NZ without deprotonating it, reads the log,
+        # and checks the new bond.
+        import logging
+
+        protein = protein_6m03
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein.attach(
+                acetone,
+                "C1",
+                resnum=5,
+                atom_name="NZ",
+                chain_id="A",
+                fragment_resname="ACT",
+                relax=False,
+            )
+        assert 'deprotonate(5, "NZ", chain_id="A")' in caplog.text
+        nz = protein.get_atom(5, "NZ", chain_id="A")
+        carbon = protein.get_atom(307, "C1", chain_id="A")
+        assert protein.bond_graph.has_edge(nz, carbon)
+
     def test_attach_warns_on_clashes(self, protein_6m03, caplog):
         # Tests that attaching a bulky fragment into a crowded site logs
         # a clash warning. This is needed because port alignment is

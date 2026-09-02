@@ -1541,6 +1541,7 @@ class Protein(Compound):
         site_residue, site_atom, site_hydrogens = self._attachment_site(
             resnum, atom_name, chain_id, icode, bond_order
         )
+        self._warn_on_kept_charge(site_residue, resnum, atom_name)
         added, frag_residues = _as_residues(clone(fragment), fragment_resname)
         frag_atom, frag_residue, frag_hydrogens = self._fragment_site(
             frag_residues, fragment_atom_name, fragment_resnum, bond_order
@@ -1579,6 +1580,44 @@ class Protein(Compound):
 
         self._relax_if_clashing(added, site_atom, frag_atom, frag_residues, relax)
         return record
+
+    @staticmethod
+    def _warn_on_kept_charge(residue, resnum, atom_name):
+        """Warn when the anchor atom keeps a formal charge across the bond.
+
+        A hydrogen leaves the anchor atom, and the new bond takes its
+        place, so the formal charge of the atom does not change. A
+        charged anchor therefore gives a charged product. For an
+        acylation that product is a protonated amide, which is not a
+        real species; the neutral amine is the reactant that gives the
+        neutral amide. The warning names ``deprotonate`` as the
+        remedy and the call proceeds, because other chemistries do keep
+        a charge on the anchor atom.
+
+        Parameters
+        ----------
+        residue : Residue
+            The residue that holds the anchor atom.
+        resnum : int
+            Residue number the caller passed to ``attach``.
+        atom_name : str
+            Name of the anchor atom.
+        """
+        charge = residue.atom_formal_charges.get(atom_name, 0)
+        if not charge:
+            return
+        chain_id = _chain_of(residue).chain_id
+        label = f"{residue.name} {residue.resnum}"
+        call = f'deprotonate({resnum}, "{atom_name}"'
+        if chain_id:
+            label = f"{label} {chain_id}"
+            call = f'{call}, chain_id="{chain_id}"'
+        logger.warning(
+            f"{label} atom {atom_name} has formal charge {charge:+d} before "
+            f"this bond and {charge:+d} after it. Call {call}) before "
+            "attach() if a neutral product is correct for the chemistry you "
+            "model."
+        )
 
     def _attachment_site(self, resnum, atom_name, chain_id, icode, bond_order):
         """Return the protein-side residue, atom, and leaving hydrogens.
