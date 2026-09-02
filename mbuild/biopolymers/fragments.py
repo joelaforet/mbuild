@@ -31,6 +31,15 @@ def _wrap_in_residue(compound, fragment_resname):
     converter) derive a particle's residue from its direct parent, so
     a particle nested below a wrapper Compound would get the wrong
     residue. Ports of the compound are carried over.
+
+    ``Compound.flatten`` does the same move on one compound, but it is
+    not reused here, because it loses the bond orders.
+    ``Compound.flatten`` collects each bond as a pair of particles and
+    adds it again as ``add_bond(pair)``, and ``Compound.add_bond``
+    turns the absent ``bond_order`` into 0.0. The recipe needs a real
+    bond order on every bond: ``Protein.to_rdkit`` raises on a bond
+    whose order is 0.0. The loop below therefore reads ``bond_order``
+    from each bond and writes the same value back.
     """
     resname = (fragment_resname or compound.name or "LIG")[:3].upper()
     if not resname.isalnum():
