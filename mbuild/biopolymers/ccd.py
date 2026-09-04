@@ -759,7 +759,8 @@ def _add_synonyms(template):
     atoms = []
     for atom in template.atoms:
         # dict.fromkeys keeps the first occurrence of each name, so the
-        # CCD synonyms stay first and duplicates from the table drop out.
+        # CCD synonyms stay first and a duplicate from the table is
+        # removed.
         names = (*atom.synonyms, *extra.get(atom.name, ()))
         atoms.append(replace(atom, synonyms=tuple(dict.fromkeys(names))))
     return replace(template, atoms=tuple(atoms))
