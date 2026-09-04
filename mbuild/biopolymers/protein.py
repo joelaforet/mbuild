@@ -84,8 +84,8 @@ _SPLIT_CHARGE_MAX_BONDS = 2
 #: Length of a new X-H bond, in nm, keyed by the element symbol of the
 #: heavy atom X. The values are the standard single-bond lengths: N-H
 #: 1.01 A, O-H 0.96 A, S-H 1.34 A. Any other element gets
-#: ``_PROTON_BOND_LENGTH``, which is the order of magnitude of all
-#: three.
+#: ``_PROTON_BOND_LENGTH``, which is a rounded value near the three
+#: lengths.
 _PROTON_BOND_LENGTHS = {"N": 0.101, "O": 0.096, "S": 0.134}
 _PROTON_BOND_LENGTH = 0.100
 
@@ -464,10 +464,10 @@ def _proton_position(atom):
     the reverse of the sum of the unit vectors to its bonded neighbors.
     An atom with one neighbor has no such direction, because every
     direction around that one bond is equally open. The proton then
-    goes at 109 degrees from the bond, which is the tetrahedral angle.
-    The direction lies in the plane of the bond and one atom bonded to
-    the neighbor. It points to the far side of the bond from that atom.
-    A hydroxyl placed this way is anti to that atom.
+    goes at 109.47 degrees from the bond, which is the tetrahedral
+    angle. The direction lies in the plane of the bond and one atom
+    bonded to the neighbor. It points to the far side of the bond from
+    that atom. A hydroxyl placed this way is anti to that atom.
 
     The result is a starting geometry. The bond length is correct and
     the angle is a standard value, but the position ignores every other
