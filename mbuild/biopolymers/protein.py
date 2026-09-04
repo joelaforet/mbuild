@@ -464,10 +464,10 @@ def _proton_position(atom):
     the reverse of the sum of the unit vectors to its bonded neighbors.
     An atom with one neighbor has no such direction, because every
     direction around that one bond is equally open. The proton then
-    goes at 109 degrees from the bond, which is the tetrahedral angle,
-    in the plane of the bond and one atom bonded to the neighbor, and
-    on the far side of the bond from that atom. A hydroxyl placed this
-    way is anti to that atom.
+    goes at 109 degrees from the bond, which is the tetrahedral angle.
+    The direction lies in the plane of the bond and one atom bonded to
+    the neighbor. It points to the far side of the bond from that atom.
+    A hydroxyl placed this way is anti to that atom.
 
     The result is a starting geometry. The bond length is correct and
     the angle is a standard value, but the position ignores every other
@@ -2407,9 +2407,9 @@ class Protein(Compound):
         """Add a proton to one atom and update its charge.
 
         This is the mirror of ``deprotonate``. The proton is the one
-        that the CCD template of the residue bonds to ``atom_name``:
-        an acidic proton that the residue lost, or the proton of a
-        basic site such as the N-terminal amine. The new template
+        that the CCD template of the residue bonds to ``atom_name``.
+        It is an acidic proton that the residue lost, or the proton of
+        a basic site such as the N-terminal amine. The new template
         variant comes from the template library, so ``template``,
         ``formal_charge`` and ``atom_formal_charges`` describe the
         protonated residue, and a PDB written from it reloads.
@@ -2421,8 +2421,8 @@ class Protein(Compound):
         one and needs no ``_warn_if_variant_is_absent`` check.
 
         The call changes nothing and logs a warning when the atom takes
-        no proton, for example because it is already protonated or
-        because it bonds to another residue. A notebook cell that calls
+        no proton. That happens when the atom is already protonated, or
+        when it bonds to another residue. A notebook cell that calls
         this method therefore runs a second time without an error.
 
         The proton is placed at a standard bond length, in the most

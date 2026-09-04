@@ -1147,8 +1147,8 @@ class TestProtein(BaseTest):
         # constructs the new template instead of matching it, so some
         # sites give a residue that save_pdb writes and the loader
         # cannot read back. The test deprotonates TRP 31 NE1, which the
-        # library does not hold, then CYS 16 SG, which it does, and
-        # reads the log after each call.
+        # library does not hold. It then deprotonates CYS 16 SG, which
+        # the library holds, and reads the log after each call.
         protein = protein_6m03
         with caplog.at_level(logging.WARNING, logger="mbuild"):
             protein.deprotonate(31, "NE1", chain_id="A")
