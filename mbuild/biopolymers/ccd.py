@@ -756,18 +756,13 @@ def _add_synonyms(template):
     extra = _ATOM_NAME_SYNONYMS.get(template.name)
     if not extra:
         return template
-    return replace(
-        template,
-        atoms=tuple(
-            replace(
-                atom,
-                synonyms=tuple(
-                    dict.fromkeys((*atom.synonyms, *extra.get(atom.name, ())))
-                ),
-            )
-            for atom in template.atoms
-        ),
-    )
+    atoms = []
+    for atom in template.atoms:
+        # dict.fromkeys keeps the first occurrence of each name, so the
+        # CCD synonyms stay first and duplicates from the table drop out.
+        names = (*atom.synonyms, *extra.get(atom.name, ()))
+        atoms.append(replace(atom, synonyms=tuple(dict.fromkeys(names))))
+    return replace(template, atoms=tuple(atoms))
 
 
 def _protonation_variants(template):
