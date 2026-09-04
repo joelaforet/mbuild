@@ -1356,9 +1356,10 @@ class Protein(Compound):
         Allow the default library to download unknown residue codes from
         RCSB.
     name : str, optional, default="Protein"
-    bond_records : str, optional
+    bond_records : str or os.PathLike, optional
         Path of the bond-records file that ``save_pdb`` wrote next to
-        ``filename``. It carries the residue templates of the fragments
+        ``filename``. ``save_pdb`` takes ``write_bond_records`` for the
+        flag that writes the file. It carries the residue templates of the fragments
         that mBuild added and the inter-residue bonds of every covalent
         modification, so a modified protein loads again with the same
         particles, bonds, formal charges and bond records.
@@ -1374,11 +1375,23 @@ class Protein(Compound):
     ):
         super().__init__(name=name)
         self.library = library or CCDLibrary(download=download)
-        if bond_records is not None and filename is None:
-            raise MBuildError(
-                "bond_records describes the residues of a PDB file. "
-                "Pass filename as well."
-            )
+        if bond_records is not None:
+            # The writer flag of save_pdb and this path argument used
+            # to carry one name. A caller who passes a bool here gets a
+            # message that names both arguments, because open() would
+            # otherwise report a file descriptor.
+            if not isinstance(bond_records, (str, os.PathLike)):
+                raise TypeError(
+                    "bond_records takes the path of a .bondrecords.json "
+                    f"file, but it got {bond_records!r}. save_pdb takes "
+                    "write_bond_records for the flag that writes such a "
+                    "file."
+                )
+            if filename is None:
+                raise MBuildError(
+                    "bond_records describes the residues of a PDB file. "
+                    "Pass filename as well."
+                )
         self.cross_bonds = []
         #: Map of anchor particle -> tuple of the hydrogen names that
         #: were removed at that particle to open a port. Repeated ports
@@ -1916,7 +1929,7 @@ class Protein(Compound):
             writer.
         **kwargs
             Passed to the selected writer. For ``.pdb`` files only
-            ``overwrite`` and ``bond_records`` are accepted.
+            ``overwrite`` and ``write_bond_records`` are accepted.
         """
         return save(self, filename, **kwargs)
 
@@ -3182,7 +3195,7 @@ class Protein(Compound):
     # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
-    def save_pdb(self, filename, overwrite=False, bond_records=True):
+    def save_pdb(self, filename, overwrite=False, write_bond_records=True):
         """Write a prepared PDB file for downstream residue-template loaders.
 
         A second file, ``<stem>.bondrecords.json``, is written next to
@@ -3227,7 +3240,7 @@ class Protein(Compound):
             Path of the PDB file to write.
         overwrite : bool, optional, default=False
             Overwrite the two files if they exist.
-        bond_records : bool, optional, default=True
+        write_bond_records : bool, optional, default=True
             Write the bond-records file next to the PDB file. When it
             is false and a bond-records file of an earlier save sits
             next to the PDB file, a warning names that file as
@@ -3239,7 +3252,7 @@ class Protein(Compound):
         # refused overwrite leaves neither file changed. The two files
         # describe one protein, and a PDB file next to an older sidecar
         # would load as a different molecule.
-        sidecar = _bond_records_path(filename) if bond_records else None
+        sidecar = _bond_records_path(filename) if write_bond_records else None
         if sidecar is not None and os.path.exists(sidecar) and not overwrite:
             raise IOError(f"{sidecar} exists; not overwriting")
         write_pdb(self, filename, overwrite=overwrite)
@@ -3252,7 +3265,8 @@ class Protein(Compound):
                 logger.warning(
                     f"{stale} exists and was not written again. It describes "
                     f"an earlier save, so it can be stale for {filename}. "
-                    "Delete it, or save again without bond_records=False."
+                    "Delete it, or save again without "
+                    "write_bond_records=False."
                 )
             return
         with open(sidecar, "w") as handle:
@@ -3563,7 +3577,7 @@ def save(compound, filename, **kwargs):
         # generic ParmEd writer cannot express residue numbers, chain
         # identifiers, HETATM records, or a selective CONECT policy, so
         # it writes a blank chain column and no CONECT records.
-        accepted = {"overwrite", "bond_records"}
+        accepted = {"overwrite", "write_bond_records"}
         unexpected = set(kwargs) - accepted
         if unexpected:
             raise MBuildError(

@@ -2064,12 +2064,13 @@ class TestProteinExports(BaseTest):
         # Tests that save_pdb writes the bond-records file next to the
         # PDB file, that the file holds the records and a template for
         # the fragment residue, that the info log names the file and
-        # the call that reads it back, and that bond_records=False
-        # writes no such file. This is needed because the file carries
-        # the only chemistry a loader can get for a residue that the
-        # CCD does not define, and a user who never sees the file
-        # cannot pass it back. The test acylates LYS 5 NZ, saves twice,
-        # and reads the document, the log, and the directory.
+        # the call that reads it back, and that a false
+        # write_bond_records writes no such file. This is needed
+        # because the file carries the only chemistry a loader can get
+        # for a residue that the CCD does not define, and a user who
+        # never sees the file cannot pass it back. The test acylates
+        # LYS 5 NZ, saves twice, and reads the document, the log, and
+        # the directory.
         from mbuild.biopolymers.fragments import prepare_fragment
 
         protein = protein_6m03
@@ -2115,7 +2116,7 @@ class TestProteinExports(BaseTest):
         assert {"atom1": "C1", "atom2": "H1", "order": 1} in template["bonds"]
         assert {"C1", "O1"} <= {atom["name"] for atom in template["atoms"]}
 
-        protein.save_pdb("plain.pdb", bond_records=False)
+        protein.save_pdb("plain.pdb", write_bond_records=False)
         assert not Path("plain.bondrecords.json").exists()
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
@@ -2213,6 +2214,16 @@ class TestProteinExports(BaseTest):
         with pytest.raises(MBuildError, match="version 99"):
             Protein(get_fn("6m03_protonated.pdb"), bond_records=str(path))
 
+    def test_the_writer_flag_is_refused_as_a_sidecar_path(self):
+        # Tests that a bool given to the bond_records argument of
+        # Protein raises a TypeError that names both arguments. This is
+        # needed because the reader argument takes a path and the
+        # writer flag of save_pdb takes a bool, and a caller who
+        # confuses the two would otherwise reach open() with a file
+        # descriptor. The test builds a Protein with bond_records=True.
+        with pytest.raises(TypeError, match="write_bond_records"):
+            Protein(get_fn("3cu9_vicinal_disulfide.pdb"), bond_records=True)
+
     def test_bond_record_of_another_protein_is_refused(self):
         # Tests that a record whose residue the PDB file does not hold
         # raises an error that names the bond-records file and the
@@ -2242,7 +2253,7 @@ class TestProteinExports(BaseTest):
         protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
         protein.save_pdb("stale.pdb")
         with caplog.at_level(logging.WARNING, logger="mbuild"):
-            protein.save_pdb("stale.pdb", overwrite=True, bond_records=False)
+            protein.save_pdb("stale.pdb", overwrite=True, write_bond_records=False)
         assert "stale.bondrecords.json exists and was not written again" in caplog.text
 
     def test_reverse_nc_bond_gets_conect(self, protein_6m03):
