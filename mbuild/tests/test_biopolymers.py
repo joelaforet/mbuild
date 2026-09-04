@@ -2147,7 +2147,8 @@ class TestProteinExports(BaseTest):
         # reload registers that template in the library, so the second
         # save must still write it. The test acylates LYS 5 NZ, saves,
         # loads the pair of files, compares the two proteins, then
-        # saves and loads the reloaded protein and compares again.
+        # saves and loads the reloaded protein, compares again, and
+        # compares the two sidecar files byte for byte.
         from mbuild.biopolymers.fragments import prepare_fragment
 
         protein = protein_6m03
@@ -2178,6 +2179,16 @@ class TestProteinExports(BaseTest):
         assert twice.n_particles == protein.n_particles
         assert twice.net_formal_charge == protein.net_formal_charge
         assert twice.bond_records() == protein.bond_records()
+        # The two saves describe one protein, so the two sidecar files
+        # must hold the same bytes. This is needed because the atoms and
+        # the bonds of a template came out in the order in which mBuild
+        # built the residue, and the reload builds it in a second order.
+        # A file that changes on every save gives a false difference in
+        # a diff and in version control.
+        assert (
+            Path("acylated.bondrecords.json").read_bytes()
+            == Path("acylated_again.bondrecords.json").read_bytes()
+        )
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_reload_separates_modified_and_free_lysines(self, protein_6m03):

@@ -1357,6 +1357,44 @@ def _leaving_element(residue, name):
     return "H"
 
 
+def _canonical_template_order(atoms, bonds):
+    """Return the atoms and the bonds of a template in one fixed order.
+
+    A residue holds its atoms and its bonds in the order in which
+    mBuild built them, and two equal residues can hold them in two
+    orders. The order carries no chemistry. This function removes it.
+    The atoms are sorted, and each name is unique in a residue, so the
+    result is a sort by atom name. The two atom names of each bond are
+    sorted first, and then the bonds are sorted.
+
+    ``_template_dict`` writes the sidecar file in this order, so that
+    two saves of one protein give the same bytes.
+    ``_template_signature`` compares two residues of one name in this
+    order, so that the build order does not make them differ.
+
+    Parameters
+    ----------
+    atoms : list of dict
+        The atoms, each with ``name``, ``element``, ``formal_charge``
+        and ``leaving``.
+    bonds : list of dict
+        The bonds, each with ``atom1``, ``atom2`` and ``order``.
+
+    Returns
+    -------
+    tuple of list
+        The sorted atom tuples and the sorted bond tuples.
+    """
+    ordered_atoms = sorted(
+        (atom["name"], atom["element"], atom["formal_charge"], atom["leaving"])
+        for atom in atoms
+    )
+    ordered_bonds = sorted(
+        (*sorted((bond["atom1"], bond["atom2"])), bond["order"]) for bond in bonds
+    )
+    return ordered_atoms, ordered_bonds
+
+
 def _template_dict(residue, links):
     """Return the sidecar template of one residue that mBuild built.
 
@@ -1372,6 +1410,11 @@ def _template_dict(residue, links):
     ``linking`` and ``crosslink`` are null. The sidecar records the
     inter-residue bonds separately, and the reader patches them onto
     the template.
+
+    The atoms and the bonds are written in the order that
+    ``_canonical_template_order`` gives. The build order of the residue
+    therefore does not reach the file, and two saves of one protein
+    give the same bytes.
 
     Parameters
     ----------
@@ -1409,11 +1452,23 @@ def _template_dict(residue, links):
             }
         )
         bonds.append({"atom1": link_name, "atom2": leaving_name, "order": 1})
+    ordered_atoms, ordered_bonds = _canonical_template_order(atoms, bonds)
     return {
         "name": residue.name,
         "description": f"{residue.name} as built by mBuild",
-        "atoms": atoms,
-        "bonds": bonds,
+        "atoms": [
+            {
+                "name": name,
+                "element": element,
+                "formal_charge": formal_charge,
+                "leaving": leaving,
+            }
+            for name, element, formal_charge, leaving in ordered_atoms
+        ],
+        "bonds": [
+            {"atom1": atom1, "atom2": atom2, "order": order}
+            for atom1, atom2, order in ordered_bonds
+        ],
         "linking": None,
         "crosslink": None,
     }
@@ -1425,8 +1480,7 @@ def _template_signature(template):
     Two residues of one name must give one template. The comparison
     must not depend on the order in which the atoms and the bonds were
     built, because two equal fragments can hold them in two orders.
-    The signature therefore sorts both, and it sorts the two atoms of
-    each bond.
+    ``_canonical_template_order`` removes that order.
 
     Parameters
     ----------
@@ -1438,14 +1492,7 @@ def _template_signature(template):
     tuple
         The sorted atoms and the sorted bonds.
     """
-    atoms = sorted(
-        (atom["name"], atom["element"], atom["formal_charge"], atom["leaving"])
-        for atom in template["atoms"]
-    )
-    bonds = sorted(
-        (*sorted((bond["atom1"], bond["atom2"])), bond["order"])
-        for bond in template["bonds"]
-    )
+    atoms, bonds = _canonical_template_order(template["atoms"], template["bonds"])
     return (tuple(atoms), tuple(bonds))
 
 
