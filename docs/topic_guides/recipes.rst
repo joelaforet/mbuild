@@ -23,10 +23,15 @@ file with bond records for downstream parameterization. Worked examples
 live in the demos repository:
 https://github.com/joelaforet/mbuild_protein_demos
 
-The loader reads one conformer of a disordered atom. It keeps the
-records whose alternate location indicator is blank and the records
-that carry the first non-blank indicator of the file. It skips the
-other conformers and it names the affected residues in a warning.
+Some PDB files give an atom two or more alternate positions, marked A,
+B, and so on in the altLoc column. The loader takes the first conformer
+in the file: it keeps the records with no altLoc mark and the records
+that carry the first mark, usually A. It drops the other positions and
+lists the affected residues in a warning. The first conformer is not
+always the one you want to model. Choose the conformer before you load
+the file: select it in your preparation tool, or with PyMOL or a text
+editor, and remove the other altLoc records. Then the loader has one
+position per atom and gives no warning.
 
 Prepare a charged site before you bond to it. ``attach`` removes one
 hydrogen from the anchor atom and puts the new bond in its place, so
@@ -44,6 +49,15 @@ fragment has no CCD entry, and mBuild declares no modification bond in
 the file, so the loader cannot match the fragment residue. Hand the PDB
 file and ``bond_records()`` to a downstream tool, which builds the
 residue definition for the modification.
+
+.. warning::
+
+    ``Compound.save`` writes a wrong ``.gro`` file for a protein, and it
+    raises no error. It sends ``.gro`` to the generic GMSO converter,
+    which numbers residues by counting each residue name, so the file
+    holds one residue named ``Chain`` for the whole protein. Write the
+    packed system with ``mb.biopolymers.save`` instead. It gives every
+    residue its own name and number.
 
 .. autoclass:: mbuild.biopolymers.protein.Protein
     :members:
@@ -66,12 +80,14 @@ residue definition for the modification.
 Solvating a protein
 ^^^^^^^^^^^^^^^^^^^
 
-Attach every fragment and relax it before the protein is packed:
-PACKMOL holds the solute rigid, so a clash that is present at packing
-time stays in the packed system. ``mb.solvate`` keeps the recipe's
-hierarchy, so the solute child of the packed system is still a
-``Protein`` and still answers ``save_pdb``, ``bond_records`` and the
-residue accessors.
+Modify and relax the protein before you solvate it. PACKMOL keeps the
+solute rigid, so a clash between a fragment and the protein at packing
+time stays in the packed system.
+
+``mb.solvate`` returns a Compound that holds the protein as its first
+child. That child is still the ``Protein`` object, so you can still call
+``save_pdb``, ``bond_records``, ``get_residue`` and the other
+``Protein`` methods on it.
 
 .. code-block:: python
 
@@ -95,11 +111,14 @@ residue accessors.
 
     mb.biopolymers.save(system, "system.gro", box=box)
 
-Write the packed system with ``mb.biopolymers.save``, not with
-``Compound.save``. ``Compound.save`` sends ``.gro`` to the module-level
-GMSO converter, which numbers residues by counting each residue name,
-so the file holds one residue named ``Chain`` for the whole protein.
-``mb.biopolymers.save`` gives every residue its own name and number.
+.. warning::
+
+    ``Compound.save`` writes a wrong ``.gro`` file for a packed protein,
+    and it raises no error. It sends ``.gro`` to the generic GMSO
+    converter, which numbers residues by counting each residue name, so
+    the file holds one residue named ``Chain`` for the whole protein.
+    Write the packed system with ``mb.biopolymers.save`` instead. It
+    gives every residue its own name and number.
 
 Three further points:
 
