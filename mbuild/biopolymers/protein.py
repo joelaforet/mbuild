@@ -1619,9 +1619,9 @@ class Protein(Compound):
 
         A bond-records file is read after the parse and before the
         match. It registers the templates of the residues that the CCD
-        does not define, and it patches the crosslink onto the
-        templates of the residues it names, so that the matcher
-        explains the atoms those bonds displaced. It needs the parsed
+        does not define. It also patches the crosslink onto the
+        templates of the residues it names. The matcher then explains
+        the atoms that those bonds displaced. The file needs the parsed
         groups, because every record is checked against them first.
         """
         with open(filename) as handle:

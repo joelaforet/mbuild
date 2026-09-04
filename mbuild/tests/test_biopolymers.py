@@ -2247,9 +2247,9 @@ class TestProteinExports(BaseTest):
     def test_two_fragments_under_one_code_warn(self, protein_6m03, caplog):
         # Tests that save_pdb warns when two hetatm residues share a
         # residue name but hold different atoms. This is needed because
-        # the bond-records file holds one template per residue name, so
-        # the reload gives both residues the chemistry of the first,
-        # and a user who reuses a code would get the wrong molecule
+        # the bond-records file holds one template per residue name.
+        # The reload therefore gives both residues the chemistry of the
+        # first. A user who reuses a code would get the wrong molecule
         # with no message. The test acylates LYS 5 and LYS 12 with two
         # fragments of different length under the code OC8, saves, and
         # reads the log.
@@ -2273,13 +2273,13 @@ class TestProteinExports(BaseTest):
     def test_a_leaving_atom_keeps_its_element_across_saves(self, protein_6m03):
         # Tests that a save of a reloaded protein writes the element
         # that the template gives for a leaving atom. This is needed
-        # because a leaving atom is absent from the protein, so the
-        # writer has no particle to read the element from, and a bond
-        # that displaced a heavier atom used to become a hydrogen on
-        # every save. The test acylates LYS 5 NZ, saves, edits the
+        # because a leaving atom is absent from the protein. The writer
+        # has no particle to read the element from. A bond that
+        # displaced a heavier atom used to become a hydrogen on every
+        # save. The test acylates LYS 5 NZ and saves. It then edits the
         # written file so that the acyl side loses a chlorine, which is
-        # what an acid chloride loses, reloads, saves again, and reads
-        # the element back.
+        # what an acid chloride loses. It reloads, saves again, and
+        # reads the element back.
         from mbuild.biopolymers.fragments import prepare_fragment
 
         protein = protein_6m03
@@ -2337,9 +2337,9 @@ class TestProteinExports(BaseTest):
         # Tests that a bool given to the bond_records argument of
         # Protein raises a TypeError that names both arguments. This is
         # needed because the reader argument takes a path and the
-        # writer flag of save_pdb takes a bool, and a caller who
-        # confuses the two would otherwise reach open() with a file
-        # descriptor. The test builds a Protein with bond_records=True.
+        # writer flag of save_pdb takes a bool. A caller who confuses
+        # the two would otherwise reach open() with a file descriptor.
+        # The test builds a Protein with bond_records=True.
         with pytest.raises(TypeError, match="write_bond_records"):
             Protein(get_fn("3cu9_vicinal_disulfide.pdb"), bond_records=True)
 
@@ -2347,9 +2347,9 @@ class TestProteinExports(BaseTest):
         # Tests that a record whose residue the PDB file does not hold
         # raises an error that names the bond-records file and the
         # record. This is needed because a record patches the templates
-        # that the loader matches against, so a file of another protein
-        # or of an earlier save would change the chemistry of the load
-        # with no message. The test writes a real pair of files, edits
+        # that the loader matches against. A file of another protein or
+        # of an earlier save would change the chemistry of the load with
+        # no message. The test writes a real pair of files, edits
         # the residue number of the record, and loads the pair again.
         protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
         protein.save_pdb("edited.pdb")
