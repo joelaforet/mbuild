@@ -937,7 +937,8 @@ def _bridge_scope_message(label1, atom1_name, label2, atom2_name):
     crosslink to CYS only. A CONECT record between the sulfur or
     selenium atoms of two other residues therefore describes a bond
     that no template predicts. The text names both atoms, states the
-    limit, and points at the issue tracker.
+    limit, gives the action that is available today, and points at the
+    issue tracker.
 
     Parameters
     ----------
@@ -956,7 +957,8 @@ def _bridge_scope_message(label1, atom1_name, label2, atom2_name):
         f"{atom2_name} joins two sulfur or selenium atoms, but mBuild "
         "forms disulfide bridges between CYS residues only. Other "
         "bridging residues such as SEC, DCY and HCS are not supported "
-        "yet. Open an issue at "
+        "yet. To load the entry without the bridge, remove that CONECT "
+        "record. Open an issue at "
         "https://github.com/mosdef-hub/mbuild/issues if you need this "
         "residue."
     )
