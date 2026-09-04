@@ -172,7 +172,9 @@ def _wraparound_name(name):
     and ParmEd) still write them. The wwPDB Format Guide v3.30, section
     "Atom Names", puts the digit last, so version 3 files and the CCD
     write the same atoms as ``HB2`` and ``HH11``. This function rotates
-    the leading digits to the end of the name.
+    the leading digits to the end of the name. The wwPDB publishes the
+    atom naming rule on the Nomenclature page of the version 3.0 guide:
+    https://www.wwpdb.org/documentation/file-format-content/format30/sect12.html
 
     Parameters
     ----------
@@ -779,10 +781,11 @@ def _protonation_variants(template):
 
     The negative-nitrogen rule applies only to a charge that the
     variant creates. A CCD definition can carry a negatively charged
-    nitrogen of its own. The HEM definition is one example. It gives
-    -1 to two of the four pyrrole nitrogens, NA and NC; NB and ND
-    carry 0. The base charges are therefore the reference, and a
-    nitrogen that is already negative in the definition keeps that
+    nitrogen of its own. The HEM definition is one example:
+    https://files.wwpdb.org/pub/pdb/refdata/chem_comp/M/HEM/HEM.cif
+    It gives -1 to two of the four pyrrole nitrogens, NA and NC; NB
+    and ND carry 0. The base charges are therefore the reference, and
+    a nitrogen that is already negative in the definition keeps that
     charge in every variant.
     """
     acidic = [
