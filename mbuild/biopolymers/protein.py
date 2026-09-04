@@ -1235,6 +1235,51 @@ def _read_bond_records(filename):
     return document
 
 
+def _address_label(address):
+    """Return one residue address as text for a message.
+
+    Parameters
+    ----------
+    address : tuple
+        The chain identifier, residue number, insertion code and
+        residue name of one residue.
+
+    Returns
+    -------
+    str
+        The address, in the form that ``_PdbResidue.label`` uses.
+    """
+    chain_id, resnum, icode, resname = address
+    return f"{resname} {chain_id}:{resnum}{icode}"
+
+
+def _bond_record_label(record):
+    """Return the two residue addresses of one bond record as text.
+
+    A message about a record must name the residues that the record
+    holds, so that a reader finds them in both files.
+
+    Parameters
+    ----------
+    record : dict
+        One record of a bond-records file.
+
+    Returns
+    -------
+    str
+        The two addresses, joined by " and ".
+    """
+    return " and ".join(
+        _address_label(address)
+        for address in zip(
+            record["chain_ids"],
+            record["residue_numbers"],
+            record["icodes"],
+            record["residue_names"],
+        )
+    )
+
+
 def _template_dict(residue, links):
     """Return the sidecar template of one residue that mBuild built.
 
@@ -1399,17 +1444,20 @@ class Protein(Compound):
     def _load_pdb(self, filename, bond_records=None):
         """Parse the PDB file, match every residue, and build the hierarchy.
 
-        A bond-records file is read first. It registers the templates
-        of the residues that the CCD does not define, and it patches
-        the crosslink onto the templates of the residues it names, so
-        that the matcher explains the atoms those bonds displaced.
+        A bond-records file is read after the parse and before the
+        match. It registers the templates of the residues that the CCD
+        does not define, and it patches the crosslink onto the
+        templates of the residues it names, so that the matcher
+        explains the atoms those bonds displaced. It needs the parsed
+        groups, because every record is checked against them first.
         """
-        crosslink_orders = {}
-        if bond_records is not None:
-            crosslink_orders = self._apply_bond_records(bond_records)
         with open(filename) as handle:
             text = handle.read()
         groups, conects, box = _parse_pdb(text)
+
+        crosslink_orders = {}
+        if bond_records is not None:
+            crosslink_orders = self._apply_bond_records(bond_records, groups)
 
         # Peptide adjacency: consecutive peptide-capable residues in the
         # same chain with no TER between them may bond.
@@ -1494,7 +1542,7 @@ class Protein(Compound):
         if box is not None:
             self.box = box
 
-    def _apply_bond_records(self, filename):
+    def _apply_bond_records(self, filename, groups):
         """Read a bond-records file into the template library.
 
         Two changes are made. Every template of the file is registered
@@ -1505,6 +1553,10 @@ class Protein(Compound):
         matcher then explains the absent atoms of a modified residue,
         and ``_bond_crosslinks`` forms the bond from the CONECT record.
 
+        Every record is checked against the parsed PDB file before any
+        patch is made. A patch that no residue matches would change the
+        chemistry of the load with no message.
+
         The library is copied first. The patches describe this one
         file, and a library that the caller passed must keep its own
         templates.
@@ -1513,6 +1565,8 @@ class Protein(Compound):
         ----------
         filename : str
             Path of the bond-records file.
+        groups : list of _PdbResidue
+            The residue groups that the PDB file holds.
 
         Returns
         -------
@@ -1526,6 +1580,12 @@ class Protein(Compound):
             template = template_from_dict(data)
             self.library.register(template)
             self._sidecar_template_names.add(template.name)
+        addresses = {
+            (group.chain_id, group.resnum, group.icode, group.resname)
+            for group in groups
+        }
+        for record in document["bond_records"]:
+            self._check_bond_record(filename, record, addresses)
         orders = {}
         for record in document["bond_records"]:
             names = record["residue_names"]
@@ -1537,6 +1597,66 @@ class Protein(Compound):
                 )
             orders[frozenset(zip(names, atom_names))] = record["bond_order"]
         return orders
+
+    def _check_bond_record(self, filename, record, addresses):
+        """Check one record of a bond-records file against the PDB file.
+
+        A sidecar and a PDB file that do not describe one protein give
+        a load that is wrong and silent: the patched templates change
+        which variant each residue matches. Two checks stop that. Each
+        side of the record must name a residue that the PDB file holds,
+        by chain identifier, residue number, insertion code and residue
+        name. Each atom that the record names, the bonded atom and the
+        leaving atoms, must exist in a template variant of that
+        residue.
+
+        Parameters
+        ----------
+        filename : str
+            Path of the bond-records file, for the messages.
+        record : dict
+            One record of the file.
+        addresses : set of tuple
+            The (chain identifier, residue number, insertion code,
+            residue name) of every residue of the PDB file.
+
+        Raises
+        ------
+        MBuildError
+            When the record names a residue that the PDB file does not
+            hold, or an atom that the residue template does not hold.
+        """
+        label = _bond_record_label(record)
+        for side in (0, 1):
+            resname = record["residue_names"][side]
+            address = (
+                record["chain_ids"][side],
+                record["residue_numbers"][side],
+                record["icodes"][side],
+                resname,
+            )
+            if address not in addresses:
+                raise MBuildError(
+                    f"{filename} records a bond of {label}, but the PDB "
+                    f"file holds no residue {_address_label(address)}. The "
+                    "two files do not describe one protein."
+                )
+            try:
+                known = {
+                    atom.name
+                    for variant in self.library[resname]
+                    for atom in variant.atoms
+                }
+            except KeyError:
+                known = set()
+            wanted = {record["atom_names"][side], *record["leaving_atoms"][side]}
+            missing = sorted(wanted - known)
+            if missing:
+                raise MBuildError(
+                    f"{filename} records a bond of {label}, but the "
+                    f"template of {resname} holds no atom {missing}. The "
+                    "two files do not describe one protein."
+                )
 
     def _patch_crosslink(self, resname, atom_name, partner_name, leaving):
         """Give every variant of one residue a crosslink and its leaving atoms.
@@ -3108,7 +3228,10 @@ class Protein(Compound):
         overwrite : bool, optional, default=False
             Overwrite the two files if they exist.
         bond_records : bool, optional, default=True
-            Write the bond-records file next to the PDB file.
+            Write the bond-records file next to the PDB file. When it
+            is false and a bond-records file of an earlier save sits
+            next to the PDB file, a warning names that file as
+            possibly stale.
         """
         from mbuild.biopolymers.protein_pdb_io import write_pdb
 
@@ -3121,6 +3244,16 @@ class Protein(Compound):
             raise IOError(f"{sidecar} exists; not overwriting")
         write_pdb(self, filename, overwrite=overwrite)
         if sidecar is None:
+            # A sidecar of an earlier save stays on disk. It describes
+            # the older protein, and a reader who passes it back gets a
+            # load that does not match this PDB file.
+            stale = _bond_records_path(filename)
+            if os.path.exists(stale):
+                logger.warning(
+                    f"{stale} exists and was not written again. It describes "
+                    f"an earlier save, so it can be stale for {filename}. "
+                    "Delete it, or save again without bond_records=False."
+                )
             return
         with open(sidecar, "w") as handle:
             json.dump(self._bond_records_document(), handle, indent=2)

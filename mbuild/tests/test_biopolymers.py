@@ -2213,6 +2213,38 @@ class TestProteinExports(BaseTest):
         with pytest.raises(MBuildError, match="version 99"):
             Protein(get_fn("6m03_protonated.pdb"), bond_records=str(path))
 
+    def test_bond_record_of_another_protein_is_refused(self):
+        # Tests that a record whose residue the PDB file does not hold
+        # raises an error that names the bond-records file and the
+        # record. This is needed because a record patches the templates
+        # that the loader matches against, so a file of another protein
+        # or of an earlier save would change the chemistry of the load
+        # with no message. The test writes a real pair of files, edits
+        # the residue number of the record, and loads the pair again.
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        protein.save_pdb("edited.pdb")
+        path = Path("edited.bondrecords.json")
+        document = json.loads(path.read_text())
+        record = document["bond_records"][0]
+        record["residue_numbers"] = [999, record["residue_numbers"][1]]
+        path.write_text(json.dumps(document))
+        with pytest.raises(MBuildError, match="holds no residue CYS A:999") as error:
+            Protein("edited.pdb", bond_records=str(path))
+        assert "edited.bondrecords.json" in str(error.value)
+
+    def test_save_pdb_warns_about_a_sidecar_it_did_not_write(self, caplog):
+        # Tests that save_pdb warns when it writes no bond-records file
+        # and one of an earlier save sits next to the PDB file. This is
+        # needed because that file describes the earlier protein, so a
+        # reader who passes it back gets a load that does not match the
+        # new PDB file. The test saves a disulfide protein to one path
+        # twice, the second time without the records, and reads the log.
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        protein.save_pdb("stale.pdb")
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein.save_pdb("stale.pdb", overwrite=True, bond_records=False)
+        assert "stale.bondrecords.json exists and was not written again" in caplog.text
+
     def test_reverse_nc_bond_gets_conect(self, protein_6m03):
         # Tests that a bond from N of a residue to C of the next residue
         # gets a CONECT record. This is needed because the writer used
