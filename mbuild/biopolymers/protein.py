@@ -3221,8 +3221,12 @@ class Protein(Compound):
         A second file, ``<stem>.bondrecords.json``, is written next to
         the PDB file. It holds the bond records of every covalent
         modification and a residue template for every residue that
-        mBuild built and the CCD does not define. Pass that file back
-        to ``Protein`` to load the modified protein again::
+        mBuild built and the CCD does not define. The file is written
+        only when it carries one of those. An unmodified protein
+        without disulfides therefore gets no such file, while a protein
+        with disulfides gets one, because a disulfide is a bond record.
+        Pass that file back to ``Protein`` to load the modified protein
+        again::
 
             protein.save_pdb("modified.pdb")
             reloaded = Protein(
@@ -3261,36 +3265,44 @@ class Protein(Compound):
         overwrite : bool, optional, default=False
             Overwrite the two files if they exist.
         write_bond_records : bool, optional, default=True
-            Write the bond-records file next to the PDB file. When it
-            is false and a bond-records file of an earlier save sits
-            next to the PDB file, a warning names that file as
-            possibly stale.
+            Write the bond-records file next to the PDB file, when
+            there is a record or a template to write. When no such
+            file is written and one of an earlier save sits next to the
+            PDB file, a warning names that file as possibly stale.
         """
         from mbuild.biopolymers.protein_pdb_io import write_pdb
 
-        # The sidecar is checked before the PDB file is written, so a
-        # refused overwrite leaves neither file changed. The two files
-        # describe one protein, and a PDB file next to an older sidecar
-        # would load as a different molecule.
-        sidecar = _bond_records_path(filename) if write_bond_records else None
+        # A document with no record and no template describes nothing
+        # that the PDB file does not already hold, so no file is
+        # written for it. A user then finds a bond-records file next to
+        # a PDB file only when the file carries something.
+        sidecar = None
+        document = None
+        if write_bond_records:
+            document = self._bond_records_document()
+            if document["bond_records"] or document["templates"]:
+                sidecar = _bond_records_path(filename)
+        # The bond-records file is checked before the PDB file is
+        # written, so a refused overwrite leaves neither file changed.
+        # The two files describe one protein, and a PDB file next to an
+        # older bond-records file would load as a different molecule.
         if sidecar is not None and os.path.exists(sidecar) and not overwrite:
             raise IOError(f"{sidecar} exists; not overwriting")
         write_pdb(self, filename, overwrite=overwrite)
         if sidecar is None:
-            # A sidecar of an earlier save stays on disk. It describes
-            # the older protein, and a reader who passes it back gets a
-            # load that does not match this PDB file.
+            # A bond-records file of an earlier save stays on disk. It
+            # describes the older protein, and a reader who passes it
+            # back gets a load that does not match this PDB file.
             stale = _bond_records_path(filename)
             if os.path.exists(stale):
                 logger.warning(
                     f"{stale} exists and was not written again. It describes "
                     f"an earlier save, so it can be stale for {filename}. "
-                    "Delete it, or save again without "
-                    "write_bond_records=False."
+                    "Delete it if it does not describe this protein."
                 )
             return
         with open(sidecar, "w") as handle:
-            json.dump(self._bond_records_document(), handle, indent=2)
+            json.dump(document, handle, indent=2)
         logger.info(
             f"Wrote {len(self.cross_bonds)} bond records to {sidecar}. "
             "Load the modified protein again with "

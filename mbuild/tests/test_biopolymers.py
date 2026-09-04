@@ -1872,11 +1872,16 @@ class TestProteinExports(BaseTest):
         # chemistry. This is needed because the written file is the
         # handoff artifact for residue-template readers, which apply
         # the same matching rules as Protein. The test writes and
-        # reloads the protein, compares counts and net charge, and
-        # checks the fixed-column layout of one atom line.
+        # reloads the protein, compares counts and net charge, checks
+        # the fixed-column layout of one atom line, and checks that no
+        # bond-records file was written.
         protein = protein_6m03
         out = Path("roundtrip.pdb")
         protein.save_pdb(str(out))
+        # 6m03 holds no disulfide and no attached fragment, so there is
+        # no bond record and no template to write. An empty file would
+        # tell a user nothing and would look like a file to pass back.
+        assert not Path("roundtrip.bondrecords.json").exists()
         reloaded = Protein(str(out))
         assert reloaded.n_particles == protein.n_particles
         assert reloaded.net_formal_charge == protein.net_formal_charge
