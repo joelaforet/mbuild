@@ -44,11 +44,21 @@ so call ``Protein.deprotonate`` first:
     protein.deprotonate(63, "NZ", chain_id="A")
     protein.attach(fragment, resnum=63, atom_name="NZ", chain_id="A")
 
-A written modified protein does not load again in mBuild. The attached
-fragment has no CCD entry, and mBuild declares no modification bond in
-the file, so the loader cannot match the fragment residue. Hand the PDB
-file and ``bond_records()`` to a downstream tool, which builds the
-residue definition for the modification.
+``save_pdb`` writes a second file next to the PDB file, with the same
+stem and the suffix ``.bondrecords.json``. That file holds the bond
+records of every covalent modification, and one residue template for
+each fragment residue, because the CCD defines no such residue. Pass
+the file back to load the modified protein again:
+
+.. code-block:: python
+
+    protein.save_pdb("modified.pdb")
+    reloaded = Protein("modified.pdb", bond_records="modified.bondrecords.json")
+
+The reloaded protein holds the same particles, bonds, formal charges
+and bond records as the protein that was written. A downstream tool
+that builds its own residue definitions needs the PDB file and
+``bond_records()`` only.
 
 .. warning::
 
