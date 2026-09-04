@@ -3424,6 +3424,13 @@ class Protein(Compound):
         the address, so a reader finds each residue with the same three
         fields that ``get_residue`` takes.
 
+        The records are sorted by the address of the first residue,
+        then by the address of the second: chain identifier, residue
+        number, insertion code, and atom name. The order of
+        ``cross_bonds`` follows the order of the calls that made the
+        bonds, and a reload makes them in file order, so the two orders
+        differ. A sorted list compares equal across a save and a load.
+
         Returns
         -------
         list of dict
@@ -3433,7 +3440,7 @@ class Protein(Compound):
             ``bond_order``. Every key but ``bond_order`` holds one pair,
             in the order (residue 1, residue 2).
         """
-        return [
+        records = [
             {
                 "residue_names": (bond.residue1.name, bond.residue2.name),
                 "residue_numbers": (bond.residue1.resnum, bond.residue2.resnum),
@@ -3448,6 +3455,14 @@ class Protein(Compound):
             }
             for bond in self.cross_bonds
         ]
+        return sorted(
+            records,
+            key=lambda record: tuple(
+                record[key][side]
+                for side in (0, 1)
+                for key in ("chain_ids", "residue_numbers", "icodes", "atom_names")
+            ),
+        )
 
 
 def _residue_of_particles(compound):

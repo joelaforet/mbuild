@@ -2175,8 +2175,10 @@ class TestProteinExports(BaseTest):
         # needed because the bond-records file patches the crosslink
         # onto every LYS template variant, and a patch that forced the
         # bond would leave each free lysine without a match. The test
-        # acylates LYS 5 and LYS 12, reloads, and reads the charge and
-        # the side-chain hydrogens of those two and of the free LYS 61.
+        # acylates LYS 5 and LYS 12, reloads, compares the two record
+        # lists, and reads the charge and the side-chain hydrogens of
+        # those two and of the free LYS 61. The lists are compared as
+        # lists, so the record order must match as well.
         from mbuild.biopolymers.fragments import prepare_fragment
 
         protein = protein_6m03
