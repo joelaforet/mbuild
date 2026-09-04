@@ -310,3 +310,23 @@ class BaseTest:
         gilmerite.add(mb.Particle(name="O", pos=[0.24149659, -0.00539473, 0.29073744]))
         gilmerite.add(mb.Particle(name="O", pos=[0.45795937, 0.36822546, 0.30135167]))
         return gilmerite
+
+    @pytest.fixture(scope="class")
+    def _protein_6m03_cached(self):
+        """Load the protonated 6m03 protein once per test class.
+
+        Template-matched loading takes about 0.4 s. Tests must not
+        share one mutable Protein, so they request the function-scoped
+        ``protein_6m03`` clone instead of this fixture.
+        """
+        from mbuild.biopolymers import Protein
+
+        return Protein(get_fn("6m03_protonated.pdb"))
+
+    @pytest.fixture
+    def protein_6m03(self, _protein_6m03_cached):
+        return mb.clone(_protein_6m03_cached)
+
+    @pytest.fixture
+    def acetone(self):
+        return mb.load("CC(C)=O", smiles=True)

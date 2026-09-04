@@ -24,6 +24,7 @@ import importlib
 import inspect
 import logging
 import os
+import shutil
 import sys
 import textwrap
 from importlib.resources import files
@@ -352,6 +353,26 @@ try:
     del freud
 except ImportError:
     has_freud = False
+
+try:
+    import openmm
+
+    has_openmm = True
+    del openmm
+except ImportError:
+    has_openmm = False
+
+try:
+    import openff.pablo
+
+    has_openff_pablo = True
+    del openff
+except ImportError:
+    has_openff_pablo = False
+
+# PACKMOL is an executable, not an importable package, so this flag
+# reads the search path instead of trying an import.
+has_packmol = shutil.which("packmol") is not None
 
 
 def get_fn(name):
