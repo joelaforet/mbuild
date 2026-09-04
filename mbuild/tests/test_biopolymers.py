@@ -1145,6 +1145,100 @@ class TestProtein(BaseTest):
             "OG": -1,
         }
 
+    def test_protonate_restores_the_deprotonated_site(self, protein_6m03):
+        # Tests that protonate() undoes deprotonate(): the atom count,
+        # the residue charge, the matched variant and the net charge all
+        # come back, and the new proton sits one bond length from the
+        # heavy atom and clear of every other atom. This is needed
+        # because protonate() selects the new variant from the library
+        # and places the proton itself, so a wrong variant or a wrong
+        # position gives a residue that no longer describes a lysine.
+        # The test deprotonates LYS 12 NZ of the bundled 6m03 asset,
+        # protonates it again, and reads the state and the geometry.
+        protein = protein_6m03
+        residue = protein.get_residue(12, chain_id="A")
+        description = residue.template.description
+        n_particles = protein.n_particles
+        net_before = protein.net_formal_charge
+
+        protein.deprotonate(12, "NZ", chain_id="A")
+        protein.protonate(12, "NZ", chain_id="A")
+
+        assert protein.n_particles == n_particles
+        assert residue.formal_charge == 1
+        assert residue.template.description == description
+        assert protein.net_formal_charge == net_before
+        nz = protein.get_atom(12, "NZ", chain_id="A")
+        hz3 = protein.get_atom(12, "HZ3", chain_id="A")
+        assert protein.bond_graph.has_edge(nz, hz3)
+        assert 0.09 < np.linalg.norm(hz3.pos - nz.pos) < 0.11
+        assert (
+            min(
+                np.linalg.norm(particle.pos - hz3.pos)
+                for particle in protein.particles()
+                if particle is not hz3 and particle is not nz
+            )
+            > 0.07
+        )
+
+    def test_protonate_neutralizes_an_aspartate(self, protein_6m03):
+        # Tests that protonate() turns a charged aspartate into the
+        # neutral acid: the residue charge goes to zero and a new HD2
+        # bonds to OD2 at the O-H bond length. This is needed because a
+        # site that the file left anionic is the second use of the
+        # method, next to undoing deprotonate(), and the OD2 of a
+        # carboxylate has one bonded neighbor, which is the placement
+        # rule that tilts the proton off the bond axis. The test
+        # protonates ASP 33 OD2 of the bundled 6m03 asset and reads the
+        # charges, the bond and the bond length.
+        protein = protein_6m03
+        protein.protonate(33, "OD2", chain_id="A")
+        residue = protein.get_residue(33, chain_id="A")
+        od2 = protein.get_atom(33, "OD2", chain_id="A")
+        hd2 = protein.get_atom(33, "HD2", chain_id="A")
+        assert residue.formal_charge == 0
+        assert "OD2" not in residue.atom_formal_charges
+        assert protein.bond_graph.has_edge(od2, hd2)
+        assert 0.09 < np.linalg.norm(hd2.pos - od2.pos) < 0.10
+
+    def test_protonate_warns_on_an_ineligible_atom(self, protein_6m03, caplog):
+        # Tests that protonate() warns and changes nothing for an atom
+        # that takes no proton: a carbon, and a lysine nitrogen that
+        # already carries three hydrogens. This is needed because the
+        # method must run twice without an error, the way deprotonate()
+        # does, and a silent no-op would hide a wrong atom name. The
+        # test calls the method on the CB and on the charged NZ of
+        # LYS 12 of the bundled 6m03 asset, and reads the log, the atom
+        # count and the net charge back.
+        protein = protein_6m03
+        n_particles = protein.n_particles
+        net_before = protein.net_formal_charge
+        for atom_name in ("CB", "NZ"):
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="mbuild"):
+                protein.protonate(12, atom_name, chain_id="A")
+            assert f"Atom {atom_name} of residue LYS 12" in caplog.text
+            assert "no protonation variant" in caplog.text
+        assert protein.n_particles == n_particles
+        assert protein.net_formal_charge == net_before
+
+    def test_protonated_protein_reloads(self, protein_6m03):
+        # Tests that a protein written after protonate() loads again
+        # with the same net formal charge. This is needed because
+        # protonate() takes its new variant from the template library,
+        # and that is what lets the loader match the residue again;
+        # deprotonate() builds its variant instead and can write a
+        # residue that does not reload. The test protonates ASP 33 OD2
+        # of the bundled 6m03 asset, writes the file, loads it, and
+        # compares the charges.
+        protein = protein_6m03
+        protein.protonate(33, "OD2", chain_id="A")
+        path = Path("protonated.pdb")
+        protein.save_pdb(str(path))
+        reloaded = Protein(str(path))
+        assert reloaded.net_formal_charge == protein.net_formal_charge
+        assert reloaded.get_residue(33, chain_id="A").formal_charge == 0
+
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_attach(self, protein_6m03, acetone):
         # Tests that attach() substitutes one hydrogen on each side,

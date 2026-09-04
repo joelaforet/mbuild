@@ -42,7 +42,7 @@ from itertools import combinations
 import numpy as np
 
 from mbuild import clone
-from mbuild.biopolymers.ccd import _ACIDIC_PROTONS, CCDLibrary
+from mbuild.biopolymers.ccd import _ACIDIC_PROTONS, _BASIC_ATOMS, CCDLibrary
 from mbuild.biopolymers.protein_pdb_io import (
     _check_residue_membership,
     _parse_pdb,
@@ -73,6 +73,14 @@ _ADVISORY_TER_MAX_C_N = 0.2
 #: template model. An N-terminal serine's N and OG are three bonds
 #: apart, and their opposite charges are a real zwitterion.
 _SPLIT_CHARGE_MAX_BONDS = 2
+
+#: Length of a new X-H bond, in nm, keyed by the element symbol of the
+#: heavy atom X. The values are the standard single-bond lengths: N-H
+#: 1.01 A, O-H 0.96 A, S-H 1.34 A. Any other element gets
+#: ``_PROTON_BOND_LENGTH``, which is the order of magnitude of all
+#: three.
+_PROTON_BOND_LENGTHS = {"N": 0.101, "O": 0.096, "S": 0.134}
+_PROTON_BOND_LENGTH = 0.100
 
 #: Element symbols, in upper case, of the atoms that join two residues
 #: through one covalent bond in a PDB entry. The CYS-CYS disulfide and
@@ -411,6 +419,79 @@ def _record_pos(group, atom_name):
     return next(
         (record.pos for record in group.records if record.name == atom_name), None
     )
+
+
+def _unit(vector):
+    """Return the vector scaled to length one, or unchanged if it is zero."""
+    norm = np.linalg.norm(vector)
+    return vector / norm if norm > 1e-8 else vector
+
+
+def _proton_position(atom):
+    """Return a position for a proton added to ``atom``.
+
+    The proton goes in the most open direction at the atom, which is
+    the reverse of the sum of the unit vectors to its bonded neighbors.
+    An atom with one neighbor has no such direction, because every
+    direction around that one bond is equally open. The proton then
+    goes at 109 degrees from the bond, which is the tetrahedral angle,
+    in the plane of the bond and one atom bonded to the neighbor, and
+    on the far side of the bond from that atom. A hydroxyl placed this
+    way is anti to that atom.
+
+    The result is a starting geometry. The bond length is correct and
+    the angle is a standard value, but the position ignores every other
+    atom. Run ``relax_fragments`` or an energy minimization to set the
+    exact angle and torsion.
+
+    Parameters
+    ----------
+    atom : mbuild.Compound
+        The heavy atom that takes the proton. It must carry at least
+        one bond.
+
+    Returns
+    -------
+    numpy.ndarray
+        The position of the proton, in nm.
+    """
+    length = _PROTON_BOND_LENGTHS.get(atom.element.symbol, _PROTON_BOND_LENGTH)
+    neighbors = sorted(atom.direct_bonds(), key=lambda particle: particle.name)
+    if len(neighbors) == 1:
+        bond = _unit(neighbors[0].pos - atom.pos)
+        far = sorted(
+            (
+                particle
+                for particle in neighbors[0].direct_bonds()
+                if particle is not atom
+            ),
+            key=lambda particle: particle.name,
+        )
+        across = _perpendicular(bond)
+        if far:
+            reference = far[0].pos - neighbors[0].pos
+            in_plane = reference - np.dot(reference, bond) * bond
+            if np.linalg.norm(in_plane) > 1e-8:
+                across = _unit(in_plane)
+        # cos(109.47 degrees) = -1/3 and sin(109.47 degrees) = sqrt(8)/3.
+        direction = -bond / 3.0 - across * np.sqrt(8.0) / 3.0
+    else:
+        direction = -sum(
+            (_unit(particle.pos - atom.pos) for particle in neighbors), np.zeros(3)
+        )
+        if np.linalg.norm(direction) < 1e-8:
+            # The neighbors surround the atom evenly, so one direction
+            # is as open as another. Take one across the first bond.
+            direction = _perpendicular(neighbors[0].pos - atom.pos)
+    return atom.pos + _unit(direction) * length
+
+
+def _perpendicular(vector):
+    """Return a unit vector perpendicular to ``vector``."""
+    axis = np.array([1.0, 0.0, 0.0])
+    if abs(np.dot(_unit(vector), axis)) > 0.9:
+        axis = np.array([0.0, 1.0, 0.0])
+    return _unit(np.cross(vector, axis))
 
 
 def _assign_template(residue, variant):
@@ -1798,6 +1879,114 @@ class Protein(Compound):
         )
         _assign_template(residue, variant.deprotonated_at(proton_name))
         self._warn_if_variant_is_absent(residue, atom_name, proton_name)
+        self._warn_on_split_charge(residue)
+
+    def protonate(self, resnum, atom_name, chain_id=None, icode=""):
+        """Add a proton to one atom and update its charge.
+
+        This is the mirror of ``deprotonate``. The proton is the one
+        that the CCD template of the residue bonds to ``atom_name``:
+        an acidic proton that the residue lost, or the proton of a
+        basic site such as the N-terminal amine. The new template
+        variant comes from the template library, so ``template``,
+        ``formal_charge`` and ``atom_formal_charges`` describe the
+        protonated residue, and a PDB written from it reloads.
+
+        ``deprotonate`` builds its new variant instead of matching one,
+        because a residue can lose a proton that no library variant
+        loses. Protonation is the opposite case: the library holds
+        every variant that carries an added proton, so the call selects
+        one and needs no ``_warn_if_variant_is_absent`` check.
+
+        The call changes nothing and logs a warning when the atom takes
+        no proton, for example because it is already protonated or
+        because it bonds to another residue. A notebook cell that calls
+        this method therefore runs a second time without an error.
+
+        The proton is placed at a standard bond length, in the most
+        open direction at the atom. The position ignores every other
+        atom, so run ``relax_fragments`` or an energy minimization
+        before a simulation.
+
+        Parameters
+        ----------
+        resnum : int
+            Residue number of the target residue.
+        atom_name : str
+            Name of the heavy atom that takes the proton.
+        chain_id : str, optional
+            Chain of the target residue; required when residue numbers
+            repeat across chains.
+        icode : str, optional
+            Insertion code of the target residue.
+
+        Raises
+        ------
+        MBuildError
+            When the residue or the atom does not exist. The error
+            comes from ``get_residue`` and ``_atom_of``.
+
+        Notes
+        -----
+        The method restores a site that ``deprotonate`` neutralized,
+        and it protonates a site that the loaded file left anionic,
+        such as the OD2 of an aspartate or the OXT of a C terminus. An
+        atom that carries an inter-residue bond takes no proton: the
+        bond uses the valence that the proton needs.
+
+        Examples
+        --------
+        >>> protein.deprotonate(63, "NZ", chain_id="A")
+        >>> protein.protonate(63, "NZ", chain_id="A")
+        """
+        residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
+        atom = self._atom_of(residue, atom_name)
+        variant = residue.template
+        base = self.library[residue.name][0]
+        protons = []
+        if variant is not None and atom_name in base.atom_names:
+            bonded = base.bonded_names(atom_name)
+            protons = [
+                name
+                for name in _ACIDIC_PROTONS.get(residue.name, ())
+                if name in bonded and name not in variant.atom_names
+            ]
+            protons += [
+                proton
+                for heavy, proton in _BASIC_ATOMS.get(residue.name, ())
+                if heavy == atom_name and proton not in variant.atom_names
+            ]
+        # An atom bonded to a second residue, such as the N of an
+        # internal residue or the SG of a disulfide, has no free
+        # valence. Its template proton is the leaving atom of that
+        # bond, so adding it back would over-coordinate the atom.
+        if any(other.parent is not residue for other in atom.direct_bonds()):
+            protons = []
+        target = None
+        for proton_name in protons:
+            wanted = variant.atom_names | {proton_name}
+            target = next(
+                (
+                    other
+                    for other in self.library[residue.name]
+                    if other.atom_names == wanted
+                ),
+                None,
+            )
+            if target is not None:
+                break
+        if target is None:
+            logger.warning(
+                f"Atom {atom_name} of residue {residue.name} {residue.resnum} "
+                "has no protonation variant in the CCD template, so nothing "
+                "changed. The atom is already protonated, it bonds to another "
+                "residue, or the template does not protonate it."
+            )
+            return
+        proton = Compound(name=proton_name, element="H", pos=_proton_position(atom))
+        residue.add(proton)
+        residue.add_bond((atom, proton), bond_order=1.0)
+        _assign_template(residue, target)
         self._warn_on_split_charge(residue)
 
     @staticmethod
