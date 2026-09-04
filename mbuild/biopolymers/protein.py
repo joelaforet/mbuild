@@ -1300,6 +1300,43 @@ def _bond_record_label(record):
     )
 
 
+def _leaving_element(residue, name):
+    """Return the element of one leaving atom of a residue.
+
+    A leaving atom is absent from the protein, because the
+    inter-residue bond took its place. The residue therefore holds no
+    particle for it, and the writer has one source for its element:
+    the template that the residue matched. A residue that came from a
+    bond-records file carries that file's template, so an element the
+    file gave is written again.
+
+    A residue that ``attach`` built matched no template yet, so no
+    source exists, and the element is H. That is correct for every
+    atom that ``attach`` removes, because ``_port_along_hydrogens`` is
+    the only writer of the leaving-atom ledger and it removes hydrogens
+    only. ``record_bond`` lets a caller name another atom, and such an
+    atom is written as H until the residue matches a template that
+    holds it.
+
+    Parameters
+    ----------
+    residue : Residue
+        The residue that lost the atom.
+    name : str
+        Name of the leaving atom.
+
+    Returns
+    -------
+    str
+        The element symbol.
+    """
+    if residue.template is not None:
+        atom = residue.template.name_to_atom.get(name)
+        if atom is not None:
+            return atom.element
+    return "H"
+
+
 def _template_dict(residue, links):
     """Return the sidecar template of one residue that mBuild built.
 
@@ -1307,9 +1344,10 @@ def _template_dict(residue, links):
     chemistry: atom names, elements, formal charges, and the bonds with
     their orders. A leaving atom is absent from the residue, because
     the inter-residue bond took its place. Each one is written back
-    into the template as a hydrogen, bonded to the atom that carries
-    the bond. The loader needs that bond, because it reads the leaving
-    fragment of an atom from the template bonds.
+    into the template, bonded to the atom that carries the bond. The
+    loader needs that bond, because it reads the leaving fragment of an
+    atom from the template bonds. ``_leaving_element`` gives the
+    element of each such atom.
 
     ``linking`` and ``crosslink`` are null. The sidecar records the
     inter-residue bonds separately, and the reader patches them onto
@@ -1343,7 +1381,12 @@ def _template_dict(residue, links):
     ]
     for link_name, leaving_name in sorted(links):
         atoms.append(
-            {"name": leaving_name, "element": "H", "formal_charge": 0, "leaving": True}
+            {
+                "name": leaving_name,
+                "element": _leaving_element(residue, leaving_name),
+                "formal_charge": 0,
+                "leaving": True,
+            }
         )
         bonds.append({"atom1": link_name, "atom2": leaving_name, "order": 1})
     return {

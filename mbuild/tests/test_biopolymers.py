@@ -2219,6 +2219,53 @@ class TestProteinExports(BaseTest):
         with pytest.raises(MBuildError, match="version 99"):
             Protein(get_fn("6m03_protonated.pdb"), bond_records=str(path))
 
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_a_leaving_atom_keeps_its_element_across_saves(self, protein_6m03):
+        # Tests that a save of a reloaded protein writes the element
+        # that the template gives for a leaving atom. This is needed
+        # because a leaving atom is absent from the protein, so the
+        # writer has no particle to read the element from, and a bond
+        # that displaced a heavier atom used to become a hydrogen on
+        # every save. The test acylates LYS 5 NZ, saves, edits the
+        # written file so that the acyl side loses a chlorine, which is
+        # what an acid chloride loses, reloads, saves again, and reads
+        # the element back.
+        from mbuild.biopolymers.fragments import prepare_fragment
+
+        protein = protein_6m03
+        protein.deprotonate(5, "NZ", chain_id="A")
+        protein.attach(
+            prepare_fragment("*C(=O)CCCCCCC", "OC8"),
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            relax=False,
+        )
+        protein.save_pdb("acyl.pdb")
+        path = Path("acyl.bondrecords.json")
+        document = json.loads(path.read_text())
+        document["bond_records"][0]["leaving_atoms"][1] = ["CL1"]
+        template = document["templates"]["OC8"]
+        template["atoms"] = [
+            atom for atom in template["atoms"] if atom["name"] != "H1"
+        ] + [{"name": "CL1", "element": "Cl", "formal_charge": 0, "leaving": True}]
+        template["bonds"] = [
+            bond
+            for bond in template["bonds"]
+            if "H1" not in (bond["atom1"], bond["atom2"])
+        ] + [{"atom1": "C1", "atom2": "CL1", "order": 1}]
+        path.write_text(json.dumps(document))
+
+        reloaded = Protein("acyl.pdb", bond_records=str(path))
+        reloaded.save_pdb("acyl_again.pdb")
+        written = json.loads(Path("acyl_again.bondrecords.json").read_text())
+        assert {
+            "name": "CL1",
+            "element": "Cl",
+            "formal_charge": 0,
+            "leaving": True,
+        } in written["templates"]["OC8"]["atoms"]
+
     def test_bond_records_file_with_a_missing_key_is_refused(self):
         # Tests that a record without one of the keys the reader
         # indexes raises an error that names the file and the key. This
