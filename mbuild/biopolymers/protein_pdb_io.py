@@ -52,11 +52,14 @@ def _decode_index(field, width, line_number):
 
     The wwPDB Format Guide v3.30, section 9 (Coordinate Section,
     ATOM/HETATM), gives the atom serial number five columns (7-11) and
-    the residue sequence number four columns (23-26). A system with
-    more than 99999 atoms, or a chain with more than 9999 residues,
-    does not fit in those columns. OpenMM writes a value that does not
-    fit in hexadecimal, in ``openmm/app/pdbfile.py::_formatIndex``: a
-    value below ``10 ** width`` fills the field in decimal, and a
+    the residue sequence number four columns (23-26):
+    https://www.wwpdb.org/documentation/file-format-content/format33/sect9.html
+    A system with more than 99999 atoms, or a chain with more than
+    9999 residues, does not fit in those columns. OpenMM writes a
+    value that does not fit in hexadecimal, in
+    ``openmm/app/pdbfile.py::_formatIndex``:
+    https://github.com/openmm/openmm/blob/05472c9a812927c863be67abbb3376e944b2c7ef/wrappers/python/openmm/app/pdbfile.py#L482-L491
+    A value below ``10 ** width`` fills the field in decimal, and a
     larger value fills it with
     ``value - 10 ** width + 10 * 16 ** (width - 1)`` in hexadecimal.
     Atom serials therefore run 99999, A0000, A0001 up to AFFFF, then
@@ -163,11 +166,12 @@ def _parse_pdb(text):
 
     A disordered atom carries an alternate location indicator in
     column 17, which the wwPDB Format Guide v3.30, section 9
-    (Coordinate Section, ATOM), names altLoc. One conformer only is
-    read per residue. A residue keeps the records whose altLoc is
-    blank. It also keeps the records that carry its own first
-    non-blank altLoc. The other conformers are skipped, and one
-    warning names the residues that lose them.
+    (Coordinate Section, ATOM), names altLoc:
+    https://www.wwpdb.org/documentation/file-format-content/format33/sect9.html
+    One conformer only is read per residue. A residue keeps the
+    records whose altLoc is blank. It also keeps the records that
+    carry its own first non-blank altLoc. The other conformers are
+    skipped, and one warning names the residues that lose them.
 
     Returns a tuple ``(residues, conects, box)``: the ``_PdbResidue``
     groups in file order, the CONECT pairs as a set of frozensets of
@@ -192,13 +196,15 @@ def _parse_pdb(text):
                 name=line[12:16].strip(),
                 # The wwPDB Format Guide v3.30, section 9
                 # (Coordinate Section, ATOM), declares the residue
-                # name in columns 18-20 and column 21 blank. A
-                # four-character name, such as a lipid name that a
+                # name in columns 18-20 and column 21 blank:
+                # https://www.wwpdb.org/documentation/file-format-content/format33/sect9.html
+                # A four-character name, such as a lipid name that a
                 # membrane builder writes, fills column 21 too, so
                 # the field is read over all four columns and
                 # stripped. A three-character name is unchanged.
                 # openff-pablo reads the same four columns when it
-                # is not strict (_pdb_data.py).
+                # is not strict (_pdb_data.py):
+                # https://github.com/openforcefield/openff-pablo/blob/main/openff/pablo/_pdb_data.py
                 resname=line[17:21].strip(),
                 chain_id=line[21].strip(),
                 resnum=_decode_index(line[22:26], 4, line_number),
@@ -356,7 +362,8 @@ def _atom_and_ter_lines(protein):
     ATOM/HETATM/TER), states that the records of one chain follow each
     other in sequence order and that a TER record closes the chain, so
     a reader takes the polymer sequence from the record order and the
-    TER records.
+    TER records:
+    https://www.wwpdb.org/documentation/file-format-content/format33/sect9.html
 
     Parameters
     ----------
@@ -436,10 +443,12 @@ def _pdb_name_field(name):
 
     The wwPDB Format Guide v3.30, section 9 (Coordinate Section, ATOM),
     puts the atom name in columns 13-16 and the element symbol,
-    right-justified, in columns 13-14. A name of three characters or
-    less therefore starts in column 14, and a four-character name fills
-    the field. ``Protein.to_rdkit`` writes the same field into the
-    RDKit PDB residue info, so both exports name atoms alike.
+    right-justified, in columns 13-14:
+    https://www.wwpdb.org/documentation/file-format-content/format33/sect9.html
+    A name of three characters or less therefore starts in column 14,
+    and a four-character name fills the field. ``Protein.to_rdkit``
+    writes the same field into the RDKit PDB residue info, so both
+    exports name atoms alike.
 
     Parameters
     ----------
@@ -459,9 +468,11 @@ def _pdb_atom_line(serial, particle, residue, chain_id):
 
     The residue name fills columns 18-21. The wwPDB Format Guide v3.30,
     section 9 (Coordinate Section, ATOM), declares the name in columns
-    18-20 and column 21 blank. A name of three characters or less
-    therefore gives the same record as before. A four-character name fills
-    column 21, which is the field that ``_parse_pdb`` reads back.
+    18-20 and column 21 blank:
+    https://www.wwpdb.org/documentation/file-format-content/format33/sect9.html
+    A name of three characters or less therefore gives the same record
+    as before. A four-character name fills column 21, which is the
+    field that ``_parse_pdb`` reads back.
     """
     record = "HETATM" if residue.hetatm else "ATOM  "
     name_field = _pdb_name_field(particle.name)
@@ -484,9 +495,11 @@ def _conect_lines(protein, particle_serial, particle_residue, residue_order):
     The wwPDB Format Guide v3.30, section 10 (Connectivity Section,
     CONECT), states that CONECT records give the connectivity of
     HETATM residues and of bonds that the standard residue chemistry
-    does not describe, such as disulfide bridges. It also states that
-    a CONECT record holds one atom serial plus up to four bonded
-    serials, so a wider set of partners needs more than one record.
+    does not describe, such as disulfide bridges:
+    https://www.wwpdb.org/documentation/file-format-content/format33/sect10.html
+    It also states that a CONECT record holds one atom serial plus up
+    to four bonded serials, so a wider set of partners needs more than
+    one record.
 
     Every bond that touches a HETATM residue is listed, because PDB
     viewers (e.g. PyMOL) treat CONECT records as the complete bond
