@@ -1343,6 +1343,13 @@ class Protein(Compound):
         #: removed atom.
         #: ``record_bond`` reads it for its default leaving-atom lists.
         self._leaving_atoms = {}
+        #: Names of the residues whose templates a bond-records file
+        #: registered. ``_bond_records_document`` writes a template for
+        #: every one of them again. Without this set, the second save
+        #: of a reloaded protein would drop those templates, because
+        #: the reload put them into the library and the write path
+        #: skips a residue that the library defines.
+        self._sidecar_template_names = set()
         if filename is not None:
             self._load_pdb(filename, bond_records)
 
@@ -1380,6 +1387,10 @@ class Protein(Compound):
             for anchor, names in self._leaving_atoms.items()
             if anchor in clone_of
         }
+        # The clone shares the patched library, so it must also share
+        # the names that came from the file. A clone that lost them
+        # would write a PDB file whose sidecar holds no template.
+        newone._sidecar_template_names = set(self._sidecar_template_names)
         return newone
 
     # ------------------------------------------------------------------
@@ -1512,7 +1523,9 @@ class Protein(Compound):
         document = _read_bond_records(filename)
         self.library = self.library.copy()
         for data in document["templates"].values():
-            self.library.register(template_from_dict(data))
+            template = template_from_dict(data)
+            self.library.register(template)
+            self._sidecar_template_names.add(template.name)
         orders = {}
         for record in document["bond_records"]:
             names = record["residue_names"]
@@ -3127,6 +3140,12 @@ class Protein(Compound):
         name share one template, because the library holds one entry
         per residue name.
 
+        A residue whose template came from a bond-records file also
+        gets a template. The reload registered that template in the
+        library, so the library defines the name, but the CCD still
+        does not. Without this rule the second save of a reloaded
+        protein would write no template for the fragment.
+
         Returns
         -------
         dict
@@ -3148,7 +3167,10 @@ class Protein(Compound):
         for residue in self.residues():
             if not residue.hetatm or residue.name in templates:
                 continue
-            if residue.name in self.library:
+            if (
+                residue.name in self.library
+                and residue.name not in self._sidecar_template_names
+            ):
                 continue
             templates[residue.name] = _template_dict(
                 residue, links.get(id(residue), set())

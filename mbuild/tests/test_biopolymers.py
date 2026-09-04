@@ -2122,12 +2122,15 @@ class TestProteinExports(BaseTest):
     def test_reload_from_the_bond_records_file(self, protein_6m03):
         # Tests that a protein with an acylated lysine writes and loads
         # again with the same particles, bonds, formal charges and bond
-        # records. This is needed because the file is the only source
-        # of chemistry for the fragment residue and for the hydrogen
-        # that the new bond displaced on the lysine, so without it
-        # neither residue matches a template. The test acylates LYS 5
-        # NZ, saves, loads the pair of files, and compares the two
-        # proteins.
+        # records, and that a second save and reload of the reloaded
+        # protein gives the same result. This is needed because the
+        # file is the only source of chemistry for the fragment residue
+        # and for the hydrogen that the new bond displaced on the
+        # lysine, so without it neither residue matches a template. The
+        # reload registers that template in the library, so the second
+        # save must still write it. The test acylates LYS 5 NZ, saves,
+        # loads the pair of files, compares the two proteins, then
+        # saves and loads the reloaded protein and compares again.
         from mbuild.biopolymers.fragments import prepare_fragment
 
         protein = protein_6m03
@@ -2150,6 +2153,14 @@ class TestProteinExports(BaseTest):
         # comes from the matched template, not from the file, and the
         # match must therefore pick the deprotonated variant.
         assert reloaded.get_residue(5, chain_id="A").formal_charge == 0
+
+        reloaded.save_pdb("acylated_again.pdb")
+        twice = Protein(
+            "acylated_again.pdb", bond_records="acylated_again.bondrecords.json"
+        )
+        assert twice.n_particles == protein.n_particles
+        assert twice.net_formal_charge == protein.net_formal_charge
+        assert twice.bond_records() == protein.bond_records()
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_reload_separates_modified_and_free_lysines(self, protein_6m03):
