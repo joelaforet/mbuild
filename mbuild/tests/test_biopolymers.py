@@ -128,10 +128,10 @@ def _gly_gly_hexadecimal():
 
 
 #: The RCSB chemical component definition of selenocysteine, from
-#: https://files.rcsb.org/ligands/download/SEC.cif, with the descriptor,
-#: identifier and audit blocks removed. mBuild bundles no SEC
-#: definition, and the bridged-SEC test needs a residue that bridges
-#: through selenium.
+#: https://files.rcsb.org/ligands/download/SEC.cif, downloaded
+#: 2026-09-04, with the descriptor, identifier and audit blocks
+#: removed. mBuild bundles no SEC definition, and the bridged-SEC test
+#: needs a residue that bridges through selenium.
 _SEC_CIF = """\
 data_SEC
 #
@@ -1812,7 +1812,8 @@ class TestProtein(BaseTest):
         # the match error tells the user to protonate the file. A new HE
         # breaks the bridge, so that remedy is wrong here. The test puts
         # the RCSB SEC definition in the user download cache, loads two
-        # bridged SEC residues, and reads the error text.
+        # bridged SEC residues, and reads the CYS-only text of the
+        # error.
         from mbuild.biopolymers import ccd
 
         (tmp_path / "SEC.cif").write_text(_SEC_CIF)
@@ -1823,7 +1824,7 @@ class TestProtein(BaseTest):
             Protein(str(bridged))
         message = str(error.value)
         assert "SEC A:1 SE" in message and "SEC B:1 SE" in message
-        assert "pdbfixer" not in message
+        assert "forms disulfide bridges between CYS residues only" in message
 
     @pytest.mark.skipif(not has_openff_pablo, reason="openff-pablo is not installed")
     def test_cross_chain_disulfide_2zuq(self):
