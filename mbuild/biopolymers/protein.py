@@ -1498,12 +1498,12 @@ class Protein(Compound):
             residue (i.e. all attached fragments).
         n_steps : int, optional, default=0
             Maximum minimization iterations. It reaches OpenMM as
-            ``maxIterations``. The default ``0`` is OpenMM's meaning
-            for that argument: the minimizer runs until it meets
-            ``tolerance``, with no iteration limit. A positive value
-            caps the iterations instead. The generic force field here
-            is not a production force field, so this relaxation only
-            removes bad geometry. The user must still run an energy
+            ``maxIterations``. ``0`` has OpenMM's meaning: the
+            minimizer runs until it meets ``tolerance``, with no
+            iteration limit. A positive value caps the iterations
+            instead. The generic force field here is not a
+            production force field, so this relaxation only removes
+            bad geometry. The user must still run an energy
             minimization with a real force field before a simulation.
         tolerance : float, optional, default=50.0
             Energy tolerance in kJ/mol/nm.
@@ -1908,7 +1908,10 @@ class Protein(Compound):
         relax : bool, optional, default=True
             When the placed fragment overlaps existing atoms, run an
             energy minimization that moves only the fragment
-            (see ``relax_fragments``).
+            (see ``relax_fragments``). The minimization runs until it
+            converges. When a build must return in bounded time, pass
+            ``relax=False`` and call ``relax_fragments`` with a
+            positive ``n_steps``.
 
         Returns
         -------
