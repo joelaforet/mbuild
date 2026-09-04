@@ -52,12 +52,13 @@ residue definition for the modification.
 
 .. warning::
 
-    ``Compound.save`` writes a wrong ``.gro`` file for a protein, and it
-    raises no error. It sends ``.gro`` to the generic GMSO converter,
-    which numbers residues by counting each residue name, so the file
-    holds one residue named ``Chain`` for the whole protein. Write the
-    packed system with ``mb.biopolymers.save`` instead. It gives every
-    residue its own name and number.
+    To write a ``Protein``, call ``save_pdb`` for a PDB file with bond
+    records, or ``save`` for the GMSO formats such as ``.gro``. After
+    you pack the protein with ``mb.solvate`` or ``mb.fill_box``, the
+    result is a plain Compound. Write it with ``mb.biopolymers.save``,
+    not ``Compound.save``. ``Compound.save`` numbers residues by
+    counting each residue name, so the file holds one residue named
+    ``Chain`` for the whole protein, and it raises no error.
 
 .. autoclass:: mbuild.biopolymers.protein.Protein
     :members:
