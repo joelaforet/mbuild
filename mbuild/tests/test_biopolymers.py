@@ -1794,7 +1794,9 @@ class TestProtein(BaseTest):
         # message said that no template predicts the bond, which does
         # not say which residues mBuild bridges. The test appends a
         # CONECT between the SG of CYS 16 and the SD of MET 17 of the
-        # bundled 6m03 asset and reads the error text.
+        # bundled 6m03 asset and reads the error text. Both residues
+        # matched a template, so the file loads after the CONECT record
+        # goes, and the message must ask for that alone.
         text = open(get_fn("6m03_protonated.pdb")).read()
         bad = Path("met_bridge.pdb")
         bad.write_text(text.replace("END", "CONECT  235  249\nEND"))
@@ -1803,6 +1805,10 @@ class TestProtein(BaseTest):
         message = str(error.value)
         assert "CYS A:16 SG" in message and "MET A:17 SD" in message
         assert "forms disulfide bridges between CYS residues only" in message
+        assert (
+            "To load the entry without the bridge, remove that CONECT record. "
+            "Open an issue" in message
+        )
 
     def test_bridged_sec_names_the_cys_limit(self, tmp_path, monkeypatch):
         # Tests that a diselenide between two selenocysteines raises the
@@ -1810,10 +1816,11 @@ class TestProtein(BaseTest):
         # needed because a bridged SEC lacks the HE that every SEC
         # template variant holds, so the residue matches no variant and
         # the match error tells the user to protonate the file. A new HE
-        # breaks the bridge, so that remedy is wrong here. The test puts
-        # the RCSB SEC definition in the user download cache, loads two
-        # bridged SEC residues, and reads the CYS-only text of the
-        # error.
+        # breaks the bridge, so that remedy is wrong here. The file
+        # loads only when the CONECT record goes and the HE comes back,
+        # so the message must ask for both. The test puts the RCSB SEC
+        # definition in the user download cache, loads two bridged SEC
+        # residues, and reads the CYS-only text of the error.
         from mbuild.biopolymers import ccd
 
         (tmp_path / "SEC.cif").write_text(_SEC_CIF)
@@ -1825,6 +1832,9 @@ class TestProtein(BaseTest):
         message = str(error.value)
         assert "SEC A:1 SE" in message and "SEC B:1 SE" in message
         assert "forms disulfide bridges between CYS residues only" in message
+        assert (
+            "remove that CONECT record and add the hydrogen HE to SEC A:1." in message
+        )
 
     @pytest.mark.skipif(not has_openff_pablo, reason="openff-pablo is not installed")
     def test_cross_chain_disulfide_2zuq(self):

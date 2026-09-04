@@ -930,15 +930,20 @@ def _match_residue(group, variants, prior_possible, posterior_possible):
     return matches
 
 
-def _bridge_scope_message(label1, atom1_name, label2, atom2_name):
+def _bridge_scope_message(label1, atom1_name, label2, atom2_name, remedy):
     """Return the error text for a bridge that mBuild does not build.
 
     ``_add_disulfide`` in ``mbuild.biopolymers.ccd`` gives the SG-SG
     crosslink to CYS only. A CONECT record between the sulfur or
     selenium atoms of two other residues therefore describes a bond
     that no template predicts. The text names both atoms, states the
-    limit, gives the action that is available today, and points at the
-    issue tracker.
+    limit, gives the caller's remedy, and points at the issue tracker.
+
+    The caller gives the remedy, because the two error sites need two
+    different actions. One site reports a bond that the templates do
+    not predict, and the file loads after the CONECT record is removed.
+    The other site reports a residue that also lost the hydrogen of its
+    bridging atom, and that file needs the hydrogen back as well.
 
     Parameters
     ----------
@@ -946,6 +951,8 @@ def _bridge_scope_message(label1, atom1_name, label2, atom2_name):
         Labels of the two residues, as ``_PdbResidue.label`` writes them.
     atom1_name, atom2_name : str
         Names of the two bridging atoms.
+    remedy : str
+        One sentence that gives the action which loads the file.
 
     Returns
     -------
@@ -957,8 +964,7 @@ def _bridge_scope_message(label1, atom1_name, label2, atom2_name):
         f"{atom2_name} joins two sulfur or selenium atoms, but mBuild "
         "forms disulfide bridges between CYS residues only. Other "
         "bridging residues such as SEC, DCY and HCS are not supported "
-        "yet. To load the entry without the bridge, remove that CONECT "
-        "record. Open an issue at "
+        f"yet. {remedy} Open an issue at "
         "https://github.com/mosdef-hub/mbuild/issues if you need this "
         "residue."
     )
@@ -1037,8 +1043,20 @@ def _bridge_scope_conflict(group, groups, conects, library):
                 continue
             if group.resname == "CYS" and partner_group.resname == "CYS":
                 continue
+            # The residue lost the hydrogen of its bridging atom. The
+            # file therefore loads only when both the CONECT record
+            # goes and that hydrogen comes back. Name the hydrogen and
+            # the residue, so that the user makes both changes.
+            missing = [other for other in hydrogens if other not in present]
+            noun = "hydrogen" if len(missing) == 1 else "hydrogens"
+            names = " and ".join(missing)
             return _bridge_scope_message(
-                group.label, name, partner_group.label, partner_atom.name
+                group.label,
+                name,
+                partner_group.label,
+                partner_atom.name,
+                "To load the entry without the bridge, remove that CONECT "
+                f"record and add the {noun} {names} to {group.label}.",
             )
     return None
 
@@ -2018,6 +2036,8 @@ class Protein(Compound):
                             particles[0].name,
                             _pdb_label(residues[1]),
                             particles[1].name,
+                            "To load the entry without the bridge, remove "
+                            "that CONECT record.",
                         )
                     )
                 raise MBuildError(
