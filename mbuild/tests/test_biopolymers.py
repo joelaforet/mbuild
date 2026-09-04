@@ -1,5 +1,6 @@
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -605,6 +606,45 @@ class TestCCDLibrary(BaseTest):
         # first. The test compares object identity across two default
         # instances, which only the class-level parse cache can give.
         assert CCDLibrary()["ALA"] is CCDLibrary()["ALA"]
+
+    def test_register_caller_built_template(self):
+        # Tests that template_from_dict parses a caller-built template
+        # and that register() stores it under its residue name in one
+        # library only. This is needed because a reload of a modified
+        # protein registers the template of a fragment that the CCD
+        # does not define, and the parsed variant lists are shared
+        # class-wide, so a write into one library would change the
+        # templates of every other Protein. The test registers an
+        # acetyl template, reads back its leaving fragment, checks a
+        # second library, and checks the two-name error.
+        from mbuild.biopolymers.ccd import template_from_dict
+
+        template = template_from_dict(
+            {
+                "name": "OC8",
+                "description": "OC8 as built by mBuild",
+                "atoms": [
+                    {"name": "C1", "element": "C", "formal_charge": 0},
+                    {"name": "O1", "element": "O", "formal_charge": 0},
+                    {"name": "H1", "element": "H", "leaving": True},
+                ],
+                "bonds": [
+                    {"atom1": "C1", "atom2": "O1", "order": 2},
+                    {"atom1": "C1", "atom2": "H1", "order": 1},
+                ],
+                "linking": None,
+                "crosslink": None,
+            }
+        )
+        # The leaving fragment is the property the loader reads: it
+        # proves that the leaving flag and the bond both survived.
+        assert template.leaving_fragment_of("C1") == {"H1"}
+        library = CCDLibrary()
+        library.register(template)
+        assert library["OC8"] == [template]
+        assert "OC8" not in CCDLibrary()
+        with pytest.raises(MBuildError, match="variants of one residue"):
+            library.register(template, replace(template, name="AC1"))
 
 
 class TestProtein(BaseTest):

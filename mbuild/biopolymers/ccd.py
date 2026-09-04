@@ -77,7 +77,13 @@ from mbuild.exceptions import MBuildError
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["AtomTemplate", "BondTemplate", "ResidueTemplate", "CCDLibrary"]
+__all__ = [
+    "AtomTemplate",
+    "BondTemplate",
+    "ResidueTemplate",
+    "CCDLibrary",
+    "template_from_dict",
+]
 
 CCD_CACHE_DIR = Path(__file__).parent.parent / "lib" / "biomolecules" / "ccd_cache"
 
@@ -221,11 +227,17 @@ class AtomTemplate:
 
 @dataclass(frozen=True)
 class BondTemplate:
-    """One intra-residue bond of a CCD residue template."""
+    """One intra-residue bond of a CCD residue template.
+
+    The CCD gives every bond an integer order, so a parsed template
+    holds integers. A template that ``template_from_dict`` builds from
+    a residue that mBuild made can hold the fractional order 1.5, which
+    is the order the mBuild bond graph gives an aromatic bond.
+    """
 
     atom1: str
     atom2: str
-    order: int = 1
+    order: float = 1
 
 
 @dataclass(frozen=True)
@@ -679,6 +691,54 @@ def parse_ccd_cif(text):
     )
 
 
+def template_from_dict(data):
+    """Return a ``ResidueTemplate`` from its plain-dict form.
+
+    The dict holds JSON types only. ``Protein.save_pdb`` writes it for
+    every residue that mBuild built and the CCD does not define, and
+    ``Protein`` reads it back through this function. The keys are
+    ``name``, ``description``, ``atoms``, ``bonds``, ``linking`` and
+    ``crosslink``; each atom carries ``name``, ``element``,
+    ``formal_charge`` and ``leaving``, and each bond carries ``atom1``,
+    ``atom2`` and ``order``.
+
+    Parameters
+    ----------
+    data : dict
+        The template in its plain-dict form.
+
+    Returns
+    -------
+    ResidueTemplate
+        The template. It carries no synonyms, because the file that
+        holds it also writes the atom names it describes.
+    """
+    crosslink = data.get("crosslink")
+    return ResidueTemplate(
+        name=data["name"],
+        description=data["description"],
+        atoms=tuple(
+            AtomTemplate(
+                name=atom["name"],
+                element=atom["element"],
+                formal_charge=int(atom.get("formal_charge", 0)),
+                leaving=bool(atom.get("leaving", False)),
+            )
+            for atom in data["atoms"]
+        ),
+        bonds=tuple(
+            BondTemplate(
+                atom1=bond["atom1"],
+                atom2=bond["atom2"],
+                order=bond.get("order", 1),
+            )
+            for bond in data["bonds"]
+        ),
+        linking=data.get("linking"),
+        crosslink=tuple(crosslink) if crosslink else None,
+    )
+
+
 def _fix_caps(template):
     """Give ACE/NME peptide linking and mark the reacting H as leaving.
 
@@ -873,6 +933,42 @@ class CCDLibrary:
         if resname not in self._templates:
             self._templates[resname] = self._load(resname)
         return self._templates[resname]
+
+    def register(self, *templates):
+        """Put caller-built template variants into this library.
+
+        The variants replace every entry that this library holds for
+        their residue name. They are stored as they are given: no
+        protonation variants are generated, and no CCD patch is
+        applied. A caller-built template describes one species, and a
+        residue that mBuild made carries the protonation state that its
+        builder chose.
+
+        Use this method for a residue that the CCD does not define, for
+        example a fragment that ``Protein.attach`` added, and for a
+        standard residue whose variants a caller has patched.
+
+        Parameters
+        ----------
+        *templates : ResidueTemplate
+            The variants. They must all carry one residue name.
+
+        Raises
+        ------
+        MBuildError
+            When the templates do not share one residue name.
+        """
+        names = {template.name.upper() for template in templates}
+        if len(names) != 1:
+            raise MBuildError(
+                "register() takes the variants of one residue, but it "
+                f"got the names {sorted(names)}."
+            )
+        # A new list is stored, and the given list is not reused. The
+        # variant lists in _parse_cache are shared by every library, so
+        # writing into one would change the templates of every other
+        # Protein.
+        self._templates[names.pop()] = list(templates)
 
     def _load(self, resname):
         """Read, parse, patch, and expand the templates for one residue.
