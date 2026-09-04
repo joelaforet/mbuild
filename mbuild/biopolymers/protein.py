@@ -1477,13 +1477,13 @@ class Protein(Compound):
     def relax_fragments(
         self,
         residues=None,
-        n_steps=500,
+        n_steps=0,
         tolerance=50.0,
         platform="CPU",
     ):
         """Relax attached fragments while the protein stays fixed.
 
-        Runs a short energy minimization with mBuild's generic
+        Runs an energy minimization with mBuild's generic
         UFF-style parameters (``OpenMMSimulation`` with
         ``forcefield=None``). The force field does not matter here: the
         goal is only to pull a rigidly placed fragment out of steric
@@ -1496,16 +1496,15 @@ class Protein(Compound):
         residues : iterable of Residue, optional
             The residues allowed to move. Default: every HETATM
             residue (i.e. all attached fragments).
-        n_steps : int, optional, default=500
+        n_steps : int, optional, default=0
             Maximum minimization iterations. It reaches OpenMM as
-            ``maxIterations``, where ``0`` means that the minimizer
-            runs until it meets ``tolerance``, with no iteration limit.
-            The default is finite because ``attach(relax=True)`` calls
-            this method: an interactive build must return, and a
-            fragment that a rigid placement puts deep inside the
-            protein can take a long time to meet the tolerance. Pass
-            ``0`` when the converged structure matters more than the
-            run time.
+            ``maxIterations``. The default ``0`` is OpenMM's meaning
+            for that argument: the minimizer runs until it meets
+            ``tolerance``, with no iteration limit. A positive value
+            caps the iterations instead. The generic force field here
+            is not a production force field, so this relaxation only
+            removes bad geometry. The user must still run an energy
+            minimization with a real force field before a simulation.
         tolerance : float, optional, default=50.0
             Energy tolerance in kJ/mol/nm.
         platform : str, optional, default="CPU"
@@ -1907,8 +1906,8 @@ class Protein(Compound):
         separation : float, optional, default=0.15
             Length of the new bond in nanometers.
         relax : bool, optional, default=True
-            When the placed fragment overlaps existing atoms, run a
-            short energy minimization that moves only the fragment
+            When the placed fragment overlaps existing atoms, run an
+            energy minimization that moves only the fragment
             (see ``relax_fragments``).
 
         Returns
