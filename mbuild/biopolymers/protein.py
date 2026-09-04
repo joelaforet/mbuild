@@ -1647,8 +1647,10 @@ class Protein(Compound):
         Returns
         -------
         dict
-            Maps the frozen set of the two (residue name, atom name)
-            pairs of a record to the order of that bond.
+            Maps the frozen set of the two residue addresses of a
+            record to the order of that bond. An address holds the
+            chain identifier, the residue number, the insertion code
+            and the atom name.
         """
         document = _read_bond_records(filename)
         self.library = self.library.copy()
@@ -1671,7 +1673,20 @@ class Protein(Compound):
                 self._patch_crosslink(
                     names[side], atom_names[side], atom_names[other], leaving[side]
                 )
-            orders[frozenset(zip(names, atom_names))] = record["bond_order"]
+            # The key is the address of each side, and not the residue
+            # name. Two records that name one residue type, for example
+            # two acylated lysines, would collapse into one key, and
+            # the second order would replace the first.
+            orders[
+                frozenset(
+                    zip(
+                        record["chain_ids"],
+                        record["residue_numbers"],
+                        record["icodes"],
+                        atom_names,
+                    )
+                )
+            ] = record["bond_order"]
         return orders
 
     def _check_bond_record(self, filename, record, addresses):
@@ -1873,9 +1888,10 @@ class Protein(Compound):
         """Form the crosslink bonds and record them in ``cross_bonds``.
 
         ``crosslink_orders`` holds the bond order of each record of a
-        bond-records file, keyed by the two (residue name, atom name)
-        pairs of that record. A bond that no record names is a
-        disulfide from the CCD templates, and it takes the order 1.
+        bond-records file, keyed by the two residue addresses of that
+        record: chain identifier, residue number, insertion code and
+        atom name. A bond that no record names is a disulfide from the
+        CCD templates, and it takes the order 1.
         """
         expecting = {}
         for group, match, residue in zip(groups, matches, residues):
@@ -1913,8 +1929,13 @@ class Protein(Compound):
             order = crosslink_orders.get(
                 frozenset(
                     (
-                        (group.resname, record.name),
-                        (other_group.resname, other_record.name),
+                        (group.chain_id, group.resnum, group.icode, record.name),
+                        (
+                            other_group.chain_id,
+                            other_group.resnum,
+                            other_group.icode,
+                            other_record.name,
+                        ),
                     )
                 ),
                 1,
