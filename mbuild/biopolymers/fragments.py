@@ -22,13 +22,20 @@ logger = logging.getLogger(__name__)
 __all__ = ["fragment_from_sdf", "fragment_from_smiles", "prepare_fragment"]
 
 
+#: Address of the wwPDB Format Guide section that the residue name
+#: limit comes from. ``_check_resname`` puts it in its error message.
+_WWPDB_COORDINATE_SECTION_URL = (
+    "https://www.wwpdb.org/documentation/file-format-content/format33/sect9.html"
+)
+
 #: Longest residue name a caller may give a fragment. The wwPDB Format
 #: Guide v3.30, section 9 (Coordinate Section, ATOM), declares the
-#: residue name in columns 18-20 and column 21 blank. The reader of
-#: this recipe also accepts a four-character name, because a membrane
-#: builder writes lipid names that fill column 21. A fragment name is
-#: generated here, so it stays inside the three declared columns, and
-#: every PDB reader accepts it.
+#: residue name in columns 18-20 and column 21 blank:
+#: https://www.wwpdb.org/documentation/file-format-content/format33/sect9.html
+#: The reader of this recipe also accepts a four-character name,
+#: because a membrane builder writes lipid names that fill column 21.
+#: A fragment name is generated here, so it stays inside the three
+#: declared columns, and every PDB reader accepts it.
 _MAX_RESNAME_LENGTH = 3
 
 
@@ -57,7 +64,7 @@ def _check_resname(resname):
             "Format Guide declares the residue name in columns 18-20, so "
             "a longer name does not fit. Pick a name of three characters "
             "or fewer that does not collide with an assigned CCD "
-            "component code."
+            f"component code. {_WWPDB_COORDINATE_SECTION_URL}"
         )
 
 
