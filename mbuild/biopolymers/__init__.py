@@ -2,7 +2,6 @@
 
 from mbuild.biopolymers.ccd import CCDLibrary
 from mbuild.biopolymers.fragments import (
-    fragment_from_sdf,
     fragment_from_smiles,
     prepare_fragment,
 )
@@ -20,7 +19,6 @@ __all__ = [
     "Chain",
     "Protein",
     "Residue",
-    "fragment_from_sdf",
     "fragment_from_smiles",
     "prepare_fragment",
     "residue_labels",

@@ -2288,34 +2288,6 @@ class TestFragments(BaseTest):
         assert eth.link_atoms and set(eth.link_atoms.values()) <= eth_names
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_fragment_from_sdf(self):
-        # Tests that an SDF fragment loads with explicit bond orders,
-        # elements, and coordinates, as a named Residue. This is needed
-        # because SDF is the rich fragment format that, unlike PDB,
-        # carries bond orders and formal charges, and workflows (e.g.
-        # PolyzyMD) hand fragments off as charged SDF files. The test
-        # writes an acetone SDF via RDKit and checks the loaded residue.
-        from rdkit import Chem
-        from rdkit.Chem import AllChem
-
-        from mbuild.biopolymers import fragment_from_sdf
-
-        rdmol = Chem.AddHs(Chem.MolFromSmiles("CC(C)=O"))
-        AllChem.EmbedMolecule(rdmol, randomSeed=3)
-        path = Path("acetone.sdf")
-        Chem.SDWriter(str(path)).write(rdmol)
-
-        residue = fragment_from_sdf(str(path), "ACT")
-        assert residue.name == "ACT" and residue.hetatm
-        assert residue.n_particles == 10
-        orders = {
-            bond[2]["bond_order"] for bond in residue.bonds(return_bond_order=True)
-        }
-        assert orders == {1.0, 2.0}
-        names = [p.name for p in residue.particles()]
-        assert len(set(names)) == len(names) and "O1" in names
-
-    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_star_sited_fragment(self, protein_6m03):
         # Tests that a SMILES attachment point (*) marks the fragment's
         # bond site, so attach() needs no fragment atom name, and that
@@ -2351,11 +2323,7 @@ class TestFragments(BaseTest):
         # became "OCT", the assigned CCD code for n-octane. The test
         # passes a name that is too long to each entry point and reads
         # back the message.
-        from mbuild.biopolymers import (
-            fragment_from_sdf,
-            fragment_from_smiles,
-            prepare_fragment,
-        )
+        from mbuild.biopolymers import fragment_from_smiles, prepare_fragment
         from mbuild.biopolymers.protein import Residue
         from mbuild.lib.moieties import CH3
 
@@ -2366,8 +2334,6 @@ class TestFragments(BaseTest):
 
         with pytest.raises(ValueError, match="OCTL"):
             fragment_from_smiles("*C(=O)CCCCCCC", "OCTL")
-        with pytest.raises(ValueError, match="OCTL"):
-            fragment_from_sdf("no_such_file.sdf", "OCTL")
         with pytest.raises(ValueError, match="OCTL"):
             protein_6m03.attach(
                 CH3(),

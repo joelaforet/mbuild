@@ -73,8 +73,6 @@ residue definition for the modification.
 
 .. autofunction:: mbuild.biopolymers.fragments.prepare_fragment
 
-.. autofunction:: mbuild.biopolymers.fragments.fragment_from_sdf
-
 .. autofunction:: mbuild.biopolymers.fragments.fragment_from_smiles
 
 Solvating a protein

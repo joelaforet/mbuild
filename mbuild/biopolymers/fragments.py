@@ -3,23 +3,20 @@
 A fragment is any Compound organized as Residue objects with unique
 atom names, chemistry-complete bonds, and (optionally) labeled
 attachment sites. These helpers build such fragments from SMILES
-strings (with * attachment points) and SDF files.
+strings (with * attachment points) and from Compounds the caller
+already has.
 """
 
-import itertools
 import logging
 
-import numpy as np
-
 from mbuild import clone
-from mbuild.biopolymers.protein import Residue, _rdkit_bond_orders
+from mbuild.biopolymers.protein import Residue
 from mbuild.bond_graph import BondGraph
-from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["fragment_from_sdf", "fragment_from_smiles", "prepare_fragment"]
+__all__ = ["fragment_from_smiles", "prepare_fragment"]
 
 
 #: Address of the wwPDB Format Guide section that the residue name
@@ -346,93 +343,3 @@ def prepare_fragment(compound, resname):
                 if particle.particle_tag:
                     residue.link_atoms[str(particle.particle_tag)] = particle.name
     return copied
-
-
-def fragment_from_sdf(filename, resname):
-    """Load one molecule from an SDF file as a named Residue fragment.
-
-    SDF is the preferred rich fragment format: unlike PDB, it encodes
-    explicit bond orders and formal charges, together with coordinates.
-    Atom names are assigned as element+index (the SDF format has no
-    atom names); read them from the returned residue. Formal charges
-    from the SDF are kept on the residue's ``atom_formal_charges`` map,
-    so exports carry them; an external residue definition for a
-    downstream loader is still best built from the same file.
-
-    Parameters
-    ----------
-    filename : str
-        Path of an SDF file holding exactly one molecule with explicit
-        hydrogens and coordinates.
-    resname : str
-        The residue name, of three characters or fewer.
-
-    Returns
-    -------
-    Residue
-        A detached residue ready to pass to ``Protein.attach``.
-
-    Raises
-    ------
-    ValueError
-        If ``resname`` is longer than three characters.
-    """
-    from mbuild.utils.io import import_
-
-    _check_resname(resname)
-    import_("rdkit")
-    from rdkit import Chem
-
-    supplier = Chem.SDMolSupplier(str(filename), removeHs=False, sanitize=True)
-    # Two entries are enough to decide the count; do not parse the rest.
-    molecules = [
-        molecule for molecule in itertools.islice(supplier, 2) if molecule is not None
-    ]
-    if len(molecules) != 1:
-        raise MBuildError(
-            f"{filename} does not hold exactly one readable molecule; "
-            "fragment_from_sdf takes exactly one."
-        )
-    molecule = molecules[0]
-    if molecule.GetNumConformers() == 0:
-        raise MBuildError(f"{filename} has no coordinates.")
-    if any(atom.GetNumImplicitHs() for atom in molecule.GetAtoms()):
-        raise MBuildError(
-            f"{filename} has implicit hydrogens; write the SDF with all "
-            "hydrogens explicit."
-        )
-    orders = {bond_type: order for order, bond_type in _rdkit_bond_orders().items()}
-    conformer = molecule.GetConformer()
-    # Only the fallback name can be too long; see _MAX_RESNAME_LENGTH.
-    residue = Residue(
-        resname=(resname or "LIG")[:_MAX_RESNAME_LENGTH].upper(), hetatm=True
-    )
-    particles = []
-    for atom in molecule.GetAtoms():
-        position = conformer.GetAtomPosition(atom.GetIdx())
-        particles.append(
-            Compound(
-                name=atom.GetSymbol(),
-                element=atom.GetSymbol(),
-                pos=np.array([position.x, position.y, position.z]) / 10.0,
-            )
-        )
-    residue.add(particles)
-    for bond in molecule.GetBonds():
-        order = orders.get(bond.GetBondType())
-        if order is None:
-            raise MBuildError(
-                f"Unsupported SDF bond type {bond.GetBondType()} in {filename}."
-            )
-        residue.add_bond(
-            (particles[bond.GetBeginAtomIdx()], particles[bond.GetEndAtomIdx()]),
-            bond_order=order,
-        )
-    _ensure_unique_atom_names(residue)
-    residue.atom_formal_charges = {
-        particles[atom.GetIdx()].name: atom.GetFormalCharge()
-        for atom in molecule.GetAtoms()
-        if atom.GetFormalCharge()
-    }
-    residue.formal_charge = sum(residue.atom_formal_charges.values())
-    return residue
