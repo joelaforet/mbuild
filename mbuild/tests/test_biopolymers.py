@@ -1258,7 +1258,7 @@ class TestProtein(BaseTest):
             caplog.clear()
             with caplog.at_level(logging.WARNING, logger="mbuild"):
                 protein.protonate(12, atom_name, chain_id="A")
-            assert f"Atom {atom_name} of residue LYS 12" in caplog.text
+            assert f"Atom {atom_name} of residue LYS A:12" in caplog.text
             assert "no protonation variant" in caplog.text
         assert protein.n_particles == n_particles
         assert protein.net_formal_charge == net_before

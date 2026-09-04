@@ -379,33 +379,13 @@ def _chain_of(residue):
     )
 
 
-def _residue_label(residue):
-    """Return a short label for a residue, such as ``LYS 5 A``.
-
-    The chain identifier is appended when the chain has one.
-
-    Parameters
-    ----------
-    residue : Residue
-        The residue to label.
-
-    Returns
-    -------
-    str
-        The residue name, its number, and the chain identifier.
-    """
-    label = f"{residue.name} {residue.resnum}"
-    chain_id = _chain_of(residue).chain_id
-    return f"{label} {chain_id}" if chain_id else label
-
-
 def _pdb_label(residue):
     """Return the loader-style label of a residue, such as ``CYS A:22``.
 
     The loader labels a residue by its PDB fields while it reads the
     file, in ``_PdbResidue.label``. This function writes the same text
-    for a built residue, so that an error raised after the build reads
-    like the errors raised during the parse.
+    for a built residue. Every error and every warning that the module
+    writes after the build names a residue in this one format.
 
     Parameters
     ----------
@@ -2457,7 +2437,7 @@ class Protein(Compound):
                     protons.append(name)
         if not protons:
             logger.warning(
-                f"Atom {atom_name} of residue {_residue_label(residue)} "
+                f"Atom {atom_name} of residue {_pdb_label(residue)} "
                 "carries no acidic proton, so nothing changed. The atom is "
                 "already deprotonated, or its protons are not acidic."
             )
@@ -2566,7 +2546,7 @@ class Protein(Compound):
                 break
         if target is None:
             logger.warning(
-                f"Atom {atom_name} of residue {_residue_label(residue)} "
+                f"Atom {atom_name} of residue {_pdb_label(residue)} "
                 "has no protonation variant in the CCD template, so nothing "
                 "changed. The atom is already protonated, it bonds to another "
                 "residue, or the template does not protonate it."
@@ -2619,7 +2599,7 @@ class Protein(Compound):
         if not pairs:
             return
         logger.warning(
-            f"{_residue_label(residue)} holds charged atoms within "
+            f"{_pdb_label(residue)} holds charged atoms within "
             f"{_SPLIT_CHARGE_MAX_BONDS} bonds after this call: "
             f"{'; '.join(pairs)}. Load the protein again and deprotonate "
             "another atom if one charged atom is correct for the chemistry "
@@ -2650,7 +2630,7 @@ class Protein(Compound):
         if any(other.atom_names == variant.atom_names for other in library_variants):
             return
         logger.warning(
-            f"{_residue_label(residue)} atom {atom_name} lost {proton_name}. "
+            f"{_pdb_label(residue)} atom {atom_name} lost {proton_name}. "
             f"The template library holds no {residue.name} variant with the "
             f"atoms of {variant.description}. A PDB written from this protein "
             "does not reload with Protein(). Deprotonate another atom if the "
@@ -2957,7 +2937,7 @@ class Protein(Compound):
         if not charge:
             return
         state = (
-            f"{_residue_label(residue)} atom {atom_name} has formal charge "
+            f"{_pdb_label(residue)} atom {atom_name} has formal charge "
             f"{charge:+d} before this bond and {charge:+d} after it."
         )
         if charge < 0:
