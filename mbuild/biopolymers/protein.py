@@ -46,6 +46,7 @@ from mbuild import clone
 from mbuild.biopolymers.ccd import (
     _ACIDIC_PROTONS,
     _BASIC_ATOMS,
+    _require_keys,
     CCDLibrary,
     template_from_dict,
 )
@@ -107,6 +108,18 @@ _BOND_RECORDS_VERSION = 1
 #: Suffix of the sidecar file. It replaces the extension of the PDB
 #: path, so "protein.pdb" gives "protein.bondrecords.json".
 _BOND_RECORDS_SUFFIX = ".bondrecords.json"
+
+#: Keys that every record of the sidecar must hold. ``bond_records``
+#: writes them all, and the reader indexes them all.
+_BOND_RECORD_KEYS = (
+    "residue_names",
+    "residue_numbers",
+    "chain_ids",
+    "icodes",
+    "atom_names",
+    "leaving_atoms",
+    "bond_order",
+)
 
 #: Extensions whose GMSO writers need force-field parameters. Without
 #: them each writer fails inside GMSO, and no message names the cause:
@@ -1215,7 +1228,8 @@ def _read_bond_records(filename):
     ------
     MBuildError
         When the ``format`` or ``version`` field is not the one this
-        reader takes. Both messages name the file.
+        reader takes, or when a key that the reader indexes is absent.
+        Every message names the file.
     """
     with open(filename) as handle:
         document = json.load(handle)
@@ -1232,6 +1246,12 @@ def _read_bond_records(filename):
             f"{filename} holds bond-records version {version!r}. This "
             f"mBuild reads version {_BOND_RECORDS_VERSION}."
         )
+    # The reader indexes these keys. A file that a user edited can
+    # hold one of them less, and a KeyError names the key alone: no
+    # message would say which file or which record holds the fault.
+    _require_keys(document, ("bond_records", "templates"), filename)
+    for index, record in enumerate(document["bond_records"]):
+        _require_keys(record, _BOND_RECORD_KEYS, f"Record {index} of {filename}")
     return document
 
 
@@ -1590,7 +1610,7 @@ class Protein(Compound):
         document = _read_bond_records(filename)
         self.library = self.library.copy()
         for data in document["templates"].values():
-            template = template_from_dict(data)
+            template = template_from_dict(data, source=filename)
             self.library.register(template)
             self._sidecar_template_names.add(template.name)
         addresses = {

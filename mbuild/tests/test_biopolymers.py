@@ -2214,6 +2214,23 @@ class TestProteinExports(BaseTest):
         with pytest.raises(MBuildError, match="version 99"):
             Protein(get_fn("6m03_protonated.pdb"), bond_records=str(path))
 
+    def test_bond_records_file_with_a_missing_key_is_refused(self):
+        # Tests that a record without one of the keys the reader
+        # indexes raises an error that names the file and the key. This
+        # is needed because a plain KeyError names the key alone, and a
+        # user cannot tell which file or which record holds the fault.
+        # The test writes a real pair of files, drops leaving_atoms
+        # from the record, and loads the pair again.
+        protein = Protein(get_fn("3cu9_vicinal_disulfide.pdb"))
+        protein.save_pdb("incomplete.pdb")
+        path = Path("incomplete.bondrecords.json")
+        document = json.loads(path.read_text())
+        del document["bond_records"][0]["leaving_atoms"]
+        path.write_text(json.dumps(document))
+        with pytest.raises(MBuildError, match="Record 0 of incomplete") as error:
+            Protein("incomplete.pdb", bond_records=str(path))
+        assert "'leaving_atoms'" in str(error.value)
+
     def test_the_writer_flag_is_refused_as_a_sidecar_path(self):
         # Tests that a bool given to the bond_records argument of
         # Protein raises a TypeError that names both arguments. This is
