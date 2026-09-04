@@ -26,8 +26,10 @@ reader. The test runs wherever openff-pablo is installed.
 
 mBuild's generic PDB path (mdtraj via ``mb.load``) is not reused here
 because it hides ``TER`` records and atom serials, both of which this
-matching model needs. The input file must be fully protonated (for
-example with pdbfixer or reduce) at the desired pH.
+matching model needs. The input file must be fully protonated at the
+desired pH, for example with PDBFixer or Reduce:
+PDBFixer: https://github.com/openmm/pdbfixer
+Reduce: https://github.com/rlabduke/reduce
 """
 
 import logging
@@ -442,14 +444,16 @@ def _ter_break_reason(earlier, later, earlier_variant, later_variant):
 
     The wwPDB Format Guide v3.30, section 9 (Coordinate Section, TER),
     states that the TER record ends the chain of ATOM and HETATM
-    records that comes before it. A strict reader therefore ends the
-    polymer at every TER.
+    records that comes before it:
+    https://www.wwpdb.org/documentation/file-format-content/format33/sect9.html
+    A strict reader therefore ends the polymer at every TER.
 
     A preparation tool that writes the file from a topology puts a TER
     at the end of each topology chain. It does not put one at the end
     of each PDB chain. OpenMM's ``PDBFile.writeModel`` prints a TER
-    after the last residue of every ``Topology`` chain. With
-    ``keepIds=True`` it takes the chain identifier from the chain
+    after the last residue of every ``Topology`` chain:
+    https://github.com/openmm/openmm/blob/05472c9a812927c863be67abbb3376e944b2c7ef/wrappers/python/openmm/app/pdbfile.py#L404
+    With ``keepIds=True`` it takes the chain identifier from the chain
     object, so two topology chains can carry one identifier. A cap
     (ACE, NME) or a ligand that the topology holds in its own chain
     then follows a TER inside one PDB chain. Every writer that goes
@@ -535,12 +539,20 @@ def _assign_records(group, variant):
     template atom. Both happen on files whose hydrogen names are valid
     but not canonical. Digit-first names such as ``2HB`` are PDB format
     version 2 names, which Amber-style tools still write, and they fail
-    the first reason. Glycine written with the version 2 alpha-hydrogen
-    names ``HA1``/``HA2`` fails the second reason. The CCD gives the
-    version 3 atom ``HA2`` the alternative name ``HA1``, and it gives
-    the atom ``HA3`` the alternative name ``HA2``. After either reason, a second
-    pass runs ``_assign_records_bipartite`` over the full candidate
-    list of every record.
+    the first reason. The wwPDB publishes the atom naming rule on the
+    Nomenclature page of the version 3.0 guide:
+    https://www.wwpdb.org/documentation/file-format-content/format30/sect12.html
+    Glycine written with the version 2 alpha-hydrogen names
+    ``HA1``/``HA2`` fails the second reason. The CCD gives the version 3
+    atom ``HA2`` the alternative name ``HA1``, and it gives the atom
+    ``HA3`` the alternative name ``HA2``. ``parse_ccd_cif`` reads these
+    alternative names from the ``_chem_comp_atom.alt_atom_id`` column of
+    the CCD CIF file, and the table ``_ATOM_NAME_SYNONYMS`` adds more
+    names per residue.
+    ``mbuild.biopolymers.ccd.ResidueTemplate.atoms_named`` reports every
+    template atom that one name can denote. After either reason, a
+    second pass runs ``_assign_records_bipartite`` over the full
+    candidate list of every record.
 
     Parameters
     ----------
