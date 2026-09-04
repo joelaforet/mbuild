@@ -256,10 +256,10 @@ def _rdkit_bond_orders():
     The table is built on the first call, not at import, because RDKit
     is an optional dependency and the module must import without it.
     ``lru_cache`` then holds the one table, so a caller that reads it
-    per bond does not rebuild it. ``Protein.to_rdkit`` reads the table
-    forward and
-    ``fragments.fragment_from_sdf`` reads it backward, so one table
-    keeps the two directions in agreement.
+    per bond does not rebuild it. ``Protein.to_rdkit`` is the only
+    reader in this package: it maps each mBuild bond order to an RDKit
+    bond type. One table keeps that mapping in one place, so a new bond
+    order is added once.
 
     The table is stricter than the map in ``mbuild.conversion`` by
     intent. That map turns UNSPECIFIED into the order 0.0. This recipe
