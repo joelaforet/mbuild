@@ -185,8 +185,62 @@ class InterResidueBond:
 
 @dataclass
 class _Match:
+    """The result of trying one template variant against one PDB residue.
+
+    A residue name such as ``HIS`` maps to several template variants, one
+    per protonation state, and the loader does not know in advance which
+    one the file holds. It tries every variant and keeps one ``_Match``
+    per variant that fits. ``_matches_agree`` then compares the survivors:
+    if they describe the same chemistry, the first is used; if they
+    disagree, the file is ambiguous and the loader raises.
+
+    Attributes
+    ----------
+    variant : ResidueTemplate
+        The template variant that was tried.
+    record_atoms : dict
+        Maps ``id(record)`` to the template atom that record is. See
+        ``_assign_records`` and ``_assign_records_bipartite``.
+    missing : set
+        Names of template atoms that no record claimed. A fit requires
+        every missing atom to be a leaving atom of an expected link.
+    expects_prior, expects_posterior, expects_crosslink : bool
+        Which links the missing atoms imply. A missing ``H2`` on the
+        backbone nitrogen means a peptide bond from the residue before
+        (``expects_prior``). Missing ``OXT`` and ``HXT`` mean a peptide
+        bond to the residue after (``expects_posterior``). A missing
+        ``HG`` on cysteine means a disulfide bridge
+        (``expects_crosslink``). ``_bond_backbone`` and
+        ``_bond_crosslinks`` read these flags to form the inter-residue
+        bonds, and ``_filter_crosslink_candidates`` uses the CONECT
+        records to choose between a bridged and a free cysteine.
+
+    Notes
+    -----
+    Name-based matching against residue templates with protonation
+    variants is the usual design for a reader that needs formal charges
+    from a PDB file. The comparison below is as of 2026-09-04.
+
+    - openff-pablo uses the same design. Its ``ResidueMatch`` holds the
+      same data, and it has no fallback for older atom names:
+      https://github.com/openforcefield/openff-pablo/blob/main/openff/pablo/_pdb_data.py
+    - OpenMM ``ForceField`` matches a residue by bond graph, elements and
+      connectivity, so it needs the bonds before the chemistry:
+      https://docs.openmm.org/latest/userguide/application/06_creating_ffs.html#residue-templates
+    - PDBFixer matches by residue name to its own template files and adds
+      missing atoms and hydrogens from them. It assigns no formal charge:
+      https://github.com/openmm/pdbfixer/blob/master/Manual.html
+    - ParmEd reads names and coordinates and adds bonds inside standard
+      residues from a name-keyed template table. It generates no
+      protonation variants and no formal charges:
+      https://github.com/ParmEd/ParmEd/blob/master/parmed/formats/pdb.py
+    - mdtraj reads names and coordinates and guesses bonds from a standard
+      residue table and distances. It gives no formal charges:
+      https://github.com/mdtraj/mdtraj/blob/master/mdtraj/formats/pdb/pdbfile.py
+    """
+
     variant: object
-    record_atoms: dict  # id(record) -> AtomTemplate
+    record_atoms: dict
     missing: set
     expects_prior: bool
     expects_posterior: bool
@@ -535,18 +589,39 @@ def _assign_records(group, variant):
 
 
 def _assign_records_bipartite(group, variant, reason):
-    """Assign records to template atoms by a bipartite matching.
+    """Pair the records of one residue with template atoms when names alone
+    do not decide.
 
-    Every record gets the candidate atoms of
-    ``ResidueTemplate.atoms_named``, kept only where the element of the
-    record agrees. A Kuhn augmenting-path search then gives each record
-    a distinct template atom. The records are visited in file order and
-    the candidates stay in template order, so the same file always
-    produces the same assignment.
+    The loader gives a PDB residue its chemistry by pairing each ATOM
+    record with one atom of the CCD template. A record has a name, an
+    element and coordinates. The template atom has the formal charge and
+    the bonds. ``_assign_records`` does this pairing by name: record
+    ``CA`` is template atom ``CA``. That pass is enough for a file with
+    wwPDB version 3 atom names, and this function never runs.
 
-    The assignment covers every record or none. A partial cover is a
-    failure, because chemistry comes from the template and a record
-    with no atom has no chemistry.
+    Older files use PDB format version 2 names, and the CCD stores those
+    names as synonyms. For glycine the version 3 atoms are ``HA2`` and
+    ``HA3``. Version 2 files call them ``HA1`` and ``HA2``, so the CCD
+    lists ``HA1`` as a synonym of ``HA2`` and ``HA2`` as a synonym of
+    ``HA3``. In a version 2 file, record ``HA2`` then fits two template
+    atoms, and record ``HA1`` fits one of them. The first pass takes the
+    first fit for each record, so both records land on ``HA2``. Two
+    records on one atom is a collision, and the first pass rejects the
+    residue.
+
+    This function solves the collision as a pairing puzzle. Each record
+    lists every template atom it can be: the atoms whose name or synonym
+    matches, with the same element. The search then pairs records with
+    atoms so that no atom is used twice. When a record needs an atom that
+    another record holds, the other record moves to its next candidate
+    and the search continues from there. For the glycine above the result
+    is record ``HA1`` to ``HA2`` and record ``HA2`` to ``HA3``. Records
+    are visited in file order and candidates stay in template order, so
+    one file always gives one assignment.
+
+    Either every record gets an atom or the residue is rejected. A record
+    with no template atom has no element, charge or bonds, so a partial
+    pairing cannot build the residue.
 
     Parameters
     ----------
