@@ -1576,6 +1576,8 @@ class TestProtein(BaseTest):
         assert protein.bond_records()[-1] == {
             "residue_names": ("LYS", "MET"),
             "residue_numbers": (12, 400),
+            "chain_ids": ("A", "A"),
+            "icodes": ("", ""),
             "atom_names": ("NZ", "C1"),
             "leaving_atoms": (["HZ1"], []),
             "bond_order": 1,
@@ -1951,8 +1953,10 @@ class TestProteinExports(BaseTest):
         # because strict template loaders require the cross-residue
         # CONECT, fail on unexplained CONECTs (so peptide bonds must
         # not get them), and downstream tools format the records into
-        # their own vocabulary. The test attaches a fragment at LYS 5
-        # NZ, writes the file, and checks records.
+        # their own vocabulary. A complete record also addresses each
+        # residue by chain and insertion code, because a residue number
+        # alone repeats across chains. The test attaches a fragment at
+        # LYS 5 NZ, writes the file, and checks records.
         protein = protein_6m03
         fragment = acetone
         protein.attach(
@@ -2008,6 +2012,8 @@ class TestProteinExports(BaseTest):
             {
                 "residue_names": ("LYS", "XCT"),
                 "residue_numbers": (5, 307),
+                "chain_ids": ("A", "A"),
+                "icodes": ("", ""),
                 "atom_names": ("NZ", "C1"),
                 "leaving_atoms": (["HZ1"], ["H1"]),
                 "bond_order": 1,

@@ -2839,17 +2839,30 @@ class Protein(Compound):
         that state in its template, and not in the record of a bond at
         the same atom. The two are separate properties of the product.
 
+        The residue numbers alone do not address a residue. A number
+        repeats across chains, and an insertion code splits one number
+        into several residues. ``chain_ids`` and ``icodes`` complete
+        the address, so a reader finds each residue with the same three
+        fields that ``get_residue`` takes.
+
         Returns
         -------
         list of dict
             One dict per record, with the keys ``residue_names``,
-            ``residue_numbers``, ``atom_names``, ``leaving_atoms``
-            (one list per side), and ``bond_order``.
+            ``residue_numbers``, ``chain_ids``, ``icodes``,
+            ``atom_names``, ``leaving_atoms`` (one list per side), and
+            ``bond_order``. Every key but ``bond_order`` holds one pair,
+            in the order (residue 1, residue 2).
         """
         return [
             {
                 "residue_names": (bond.residue1.name, bond.residue2.name),
                 "residue_numbers": (bond.residue1.resnum, bond.residue2.resnum),
+                "chain_ids": (
+                    _chain_of(bond.residue1).chain_id,
+                    _chain_of(bond.residue2).chain_id,
+                ),
+                "icodes": (bond.residue1.icode, bond.residue2.icode),
                 "atom_names": (bond.atom1_name, bond.atom2_name),
                 "leaving_atoms": (list(bond.leaving1), list(bond.leaving2)),
                 "bond_order": bond.order,
