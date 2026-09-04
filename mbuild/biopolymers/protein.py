@@ -43,7 +43,12 @@ from itertools import combinations
 import numpy as np
 
 from mbuild import clone
-from mbuild.biopolymers.ccd import _ACIDIC_PROTONS, _BASIC_ATOMS, CCDLibrary
+from mbuild.biopolymers.ccd import (
+    _ACIDIC_PROTONS,
+    _BASIC_ATOMS,
+    CCDLibrary,
+    template_from_dict,
+)
 from mbuild.biopolymers.protein_pdb_io import (
     _check_residue_membership,
     _parse_pdb,
@@ -1188,6 +1193,48 @@ def _bond_records_path(filename):
     return os.path.splitext(filename)[0] + _BOND_RECORDS_SUFFIX
 
 
+def _read_bond_records(filename):
+    """Read a bond-records file and check that this reader knows it.
+
+    The file patches the residue templates that the loader matches
+    against, so a file of another format or version must not be read
+    as if it were this one. ``mbuild.formats.json_formats`` checks its
+    own files the same way.
+
+    Parameters
+    ----------
+    filename : str
+        Path of the bond-records file.
+
+    Returns
+    -------
+    dict
+        The document.
+
+    Raises
+    ------
+    MBuildError
+        When the ``format`` or ``version`` field is not the one this
+        reader takes. Both messages name the file.
+    """
+    with open(filename) as handle:
+        document = json.load(handle)
+    marker = document.get("format")
+    if marker != _BOND_RECORDS_FORMAT:
+        raise MBuildError(
+            f"{filename} is not an mBuild bond-records file: its format "
+            f"field holds {marker!r}, and this reader takes "
+            f"{_BOND_RECORDS_FORMAT!r}."
+        )
+    version = document.get("version")
+    if version != _BOND_RECORDS_VERSION:
+        raise MBuildError(
+            f"{filename} holds bond-records version {version!r}. This "
+            f"mBuild reads version {_BOND_RECORDS_VERSION}."
+        )
+    return document
+
+
 def _template_dict(residue, links):
     """Return the sidecar template of one residue that mBuild built.
 
@@ -1264,11 +1311,29 @@ class Protein(Compound):
         Allow the default library to download unknown residue codes from
         RCSB.
     name : str, optional, default="Protein"
+    bond_records : str, optional
+        Path of the bond-records file that ``save_pdb`` wrote next to
+        ``filename``. It carries the residue templates of the fragments
+        that mBuild added and the inter-residue bonds of every covalent
+        modification, so a modified protein loads again with the same
+        particles, bonds, formal charges and bond records.
     """
 
-    def __init__(self, filename=None, library=None, download=False, name="Protein"):
+    def __init__(
+        self,
+        filename=None,
+        library=None,
+        download=False,
+        name="Protein",
+        bond_records=None,
+    ):
         super().__init__(name=name)
         self.library = library or CCDLibrary(download=download)
+        if bond_records is not None and filename is None:
+            raise MBuildError(
+                "bond_records describes the residues of a PDB file. "
+                "Pass filename as well."
+            )
         self.cross_bonds = []
         #: Map of anchor particle -> tuple of the hydrogen names that
         #: were removed at that particle to open a port. Repeated ports
@@ -1279,7 +1344,7 @@ class Protein(Compound):
         #: ``record_bond`` reads it for its default leaving-atom lists.
         self._leaving_atoms = {}
         if filename is not None:
-            self._load_pdb(filename)
+            self._load_pdb(filename, bond_records)
 
     def _clone(self, clone_of=None, root_container=None):
         newone = super()._clone(clone_of, root_container)
@@ -1320,8 +1385,17 @@ class Protein(Compound):
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
-    def _load_pdb(self, filename):
-        """Parse the PDB file, match every residue, and build the hierarchy."""
+    def _load_pdb(self, filename, bond_records=None):
+        """Parse the PDB file, match every residue, and build the hierarchy.
+
+        A bond-records file is read first. It registers the templates
+        of the residues that the CCD does not define, and it patches
+        the crosslink onto the templates of the residues it names, so
+        that the matcher explains the atoms those bonds displaced.
+        """
+        crosslink_orders = {}
+        if bond_records is not None:
+            crosslink_orders = self._apply_bond_records(bond_records)
         with open(filename) as handle:
             text = handle.read()
         groups, conects, box = _parse_pdb(text)
@@ -1405,11 +1479,94 @@ class Protein(Compound):
             for candidates, group in zip(all_candidates, groups)
         ]
 
-        self._build(groups, matches, conects)
+        self._build(groups, matches, conects, crosslink_orders)
         if box is not None:
             self.box = box
 
-    def _build(self, groups, matches, conects):
+    def _apply_bond_records(self, filename):
+        """Read a bond-records file into the template library.
+
+        Two changes are made. Every template of the file is registered
+        under its residue name, so the lookup of a fragment residue
+        resolves. Every bond record then patches the templates of the
+        two residues it names: the bonded atom gets the crosslink, and
+        the atoms the record lists as leaving get the leaving flag. The
+        matcher then explains the absent atoms of a modified residue,
+        and ``_bond_crosslinks`` forms the bond from the CONECT record.
+
+        The library is copied first. The patches describe this one
+        file, and a library that the caller passed must keep its own
+        templates.
+
+        Parameters
+        ----------
+        filename : str
+            Path of the bond-records file.
+
+        Returns
+        -------
+        dict
+            Maps the frozen set of the two (residue name, atom name)
+            pairs of a record to the order of that bond.
+        """
+        document = _read_bond_records(filename)
+        self.library = self.library.copy()
+        for data in document["templates"].values():
+            self.library.register(template_from_dict(data))
+        orders = {}
+        for record in document["bond_records"]:
+            names = record["residue_names"]
+            atom_names = record["atom_names"]
+            leaving = record["leaving_atoms"]
+            for side, other in ((0, 1), (1, 0)):
+                self._patch_crosslink(
+                    names[side], atom_names[side], atom_names[other], leaving[side]
+                )
+            orders[frozenset(zip(names, atom_names))] = record["bond_order"]
+        return orders
+
+    def _patch_crosslink(self, resname, atom_name, partner_name, leaving):
+        """Give every variant of one residue a crosslink and its leaving atoms.
+
+        The patch mirrors what ``_add_disulfide`` does for cysteine in
+        ``mbuild.biopolymers.ccd``: the bonded atom records that it can
+        crosslink, and the atoms that the bond displaces are marked as
+        leaving. Every variant of the residue is patched, because the
+        file decides which protonation variant the residue holds.
+
+        The patch does not force the bond. A variant that carries a
+        crosslink still matches a residue that holds all its atoms, and
+        ``_filter_crosslink_candidates`` keeps the bonded variant only
+        for a residue whose CONECT record names a partner. One modified
+        and one unmodified lysine therefore both match.
+
+        Parameters
+        ----------
+        resname : str
+            Name of the residue to patch.
+        atom_name : str
+            Name of the atom that carries the inter-residue bond.
+        partner_name : str
+            Name of the bonded atom in the other residue.
+        leaving : sequence of str
+            Names of the atoms that the bond displaced.
+        """
+        leaving = set(leaving)
+        self.library.register(
+            *[
+                replace(
+                    variant,
+                    crosslink=(atom_name, partner_name),
+                    atoms=tuple(
+                        replace(atom, leaving=True) if atom.name in leaving else atom
+                        for atom in variant.atoms
+                    ),
+                )
+                for variant in self.library[resname]
+            ]
+        )
+
+    def _build(self, groups, matches, conects, crosslink_orders):
         """Build chains, residues, particles, and intra-residue bonds."""
         # Build each residue fully while it is detached, and attach whole
         # chains at the end: Compound.add composes the parent's entire
@@ -1456,7 +1613,7 @@ class Protein(Compound):
             self.add(chain)
 
         self._bond_backbone(groups, matches, residues)
-        self._bond_crosslinks(groups, matches, residues, conects)
+        self._bond_crosslinks(groups, matches, residues, conects, crosslink_orders)
         self._check_conects(conects, serial_to_particle)
 
     def _bond_backbone(self, groups, matches, residues):
@@ -1503,8 +1660,14 @@ class Protein(Compound):
                     "they are separate molecules."
                 )
 
-    def _bond_crosslinks(self, groups, matches, residues, conects):
-        """Form the crosslink bonds and record them in ``cross_bonds``."""
+    def _bond_crosslinks(self, groups, matches, residues, conects, crosslink_orders):
+        """Form the crosslink bonds and record them in ``cross_bonds``.
+
+        ``crosslink_orders`` holds the bond order of each record of a
+        bond-records file, keyed by the two (residue name, atom name)
+        pairs of that record. A bond that no record names is a
+        disulfide from the CCD templates, and it takes the order 1.
+        """
         expecting = {}
         for group, match, residue in zip(groups, matches, residues):
             if match.expects_crosslink:
@@ -1538,14 +1701,23 @@ class Protein(Compound):
             ]
             particle1 = _atom_in_residue(residue, record.name)
             particle2 = _atom_in_residue(other_residue, other_record.name)
-            self.add_bond((particle1, particle2), bond_order=1.0)
+            order = crosslink_orders.get(
+                frozenset(
+                    (
+                        (group.resname, record.name),
+                        (other_group.resname, other_record.name),
+                    )
+                ),
+                1,
+            )
+            self.add_bond((particle1, particle2), bond_order=float(order))
             self.cross_bonds.append(
                 InterResidueBond(
                     residue1=residue,
                     residue2=other_residue,
                     atom1_name=record.name,
                     atom2_name=other_record.name,
-                    order=1,
+                    order=order,
                     leaving1=tuple(
                         sorted(match.variant.leaving_fragment_of(record.name))
                     ),

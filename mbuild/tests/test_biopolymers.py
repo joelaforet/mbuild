@@ -1953,21 +1953,19 @@ class TestProteinExports(BaseTest):
             protein.save_pdb("orphan.pdb")
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
-    def test_save_pdb_modified_protein_does_not_reload(
+    def test_modified_protein_needs_the_bond_records_file(
         self, protein_6m03, acetone, tmp_path, monkeypatch
     ):
         # Tests that a written modified protein fails to reload with the
-        # library error for an unknown residue. This is needed because
-        # save_pdb is the handoff artifact of this recipe and users try
-        # to reload it: the fragment has no CCD entry, and mBuild writes
-        # no modification bond declaration, so the loader cannot match
-        # the fragment residue. The test attaches a fragment, writes the
-        # file, and asserts on the library message. The test encodes a
-        # present limitation. Delete it when mBuild can declare a
-        # modification bond that the loader reads back. The user
-        # download cache points at an empty tmp directory, so an ACT
-        # definition downloaded in an earlier session cannot make the
-        # fragment residue known.
+        # library error for an unknown residue when the bond-records
+        # file is not passed. This is needed because the fragment has no
+        # CCD entry, so the loader has no other source for its
+        # chemistry, and the error must name the residue instead of
+        # guessing one. The test attaches a fragment, writes the file,
+        # loads the PDB file alone, and asserts on the library message.
+        # The user download cache points at an empty tmp directory, so
+        # an ACT definition downloaded in an earlier session cannot make
+        # the fragment residue known.
         from mbuild.biopolymers import ccd
 
         monkeypatch.setattr(ccd, "USER_CCD_CACHE_DIR", tmp_path)
@@ -2119,6 +2117,90 @@ class TestProteinExports(BaseTest):
 
         protein.save_pdb("plain.pdb", bond_records=False)
         assert not Path("plain.bondrecords.json").exists()
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_reload_from_the_bond_records_file(self, protein_6m03):
+        # Tests that a protein with an acylated lysine writes and loads
+        # again with the same particles, bonds, formal charges and bond
+        # records. This is needed because the file is the only source
+        # of chemistry for the fragment residue and for the hydrogen
+        # that the new bond displaced on the lysine, so without it
+        # neither residue matches a template. The test acylates LYS 5
+        # NZ, saves, loads the pair of files, and compares the two
+        # proteins.
+        from mbuild.biopolymers.fragments import prepare_fragment
+
+        protein = protein_6m03
+        protein.deprotonate(5, "NZ", chain_id="A")
+        protein.attach(
+            prepare_fragment("*C(=O)CCCCCCC", "OC8"),
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            relax=False,
+        )
+        protein.save_pdb("acylated.pdb")
+        reloaded = Protein("acylated.pdb", bond_records="acylated.bondrecords.json")
+        assert reloaded.n_particles == protein.n_particles
+        assert reloaded.n_bonds == protein.n_bonds
+        assert reloaded.net_formal_charge == protein.net_formal_charge
+        assert reloaded.bond_records() == protein.bond_records()
+        # The new bond took the place of a hydrogen of the neutral
+        # amine, so the acylated lysine is a neutral amide. The charge
+        # comes from the matched template, not from the file, and the
+        # match must therefore pick the deprotonated variant.
+        assert reloaded.get_residue(5, chain_id="A").formal_charge == 0
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_reload_separates_modified_and_free_lysines(self, protein_6m03):
+        # Tests that a protein with two acylated lysines loads again
+        # with those two bonded and every other lysine free. This is
+        # needed because the bond-records file patches the crosslink
+        # onto every LYS template variant, and a patch that forced the
+        # bond would leave each free lysine without a match. The test
+        # acylates LYS 5 and LYS 12, reloads, and reads the charge and
+        # the side-chain hydrogens of those two and of the free LYS 61.
+        from mbuild.biopolymers.fragments import prepare_fragment
+
+        protein = protein_6m03
+        for resnum in (5, 12):
+            protein.deprotonate(resnum, "NZ", chain_id="A")
+            protein.attach(
+                prepare_fragment("*C(=O)CCCCCCC", "OC8"),
+                resnum=resnum,
+                atom_name="NZ",
+                chain_id="A",
+                relax=False,
+            )
+        protein.save_pdb("two_sites.pdb")
+        reloaded = Protein("two_sites.pdb", bond_records="two_sites.bondrecords.json")
+        assert reloaded.bond_records() == protein.bond_records()
+        for resnum in (5, 12):
+            residue = reloaded.get_residue(resnum, chain_id="A")
+            assert residue.formal_charge == 0
+            assert "HZ1" not in {atom.name for atom in residue.particles()}
+        free = reloaded.get_residue(61, chain_id="A")
+        assert free.formal_charge == 1
+        assert {"HZ1", "HZ2", "HZ3"} <= {atom.name for atom in free.particles()}
+
+    def test_bond_records_file_of_another_kind_is_refused(self):
+        # Tests that a bond-records file whose format marker or version
+        # is not the one this mBuild writes raises an error that names
+        # the file. This is needed because the file patches the residue
+        # templates that the loader matches against, so a file from
+        # another tool or another version would change the chemistry of
+        # the loaded protein with no message. The test writes both kinds
+        # of file and loads a protein with each.
+        path = Path("foreign.bondrecords.json")
+        path.write_text(json.dumps({"format": "other.tool", "version": 1}))
+        with pytest.raises(MBuildError, match="foreign.bondrecords.json"):
+            Protein(get_fn("6m03_protonated.pdb"), bond_records=str(path))
+
+        path.write_text(
+            json.dumps({"format": "mbuild.biopolymers.bondrecords", "version": 99})
+        )
+        with pytest.raises(MBuildError, match="version 99"):
+            Protein(get_fn("6m03_protonated.pdb"), bond_records=str(path))
 
     def test_reverse_nc_bond_gets_conect(self, protein_6m03):
         # Tests that a bond from N of a residue to C of the next residue

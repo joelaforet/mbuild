@@ -934,6 +934,26 @@ class CCDLibrary:
             self._templates[resname] = self._load(resname)
         return self._templates[resname]
 
+    def copy(self):
+        """Return a library with the same search paths and templates.
+
+        A ``Protein`` that reads a bond-records file patches the
+        templates of the residues that the file names. The patch
+        describes one file, so the ``Protein`` copies the library
+        first, and a library that the caller passed keeps its own
+        templates.
+
+        Returns
+        -------
+        CCDLibrary
+            The copy. It shares the frozen templates, and it holds its
+            own map from residue name to variants.
+        """
+        other = CCDLibrary(download=self._download)
+        other._paths = list(self._paths)
+        other._templates = dict(self._templates)
+        return other
+
     def register(self, *templates):
         """Put caller-built template variants into this library.
 
