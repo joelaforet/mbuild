@@ -2390,7 +2390,7 @@ class Protein(Compound):
                     protons.append(name)
         if not protons:
             logger.warning(
-                f"Atom {atom_name} of residue {residue.name} {residue.resnum} "
+                f"Atom {atom_name} of residue {_residue_label(residue)} "
                 "carries no acidic proton, so nothing changed. The atom is "
                 "already deprotonated, or its protons are not acidic."
             )
@@ -2499,7 +2499,7 @@ class Protein(Compound):
                 break
         if target is None:
             logger.warning(
-                f"Atom {atom_name} of residue {residue.name} {residue.resnum} "
+                f"Atom {atom_name} of residue {_residue_label(residue)} "
                 "has no protonation variant in the CCD template, so nothing "
                 "changed. The atom is already protonated, it bonds to another "
                 "residue, or the template does not protonate it."
