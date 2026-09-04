@@ -252,8 +252,10 @@ def _as_residues(compound, resname):
 
     Notes
     -----
-    ``resname`` is not checked here. Each caller checks the name
-    before it starts, so the error comes before any other work.
+    This function does not validate ``resname``. The public callers,
+    ``prepare_fragment`` and ``Protein.attach``, call ``_check_resname``
+    as their first step, so a name that is too long raises before any
+    object is cloned or changed. A new caller must do the same.
     """
     if isinstance(compound, Residue):
         # successors() does not yield the compound itself, so a Residue
