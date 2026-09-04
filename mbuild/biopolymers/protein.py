@@ -207,12 +207,12 @@ class _Match:
         Names of template atoms that no record claimed. A fit requires
         every missing atom to be a leaving atom of an expected link.
     expects_prior, expects_posterior, expects_crosslink : bool
-        Which links the missing atoms imply. A missing ``H2`` on the
-        backbone nitrogen means a peptide bond from the residue before
-        (``expects_prior``). Missing ``OXT`` and ``HXT`` mean a peptide
-        bond to the residue after (``expects_posterior``). A missing
-        ``HG`` on cysteine means a disulfide bridge
-        (``expects_crosslink``). ``_bond_backbone`` and
+        Which links the missing atoms imply. A missing prior leaving
+        fragment, ``H2`` on most residues and ``H`` on proline, means a
+        peptide bond from the residue before (``expects_prior``).
+        Missing ``OXT`` and ``HXT`` mean a peptide bond to the residue
+        after (``expects_posterior``). A missing ``HG`` on cysteine
+        means a disulfide bridge (``expects_crosslink``). ``_bond_backbone`` and
         ``_bond_crosslinks`` read these flags to form the inter-residue
         bonds, and ``_filter_crosslink_candidates`` uses the CONECT
         records to choose between a bridged and a free cysteine.
@@ -224,20 +224,25 @@ class _Match:
     from a PDB file. The comparison below is as of 2026-09-04.
 
     - openff-pablo uses the same design. Its ``ResidueMatch`` holds the
-      same data, and it has no fallback for older atom names:
+      same data. It reads old atom names as synonyms, but it raises when
+      a synonym clashes with a canonical name, so it has no second pass:
       https://github.com/openforcefield/openff-pablo/blob/main/openff/pablo/_pdb_data.py
     - OpenMM ``ForceField`` matches a residue by bond graph, elements and
       connectivity, so it needs the bonds before the chemistry:
       https://docs.openmm.org/latest/userguide/application/06_creating_ffs.html#residue-templates
-    - PDBFixer matches by residue name to its own template files and adds
-      missing atoms and hydrogens from them. It assigns no formal charge:
+    - PDBFixer matches by residue name to its own template files and
+      adds missing heavy atoms from them. It adds hydrogens with
+      OpenMM's ``Modeller``, and it assigns no formal charge:
       https://github.com/openmm/pdbfixer/blob/master/Manual.html
     - ParmEd reads names and coordinates and adds bonds inside standard
       residues from a name-keyed template table. It generates no
-      protonation variants and no formal charges:
+      protonation variants. It derives no formal charge from chemistry;
+      it copies the PDB charge column when the file sets it:
       https://github.com/ParmEd/ParmEd/blob/master/parmed/formats/pdb.py
-    - mdtraj reads names and coordinates and guesses bonds from a standard
-      residue table and distances. It gives no formal charges:
+    - mdtraj reads names and coordinates and guesses bonds from a
+      standard residue table and distances. It derives no formal charge
+      from chemistry; it copies the PDB charge column when the file sets
+      it:
       https://github.com/mdtraj/mdtraj/blob/master/mdtraj/formats/pdb/pdbfile.py
     """
 
@@ -609,7 +614,9 @@ def _assign_records_bipartite(group, variant, reason):
     element and coordinates. The template atom has the formal charge and
     the bonds. ``_assign_records`` does this pairing by name: record
     ``CA`` is template atom ``CA``. That pass is enough for a file with
-    wwPDB version 3 atom names, and this function never runs.
+    wwPDB version 3 atom names. This function then runs only for
+    variants the first pass rejected by name, and for such a file it
+    rejects them again.
 
     Older files use PDB format version 2 names, and the CCD stores those
     names as synonyms. For glycine the version 3 atoms are ``HA2`` and
@@ -621,12 +628,13 @@ def _assign_records_bipartite(group, variant, reason):
     records on one atom is a collision, and the first pass rejects the
     residue.
 
-    This function solves the collision as a pairing puzzle. Each record
-    lists every template atom it can be: the atoms whose name or synonym
-    matches, with the same element. The search then pairs records with
-    atoms so that no atom is used twice. When a record needs an atom that
-    another record holds, the other record moves to its next candidate
-    and the search continues from there. For the glycine above the result
+    This function solves the collision by a bipartite matching. Each
+    record lists every template atom it can be: the atoms whose name or
+    synonym matches, with the same element. A Kuhn augmenting-path
+    search then pairs records with atoms so that no atom is used twice.
+    When a record needs an atom that another record holds, the other
+    record moves to its next candidate and the search continues from
+    there. For the glycine above the result
     is record ``HA1`` to ``HA2`` and record ``HA2`` to ``HA3``. Records
     are visited in file order and candidates stay in template order, so
     one file always gives one assignment.
