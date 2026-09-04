@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 
@@ -2019,6 +2020,65 @@ class TestProteinExports(BaseTest):
                 "bond_order": 1,
             }
         ]
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_save_pdb_writes_the_bond_records_sidecar(self, protein_6m03, caplog):
+        # Tests that save_pdb writes the bond-records file next to the
+        # PDB file, that the file holds the records and a template for
+        # the fragment residue, that the info log names the file and
+        # the call that reads it back, and that bond_records=False
+        # writes no such file. This is needed because the file carries
+        # the only chemistry a loader can get for a residue that the
+        # CCD does not define, and a user who never sees the file
+        # cannot pass it back. The test acylates LYS 5 NZ, saves twice,
+        # and reads the document, the log, and the directory.
+        from mbuild.biopolymers.fragments import prepare_fragment
+
+        protein = protein_6m03
+        protein.deprotonate(5, "NZ", chain_id="A")
+        protein.attach(
+            prepare_fragment("*C(=O)CCCCCCC", "OC8"),
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            relax=False,
+        )
+        with caplog.at_level(logging.INFO, logger="mbuild"):
+            protein.save_pdb("sidecar.pdb")
+        assert (
+            'Protein("sidecar.pdb", bond_records="sidecar.bondrecords.json")'
+            in caplog.text
+        )
+        document = json.loads(Path("sidecar.bondrecords.json").read_text())
+        assert document["format"] == "mbuild.biopolymers.bondrecords"
+        assert document["version"] == 1
+        assert document["bond_records"] == [
+            {
+                "residue_names": ["LYS", "OC8"],
+                "residue_numbers": [5, 307],
+                "chain_ids": ["A", "A"],
+                "icodes": ["", ""],
+                "atom_names": ["NZ", "C1"],
+                "leaving_atoms": [["HZ1"], ["H1"]],
+                "bond_order": 1,
+            }
+        ]
+        template = document["templates"]["OC8"]
+        # H1 left the fragment when the bond formed, so the residue no
+        # longer holds it. The template must carry it back, with its
+        # bond to the link atom, because the loader reads the leaving
+        # fragment of an atom from the template bonds.
+        assert {
+            "name": "H1",
+            "element": "H",
+            "formal_charge": 0,
+            "leaving": True,
+        } in template["atoms"]
+        assert {"atom1": "C1", "atom2": "H1", "order": 1} in template["bonds"]
+        assert {"C1", "O1"} <= {atom["name"] for atom in template["atoms"]}
+
+        protein.save_pdb("plain.pdb", bond_records=False)
+        assert not Path("plain.bondrecords.json").exists()
 
     def test_reverse_nc_bond_gets_conect(self, protein_6m03):
         # Tests that a bond from N of a residue to C of the next residue

@@ -32,6 +32,7 @@ PDBFixer: https://github.com/openmm/pdbfixer
 Reduce: https://github.com/rlabduke/reduce
 """
 
+import json
 import logging
 import os
 from collections import deque
@@ -90,6 +91,17 @@ _BRIDGING_ELEMENTS = frozenset(("S", "SE"))
 #: Extensions whose writers record the unit cell, so a missing box
 #: changes the file that ``save`` writes.
 _BOXED_EXTENSIONS = frozenset((".gro", ".top"))
+
+#: Marker and version of the bond-records sidecar that ``save_pdb``
+#: writes next to the PDB file. ``Protein`` reads the sidecar back and
+#: patches the residue templates it matches against, so it refuses a
+#: file whose marker or version it does not know.
+_BOND_RECORDS_FORMAT = "mbuild.biopolymers.bondrecords"
+_BOND_RECORDS_VERSION = 1
+
+#: Suffix of the sidecar file. It replaces the extension of the PDB
+#: path, so "protein.pdb" gives "protein.bondrecords.json".
+_BOND_RECORDS_SUFFIX = ".bondrecords.json"
 
 #: Extensions whose GMSO writers need force-field parameters. Without
 #: them each writer fails inside GMSO, and no message names the cause:
@@ -1156,6 +1168,82 @@ def _matches_agree(matches, group):
     return reference
 
 
+def _bond_records_path(filename):
+    """Return the sidecar path that belongs to a PDB path.
+
+    The extension of the PDB path is replaced by
+    ``_BOND_RECORDS_SUFFIX``, so the two files sit side by side and
+    share one stem.
+
+    Parameters
+    ----------
+    filename : str
+        Path of the PDB file.
+
+    Returns
+    -------
+    str
+        Path of the bond-records file.
+    """
+    return os.path.splitext(filename)[0] + _BOND_RECORDS_SUFFIX
+
+
+def _template_dict(residue, links):
+    """Return the sidecar template of one residue that mBuild built.
+
+    The residue has no CCD definition, so the sidecar carries its
+    chemistry: atom names, elements, formal charges, and the bonds with
+    their orders. A leaving atom is absent from the residue, because
+    the inter-residue bond took its place. Each one is written back
+    into the template as a hydrogen, bonded to the atom that carries
+    the bond. The loader needs that bond, because it reads the leaving
+    fragment of an atom from the template bonds.
+
+    ``linking`` and ``crosslink`` are null. The sidecar records the
+    inter-residue bonds separately, and the reader patches them onto
+    the template.
+
+    Parameters
+    ----------
+    residue : Residue
+        The residue to describe.
+    links : set of tuple of str
+        Pairs of (bonded atom name, leaving atom name) for every
+        inter-residue bond of this residue.
+
+    Returns
+    -------
+    dict
+        The template, with JSON types only.
+    """
+    atoms = [
+        {
+            "name": particle.name,
+            "element": particle.element.symbol,
+            "formal_charge": int(residue.atom_formal_charges.get(particle.name, 0)),
+            "leaving": False,
+        }
+        for particle in residue.particles()
+    ]
+    bonds = [
+        {"atom1": first.name, "atom2": second.name, "order": data["bond_order"]}
+        for first, second, data in residue.bonds(return_bond_order=True)
+    ]
+    for link_name, leaving_name in sorted(links):
+        atoms.append(
+            {"name": leaving_name, "element": "H", "formal_charge": 0, "leaving": True}
+        )
+        bonds.append({"atom1": link_name, "atom2": leaving_name, "order": 1})
+    return {
+        "name": residue.name,
+        "description": f"{residue.name} as built by mBuild",
+        "atoms": atoms,
+        "bonds": bonds,
+        "linking": None,
+        "crosslink": None,
+    }
+
+
 class Protein(Compound):
     """A protein loaded from a fully protonated PDB file.
 
@@ -1523,7 +1611,7 @@ class Protein(Compound):
             writer.
         **kwargs
             Passed to the selected writer. For ``.pdb`` files only
-            ``overwrite`` is accepted.
+            ``overwrite`` and ``bond_records`` are accepted.
         """
         return save(self, filename, **kwargs)
 
@@ -2789,8 +2877,22 @@ class Protein(Compound):
     # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
-    def save_pdb(self, filename, overwrite=False):
+    def save_pdb(self, filename, overwrite=False, bond_records=True):
         """Write a prepared PDB file for downstream residue-template loaders.
+
+        A second file, ``<stem>.bondrecords.json``, is written next to
+        the PDB file. It holds the bond records of every covalent
+        modification and a residue template for every residue that
+        mBuild built and the CCD does not define. Pass that file back
+        to ``Protein`` to load the modified protein again::
+
+            protein.save_pdb("modified.pdb")
+            reloaded = Protein(
+                "modified.pdb", bond_records="modified.bondrecords.json"
+            )
+
+        A downstream tool that reads its own residue definitions needs
+        the PDB file and ``bond_records()`` only.
 
         Bonds made through ``add_port_at`` + ``force_overlap`` get
         CONECT records but no ``cross_bonds`` record, unless you call
@@ -2819,11 +2921,72 @@ class Protein(Compound):
         filename : str
             Path of the PDB file to write.
         overwrite : bool, optional, default=False
-            Overwrite the file if it exists.
+            Overwrite the two files if they exist.
+        bond_records : bool, optional, default=True
+            Write the bond-records file next to the PDB file.
         """
         from mbuild.biopolymers.protein_pdb_io import write_pdb
 
+        # The sidecar is checked before the PDB file is written, so a
+        # refused overwrite leaves neither file changed. The two files
+        # describe one protein, and a PDB file next to an older sidecar
+        # would load as a different molecule.
+        sidecar = _bond_records_path(filename) if bond_records else None
+        if sidecar is not None and os.path.exists(sidecar) and not overwrite:
+            raise IOError(f"{sidecar} exists; not overwriting")
         write_pdb(self, filename, overwrite=overwrite)
+        if sidecar is None:
+            return
+        with open(sidecar, "w") as handle:
+            json.dump(self._bond_records_document(), handle, indent=2)
+        logger.info(
+            f"Wrote {len(self.cross_bonds)} bond records to {sidecar}. "
+            "Load the modified protein again with "
+            f'Protein("{filename}", bond_records="{sidecar}").'
+        )
+
+    def _bond_records_document(self):
+        """Return the content of the bond-records file as a plain dict.
+
+        A template is written for every residue that carries HETATM
+        records and whose name the CCD library does not define. Those
+        are the fragment residues that ``attach`` added, and the loader
+        has no other source for their chemistry. Two residues of one
+        name share one template, because the library holds one entry
+        per residue name.
+
+        Returns
+        -------
+        dict
+            The document, with JSON types only.
+        """
+        # Leaving atoms belong to a bond record, and the template needs
+        # them per residue. The map holds each residue once, keyed by
+        # identity, with the (bonded atom, leaving atom) pairs of every
+        # record that names it.
+        links = {}
+        for bond in self.cross_bonds:
+            for residue, atom_name, leaving in (
+                (bond.residue1, bond.atom1_name, bond.leaving1),
+                (bond.residue2, bond.atom2_name, bond.leaving2),
+            ):
+                entry = links.setdefault(id(residue), set())
+                entry.update((atom_name, name) for name in leaving)
+        templates = {}
+        for residue in self.residues():
+            if not residue.hetatm or residue.name in templates:
+                continue
+            if residue.name in self.library:
+                continue
+            templates[residue.name] = _template_dict(
+                residue, links.get(id(residue), set())
+            )
+        return {
+            "format": _BOND_RECORDS_FORMAT,
+            "version": _BOND_RECORDS_VERSION,
+            "bond_records": self.bond_records(),
+            "templates": templates,
+        }
 
     def bond_records(self):
         """Return one plain dict per recorded inter-residue bond.
@@ -3073,14 +3236,15 @@ def save(compound, filename, **kwargs):
         # generic ParmEd writer cannot express residue numbers, chain
         # identifiers, HETATM records, or a selective CONECT policy, so
         # it writes a blank chain column and no CONECT records.
-        unexpected = set(kwargs) - {"overwrite"}
+        accepted = {"overwrite", "bond_records"}
+        unexpected = set(kwargs) - accepted
         if unexpected:
             raise MBuildError(
                 "Saving a Protein to .pdb uses save_pdb(), which takes "
-                f"only 'overwrite'; the arguments {sorted(unexpected)} "
-                "would be ignored."
+                f"only {sorted(accepted)}; the arguments "
+                f"{sorted(unexpected)} would be ignored."
             )
-        return compound.save_pdb(filename, overwrite=kwargs.get("overwrite", False))
+        return compound.save_pdb(filename, **kwargs)
     if extension not in _GMSO_EXTENSIONS:
         return Compound.save(compound, filename, **kwargs)
     overwrite = kwargs.pop("overwrite", False)
