@@ -1609,16 +1609,12 @@ class Protein(Compound):
         residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
         atom = self._atom_of(residue, atom_name)
         variant = residue.template
-        protons = (
-            [
-                name
-                for name in _ACIDIC_PROTONS.get(residue.name, ())
-                if name in variant.bonded_names(atom_name)
-                and _atom_in_residue(residue, name) is not None
-            ]
-            if variant is not None
-            else []
-        )
+        protons = []
+        if variant is not None:
+            bonded = variant.bonded_names(atom_name)
+            for name in _ACIDIC_PROTONS.get(residue.name, ()):
+                if name in bonded and _atom_in_residue(residue, name) is not None:
+                    protons.append(name)
         if not protons:
             logger.warning(
                 f"Atom {atom_name} of residue {residue.name} {residue.resnum} "
