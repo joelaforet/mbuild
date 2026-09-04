@@ -706,6 +706,10 @@ def _add_disulfide(template):
     SG of another cysteine. The loader forms the bond only when the PDB
     holds a CONECT record between the two SG atoms and both HG atoms are
     absent.
+
+    Only CYS gets a crosslink. Other residues that bridge in real
+    entries, such as SEC, DCY and HCS, are not supported. Open an
+    mBuild issue if you need one.
     """
     if template.name != "CYS":
         return template

@@ -74,6 +74,11 @@ _ADVISORY_TER_MAX_C_N = 0.2
 #: apart, and their opposite charges are a real zwitterion.
 _SPLIT_CHARGE_MAX_BONDS = 2
 
+#: Element symbols, in upper case, of the atoms that join two residues
+#: through one covalent bond in a PDB entry. The CYS-CYS disulfide and
+#: the SEC-SEC diselenide are the two common bridges.
+_BRIDGING_ELEMENTS = frozenset(("S", "SE"))
+
 #: Extensions whose writers record the unit cell, so a missing box
 #: changes the file that ``save`` writes.
 _BOXED_EXTENSIONS = frozenset((".gro", ".top"))
@@ -354,6 +359,29 @@ def _residue_label(residue):
     label = f"{residue.name} {residue.resnum}"
     chain_id = _chain_of(residue).chain_id
     return f"{label} {chain_id}" if chain_id else label
+
+
+def _pdb_label(residue):
+    """Return the loader-style label of a residue, such as ``CYS A:22``.
+
+    The loader labels a residue by its PDB fields while it reads the
+    file, in ``_PdbResidue.label``. This function writes the same text
+    for a built residue, so that an error raised after the build reads
+    like the errors raised during the parse.
+
+    Parameters
+    ----------
+    residue : Residue
+        The residue to label.
+
+    Returns
+    -------
+    str
+        The residue name, the chain identifier, and the residue number
+        with its insertion code.
+    """
+    chain_id = _chain_of(residue).chain_id
+    return f"{residue.name} {chain_id}:{residue.resnum}{residue.icode}"
 
 
 def _atom_in_residue(residue, atom_name):
@@ -791,6 +819,117 @@ def _match_residue(group, variants, prior_possible, posterior_possible):
     return matches
 
 
+def _bridge_scope_message(label1, atom1_name, label2, atom2_name):
+    """Return the error text for a bridge that mBuild does not build.
+
+    ``_add_disulfide`` in ``mbuild.biopolymers.ccd`` gives the SG-SG
+    crosslink to CYS only. A CONECT record between the sulfur or
+    selenium atoms of two other residues therefore describes a bond
+    that no template predicts. The text names both atoms, states the
+    limit, and points at the issue tracker.
+
+    Parameters
+    ----------
+    label1, label2 : str
+        Labels of the two residues, as ``_PdbResidue.label`` writes them.
+    atom1_name, atom2_name : str
+        Names of the two bridging atoms.
+
+    Returns
+    -------
+    str
+        The message.
+    """
+    return (
+        f"CONECT record between {label1} {atom1_name} and {label2} "
+        f"{atom2_name} joins two sulfur or selenium atoms, but mBuild "
+        "forms disulfide bridges between CYS residues only. Other "
+        "bridging residues such as SEC, DCY and HCS are not supported "
+        "yet. Open an issue at "
+        "https://github.com/mosdef-hub/mbuild/issues if you need this "
+        "residue."
+    )
+
+
+def _bridge_scope_conflict(group, groups, conects, library):
+    """Return the bridge message for a residue that failed to match, or None.
+
+    A bridged residue is missing the hydrogen of its sulfur or selenium
+    atom, and a CONECT record joins that atom to a second bridging
+    residue. Only CYS carries a crosslink, so every other bridged
+    residue keeps that hydrogen in every template variant and matches
+    none of them. The match error then asks the user to protonate the
+    file, and the new hydrogen breaks the bridge. This function finds
+    the case, so that the caller reports the true limit instead.
+
+    Parameters
+    ----------
+    group : mbuild.biopolymers.protein_pdb_io._PdbResidue
+        The residue that matched no template variant.
+    groups : list of _PdbResidue
+        Every parsed residue of the file, to resolve a CONECT partner.
+    conects : list of frozenset
+        The atom serials of each CONECT record.
+    library : mbuild.biopolymers.ccd.CCDLibrary
+        The template library. Every residue name of the file resolves
+        in it, because ``_load_pdb`` looks all of them up first.
+
+    Returns
+    -------
+    str or None
+        The message, or None when the residue failed for another reason.
+    """
+    partners_of = {}
+    for pair in conects:
+        serials = tuple(pair)
+        if len(serials) != 2:
+            continue
+        partners_of.setdefault(serials[0], set()).add(serials[1])
+        partners_of.setdefault(serials[1], set()).add(serials[0])
+    record_by_serial = {
+        record.serial: (other, record) for other in groups for record in other.records
+    }
+
+    def bridging_atom(other, record):
+        """Return the template atom of a record when it can bridge."""
+        atom = library[other.resname][0].name_to_atom.get(record.name)
+        if atom is None or atom.element.upper() not in _BRIDGING_ELEMENTS:
+            return None
+        return atom
+
+    template = library[group.resname][0]
+    present = {}
+    for record in group.records:
+        atom = template.name_to_atom.get(record.name)
+        if atom is not None:
+            present[atom.name] = record
+    for name, record in present.items():
+        atom = bridging_atom(group, record)
+        if atom is None:
+            continue
+        hydrogens = [
+            other
+            for other in template.bonded_names(name)
+            if template.name_to_atom[other].element == "H"
+        ]
+        if not hydrogens or all(other in present for other in hydrogens):
+            continue
+        for serial in partners_of.get(record.serial, ()):
+            partner = record_by_serial.get(serial)
+            if partner is None:
+                continue
+            partner_group, partner_record = partner
+            partner_atom = bridging_atom(partner_group, partner_record)
+            if partner_atom is None:
+                continue
+            if group.resname == "CYS" and partner_group.resname == "CYS":
+                continue
+            return _bridge_scope_message(
+                group.label, name, partner_group.label, partner_atom.name
+            )
+    return None
+
+
 def _filter_crosslink_candidates(groups, all_candidates, conects):
     """Reject crosslink candidate matches that CONECT records contradict.
 
@@ -1072,6 +1211,14 @@ class Protein(Compound):
                     posterior_possible,
                 )
             except MBuildError as error:
+                # The residue bridges to a second residue through a
+                # sulfur or selenium atom, which mBuild builds for CYS
+                # only. The check sits here and not in _match_residue,
+                # because only this scope holds the CONECT records and
+                # the other residues, which the message must name.
+                message = _bridge_scope_conflict(group, groups, conects, self.library)
+                if message is not None:
+                    raise MBuildError(message) from error
                 # The residue is missing the leaving atoms of a peptide
                 # bond that the loader did not make. Name the TER, so
                 # the message says what ended the chain.
@@ -1254,6 +1401,22 @@ class Protein(Compound):
                     f"CONECT record references unknown atom serial in {serials}."
                 )
             if not self.bond_graph.has_edge(*particles):
+                residues = [particle.parent for particle in particles]
+                symbols = {particle.element.symbol.upper() for particle in particles}
+                # A CONECT between two sulfur or selenium atoms asks for
+                # a bridge. Only the CYS templates carry the crosslink,
+                # so name that limit instead of the generic text.
+                if symbols <= _BRIDGING_ELEMENTS and {
+                    residue.name for residue in residues
+                } != {"CYS"}:
+                    raise MBuildError(
+                        _bridge_scope_message(
+                            _pdb_label(residues[0]),
+                            particles[0].name,
+                            _pdb_label(residues[1]),
+                            particles[1].name,
+                        )
+                    )
                 raise MBuildError(
                     f"CONECT record between serials {serials} does not "
                     "correspond to any bond the residue templates predict. "

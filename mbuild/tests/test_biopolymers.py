@@ -125,6 +125,135 @@ def _gly_gly_hexadecimal():
     return "\n".join(lines) + "\n"
 
 
+#: The RCSB chemical component definition of selenocysteine, from
+#: https://files.rcsb.org/ligands/download/SEC.cif, with the descriptor,
+#: identifier and audit blocks removed. mBuild bundles no SEC
+#: definition, and the bridged-SEC test needs a residue that bridges
+#: through selenium.
+_SEC_CIF = """\
+data_SEC
+#
+_chem_comp.id SEC
+_chem_comp.name SELENOCYSTEINE
+_chem_comp.type "L-PEPTIDE LINKING"
+#
+loop_
+_chem_comp_atom.comp_id
+_chem_comp_atom.atom_id
+_chem_comp_atom.alt_atom_id
+_chem_comp_atom.type_symbol
+_chem_comp_atom.charge
+_chem_comp_atom.pdbx_align
+_chem_comp_atom.pdbx_aromatic_flag
+_chem_comp_atom.pdbx_leaving_atom_flag
+_chem_comp_atom.pdbx_stereo_config
+_chem_comp_atom.pdbx_backbone_atom_flag
+_chem_comp_atom.pdbx_n_terminal_atom_flag
+_chem_comp_atom.pdbx_c_terminal_atom_flag
+_chem_comp_atom.model_Cartn_x
+_chem_comp_atom.model_Cartn_y
+_chem_comp_atom.model_Cartn_z
+_chem_comp_atom.pdbx_model_Cartn_x_ideal
+_chem_comp_atom.pdbx_model_Cartn_y_ideal
+_chem_comp_atom.pdbx_model_Cartn_z_ideal
+_chem_comp_atom.pdbx_component_atom_id
+_chem_comp_atom.pdbx_component_comp_id
+_chem_comp_atom.pdbx_ordinal
+SEC N   N   N  0 1 N N N Y Y N 38.770 10.663 52.598 -0.783 1.676  -0.339 N   SEC 1
+SEC CA  CA  C  0 1 N N R Y N N 38.352 11.626 51.586 -0.938 0.217  -0.405 CA  SEC 2
+SEC CB  CB  C  0 1 N N N N N N 38.574 11.050 50.186 0.042  -0.445 0.565  CB  SEC 3
+SEC SE  SE  SE 0 0 N N N N N N 38.291 12.371 48.883 1.879  -0.092 -0.020 SE  SEC 4
+SEC C   C   C  0 1 N N N Y N Y 36.864 11.874 51.824 -2.349 -0.156 -0.027 C   SEC 5
+SEC O   O   O  0 1 N N N Y N Y 36.018 11.106 51.371 -3.030 0.619  0.602  O   SEC 6
+SEC OXT OXT O  0 1 N Y N Y N Y 36.557 12.878 52.638 -2.848 -1.348 -0.389 OXT SEC 7
+SEC H   HN1 H  0 1 N N N Y Y N 38.621 11.049 53.508 -1.373 2.134  -1.017 H   SEC 8
+SEC H2  HN2 H  0 1 N Y N Y Y N 38.235 9.824  52.500 -0.969 2.018  0.592  H2  SEC 9
+SEC HA  HA  H  0 1 N N N Y N N 38.908 12.569 51.692 -0.732 -0.125 -1.419 HA  SEC 10
+SEC HB2 HB1 H  0 1 N N N N N N 39.606 10.678 50.107 -0.105 -0.037 1.565  HB2 SEC 11
+SEC HB3 HB2 H  0 1 N N N N N N 37.871 10.220 50.020 -0.134 -1.521 0.582  HB3 SEC 12
+SEC HE  HE  H  0 1 N N N N N N 38.508 11.801 47.556 2.691  -0.839 1.084  HE  SEC 13
+SEC HXT HXT H  0 1 N Y N Y N Y 35.620 12.886 52.792 -3.757 -1.542 -0.123 HXT SEC 14
+#
+loop_
+_chem_comp_bond.comp_id
+_chem_comp_bond.atom_id_1
+_chem_comp_bond.atom_id_2
+_chem_comp_bond.value_order
+_chem_comp_bond.pdbx_aromatic_flag
+_chem_comp_bond.pdbx_stereo_config
+_chem_comp_bond.pdbx_ordinal
+SEC N   CA  SING N N 1
+SEC N   H   SING N N 2
+SEC N   H2  SING N N 3
+SEC CA  CB  SING N N 4
+SEC CA  C   SING N N 5
+SEC CA  HA  SING N N 6
+SEC CB  SE  SING N N 7
+SEC CB  HB2 SING N N 8
+SEC CB  HB3 SING N N 9
+SEC SE  HE  SING N N 10
+SEC C   O   DOUB N N 11
+SEC C   OXT SING N N 12
+SEC OXT HXT SING N N 13
+#"""
+
+#: Atoms of selenocysteine, with the element symbol and the ideal
+#: coordinates of the definition above, in Angstrom. HE, the selenium
+#: hydrogen, is absent: a diselenide bridge replaces it.
+_SEC_BRIDGED_ATOMS = [
+    ("N", "N", -0.783, 1.676, -0.339),
+    ("CA", "C", -0.938, 0.217, -0.405),
+    ("CB", "C", 0.042, -0.445, 0.565),
+    ("SE", "SE", 1.879, -0.092, -0.020),
+    ("C", "C", -2.349, -0.156, -0.027),
+    ("O", "O", -3.030, 0.619, 0.602),
+    ("OXT", "O", -2.848, -1.348, -0.389),
+    ("H", "H", -1.373, 2.134, -1.017),
+    ("H2", "H", -0.969, 2.018, 0.592),
+    ("HA", "H", -0.732, -0.125, -1.419),
+    ("HB2", "H", -0.105, -0.037, 1.565),
+    ("HB3", "H", -0.134, -1.521, 0.582),
+    ("HXT", "H", -3.757, -1.542, -0.123),
+]
+
+
+def _sec_diselenide():
+    """Return PDB text for two selenocysteines joined by a diselenide.
+
+    Each residue sits in its own chain and carries every atom of the
+    CCD definition except HE. A CONECT record joins the two SE atoms.
+    The second residue is the first one turned 180 degrees about the z
+    axis and moved along x. The two SE atoms are then 2.33 A apart,
+    which is the Se-Se bond length of a diselenide.
+
+    Returns
+    -------
+    str
+        The PDB text.
+    """
+    lines = []
+    serial = 1
+    selenium = []
+    for chain_id, turned in (("A", False), ("B", True)):
+        for name, element, x, y, z in _SEC_BRIDGED_ATOMS:
+            if turned:
+                x, y = 4.210 - x, -y
+            field = f" {name:<3s}" if len(name) < 4 else name
+            lines.append(
+                f"ATOM  {serial:5d} {field} SEC {chain_id}   1    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00"
+                f"          {element:>2s}"
+            )
+            if name == "SE":
+                selenium.append(serial)
+            serial += 1
+        lines.append(f"TER   {serial:5d}      SEC {chain_id}   1")
+        serial += 1
+    lines.append(f"CONECT{selenium[0]:5d}{selenium[1]:5d}")
+    lines.append("END")
+    return "\n".join(lines) + "\n"
+
+
 class TestCCDLibrary(BaseTest):
     def test_base_template(self):
         # Tests that a bundled CCD cif parses into a template with the
@@ -1519,6 +1648,45 @@ class TestProtein(BaseTest):
         bad.write_text("\n".join(lines))
         with pytest.raises(MBuildError, match="signals a disulfide"):
             Protein(str(bad))
+
+    def test_non_cys_bridge_conect_names_the_cys_limit(self):
+        # Tests that a CONECT record between the sulfur atoms of two
+        # residues that are not both CYS raises an error naming both
+        # residues and the CYS-only limit. This is needed because only
+        # the CYS template carries the SG-SG crosslink, and the old
+        # message said that no template predicts the bond, which does
+        # not say which residues mBuild bridges. The test appends a
+        # CONECT between the SG of CYS 16 and the SD of MET 17 of the
+        # bundled 6m03 asset and reads the error text.
+        text = open(get_fn("6m03_protonated.pdb")).read()
+        bad = Path("met_bridge.pdb")
+        bad.write_text(text.replace("END", "CONECT  235  249\nEND"))
+        with pytest.raises(MBuildError) as error:
+            Protein(str(bad))
+        message = str(error.value)
+        assert "CYS A:16 SG" in message and "MET A:17 SD" in message
+        assert "forms disulfide bridges between CYS residues only" in message
+
+    def test_bridged_sec_names_the_cys_limit(self, tmp_path, monkeypatch):
+        # Tests that a diselenide between two selenocysteines raises the
+        # CYS-only message and not the missing-atom message. This is
+        # needed because a bridged SEC lacks the HE that every SEC
+        # template variant holds, so the residue matches no variant and
+        # the match error tells the user to protonate the file. A new HE
+        # breaks the bridge, so that remedy is wrong here. The test puts
+        # the RCSB SEC definition in the user download cache, loads two
+        # bridged SEC residues, and reads the error text.
+        from mbuild.biopolymers import ccd
+
+        (tmp_path / "SEC.cif").write_text(_SEC_CIF)
+        monkeypatch.setattr(ccd, "USER_CCD_CACHE_DIR", tmp_path)
+        bridged = Path("sec_bridge.pdb")
+        bridged.write_text(_sec_diselenide())
+        with pytest.raises(MBuildError) as error:
+            Protein(str(bridged))
+        message = str(error.value)
+        assert "SEC A:1 SE" in message and "SEC B:1 SE" in message
+        assert "pdbfixer" not in message
 
     @pytest.mark.skipif(not has_openff_pablo, reason="openff-pablo is not installed")
     def test_cross_chain_disulfide_2zuq(self):
