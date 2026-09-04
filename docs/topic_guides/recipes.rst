@@ -44,21 +44,23 @@ so call ``Protein.deprotonate`` first:
     protein.deprotonate(63, "NZ", chain_id="A")
     protein.attach(fragment, resnum=63, atom_name="NZ", chain_id="A")
 
-``save_pdb`` writes a second file next to the PDB file, with the same
-stem and the suffix ``.bondrecords.json``. That file holds the bond
-records of every covalent modification, and one residue template for
-each fragment residue, because the CCD defines no such residue. Pass
-the file back to load the modified protein again:
+``save_pdb`` writes ``<name>.bondrecords.json`` next to the PDB file
+when the protein has bond records. That file holds the bond records of
+every covalent modification, and one residue template for each fragment
+residue, because the CCD defines no such residue. Pass
+``write_bond_records=False`` to skip it. Reload the modified protein
+with the two files:
 
 .. code-block:: python
 
     protein.save_pdb("modified.pdb")
     reloaded = Protein("modified.pdb", bond_records="modified.bondrecords.json")
 
-The reloaded protein holds the same particles, bonds, formal charges
-and bond records as the protein that was written. A downstream tool
-that builds its own residue definitions needs the PDB file and
-``bond_records()`` only.
+The loader checks each record against the PDB file. It raises an error
+when the two files do not describe one protein. The reloaded protein
+holds the same particles, bonds, formal charges and bond records as the
+protein that was written. A downstream tool that builds its own residue
+definitions needs the PDB file and ``bond_records()`` only.
 
 .. warning::
 
