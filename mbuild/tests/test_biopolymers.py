@@ -2222,6 +2222,32 @@ class TestProteinExports(BaseTest):
             Protein(get_fn("6m03_protonated.pdb"), bond_records=str(path))
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_two_fragments_under_one_code_warn(self, protein_6m03, caplog):
+        # Tests that save_pdb warns when two hetatm residues share a
+        # residue name but hold different atoms. This is needed because
+        # the bond-records file holds one template per residue name, so
+        # the reload gives both residues the chemistry of the first,
+        # and a user who reuses a code would get the wrong molecule
+        # with no message. The test acylates LYS 5 and LYS 12 with two
+        # fragments of different length under the code OC8, saves, and
+        # reads the log.
+        from mbuild.biopolymers.fragments import prepare_fragment
+
+        protein = protein_6m03
+        for resnum, smiles in ((5, "*C(=O)CCCCCCC"), (12, "*C(=O)C")):
+            protein.deprotonate(resnum, "NZ", chain_id="A")
+            protein.attach(
+                prepare_fragment(smiles, "OC8"),
+                resnum=resnum,
+                atom_name="NZ",
+                chain_id="A",
+                relax=False,
+            )
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein.save_pdb("one_code.pdb")
+        assert "Two residues named OC8 hold different atoms or bonds" in caplog.text
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_a_leaving_atom_keeps_its_element_across_saves(self, protein_6m03):
         # Tests that a save of a reloaded protein writes the element
         # that the template gives for a leaving atom. This is needed

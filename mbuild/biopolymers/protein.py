@@ -1399,6 +1399,36 @@ def _template_dict(residue, links):
     }
 
 
+def _template_signature(template):
+    """Return the chemistry of a template dict, without its order.
+
+    Two residues of one name must give one template. The comparison
+    must not depend on the order in which the atoms and the bonds were
+    built, because two equal fragments can hold them in two orders.
+    The signature therefore sorts both, and it sorts the two atoms of
+    each bond.
+
+    Parameters
+    ----------
+    template : dict
+        A template in its plain-dict form.
+
+    Returns
+    -------
+    tuple
+        The sorted atoms and the sorted bonds.
+    """
+    atoms = sorted(
+        (atom["name"], atom["element"], atom["formal_charge"], atom["leaving"])
+        for atom in template["atoms"]
+    )
+    bonds = sorted(
+        (*sorted((bond["atom1"], bond["atom2"])), bond["order"])
+        for bond in template["bonds"]
+    )
+    return (tuple(atoms), tuple(bonds))
+
+
 class Protein(Compound):
     """A protein loaded from a fully protonated PDB file.
 
@@ -3381,7 +3411,9 @@ class Protein(Compound):
         are the fragment residues that ``attach`` added, and the loader
         has no other source for their chemistry. Two residues of one
         name share one template, because the library holds one entry
-        per residue name.
+        per residue name. When two such residues hold different atoms
+        or bonds, a warning names the code, because the reload then
+        matches the first of them only.
 
         A residue whose template came from a bond-records file also
         gets a template. The reload registered that template in the
@@ -3407,17 +3439,30 @@ class Protein(Compound):
                 entry = links.setdefault(id(residue), set())
                 entry.update((atom_name, name) for name in leaving)
         templates = {}
+        signatures = {}
+        warned = set()
         for residue in self.residues():
-            if not residue.hetatm or residue.name in templates:
+            if not residue.hetatm:
                 continue
             if (
                 residue.name in self.library
                 and residue.name not in self._sidecar_template_names
             ):
                 continue
-            templates[residue.name] = _template_dict(
-                residue, links.get(id(residue), set())
-            )
+            template = _template_dict(residue, links.get(id(residue), set()))
+            signature = _template_signature(template)
+            if residue.name not in templates:
+                templates[residue.name] = template
+                signatures[residue.name] = signature
+            elif signature != signatures[residue.name] and residue.name not in warned:
+                warned.add(residue.name)
+                logger.warning(
+                    f"Two residues named {residue.name} hold different "
+                    "atoms or bonds. The bond-records file holds one "
+                    "template per residue name, so a reload matches the "
+                    "first of them only. Give each fragment its own "
+                    "three-letter code."
+                )
         return {
             "format": _BOND_RECORDS_FORMAT,
             "version": _BOND_RECORDS_VERSION,
