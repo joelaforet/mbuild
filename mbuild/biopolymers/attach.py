@@ -23,6 +23,7 @@ from mbuild.biopolymers.fragments import (
 )
 from mbuild.biopolymers.relax import (
     _PORT_SEPARATION,
+    _PROTON_BOND_LENGTH,
     _fit_placement,
     _open_direction,
     _relax_if_clashing,
@@ -41,10 +42,6 @@ from mbuild.exceptions import MBuildError
 from mbuild.port import Port
 
 logger = logging.getLogger(__name__)
-
-#: Length, in nm, of the bond to a hydrogen that a reaction moves or
-#: creates. It is a rounded value near the C-H, N-H and O-H lengths.
-_PROTON_BOND_LENGTH = 0.100
 
 
 def _attach(
@@ -69,6 +66,7 @@ def _attach(
     # read and before any warning is logged. The check ran inside
     # _as_residues before, so the charge warning of a valid site
     # reached the user ahead of the error about the name.
+    """Bond a fragment onto a residue; see ``Protein.attach``."""
     _check_resname(fragment_resname)
     if reaction is not None:
         return _attach_by_reaction(
