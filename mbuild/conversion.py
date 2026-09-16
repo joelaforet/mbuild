@@ -89,6 +89,12 @@ def load(
     number seed to reproducibly generate the same starting structure. This is
     NOT possible with `openbabel`, use `rdkit` if you need control over starting
     structure's position (recommended).
+
+    The default mdtraj backend reads a `.pdb` file. It reads the
+    coordinates, the element symbols, and the chain and residue
+    hierarchy, but no residue chemistry. `mbuild.biopolymers.Protein`
+    reads a protein PDB file by CCD template matching, so the loaded
+    compound also carries formal charges and bond orders.
     """
     # First check if we are loading from an object
     if not (

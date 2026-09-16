@@ -58,6 +58,7 @@ The `MoSDeF <https://mosdef.org>`_ software is comprised the following packages:
 	topic_guides/load_data
     	topic_guides/coordinate_transforms
     	topic_guides/recipes
+    	topic_guides/biopolymers
 
 .. toctree::
     	:caption: Reference
