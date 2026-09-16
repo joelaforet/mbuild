@@ -34,17 +34,19 @@ import logging
 from collections import deque
 from dataclasses import replace
 from functools import lru_cache
+from itertools import combinations
 
 import numpy as np
 
 from mbuild import clone, force_overlap
-from mbuild.biopolymers.ccd import CCDLibrary
+from mbuild.biopolymers.ccd import _ACIDIC_PROTONS, _BASIC_ATOMS, CCDLibrary
 from mbuild.biopolymers.fragments import (
     _as_residues,
     _check_resname,
     _move_into_residue,
 )
 from mbuild.biopolymers.matching import (
+    _bond_separation,
     _bridge_scope_conflict,
     _bridge_scope_message,
     _filter_crosslink_candidates,
@@ -68,6 +70,23 @@ from mbuild.port import Port
 from mbuild.utils.io import import_
 
 logger = logging.getLogger(__name__)
+
+
+#: Largest separation, in bonds, at which two charged atoms of one
+#: residue count as one functional group. Arginine's NH1 and NH2 are
+#: two bonds apart through CZ, and their opposite charges come from the
+#: template model. An N-terminal serine's N and OG are three bonds
+#: apart, and their opposite charges are a real zwitterion.
+_SPLIT_CHARGE_MAX_BONDS = 2
+
+
+#: Length of a new X-H bond, in nm, keyed by the element symbol of the
+#: heavy atom X. The values are the standard single-bond lengths: N-H
+#: 1.01 A, O-H 0.96 A, S-H 1.34 A. Any other element gets
+#: ``_PROTON_BOND_LENGTH``, which is a rounded value near the three
+#: lengths.
+_PROTON_BOND_LENGTHS = {"N": 0.101, "O": 0.096, "S": 0.134}
+_PROTON_BOND_LENGTH = 0.100
 
 
 #: Length, in nm, of the bond that a new Port forms. It is a rounded
@@ -154,6 +173,87 @@ def _assign_template(residue, variant):
     residue.template = variant
     residue.atom_formal_charges = charges
     residue.formal_charge = sum(charges.values())
+
+
+def _unit(vector):
+    """Return the vector scaled to length one, or unchanged if it is zero."""
+    norm = np.linalg.norm(vector)
+    return vector / norm if norm > 1e-8 else vector
+
+
+def _proton_position(atom):
+    """Return a position for a proton added to ``atom``.
+
+    The proton goes in the most open direction at the atom, which is
+    the reverse of the sum of the unit vectors to its bonded neighbors.
+    An atom with one neighbor has no such direction, because every
+    direction around that one bond is equally open. The proton then
+    goes at 109.47 degrees from the bond, which is the tetrahedral
+    angle. The direction lies in the plane of the bond and one atom
+    bonded to the neighbor. It points to the far side of the bond from
+    that atom. A hydroxyl placed this way is anti to that atom.
+
+    The result is a starting geometry. The bond length is correct and
+    the angle is a standard value, but the position ignores every other
+    atom. Run ``relax_fragments`` or an energy minimization to set the
+    exact angle and torsion.
+
+    This function computes the position. It does not use a ``Port``
+    and ``force_overlap``. ``force_overlap`` superposes a port of a
+    fragment on a port of the target and moves the whole fragment. The
+    added proton is one particle, and it holds no port. No fragment
+    moves, and no port is superposed. The direction comes from the
+    atoms already bonded to ``atom``. This function reads those atoms
+    directly.
+
+    Parameters
+    ----------
+    atom : mbuild.Compound
+        The heavy atom that takes the proton. It must carry at least
+        one bond.
+
+    Returns
+    -------
+    numpy.ndarray
+        The position of the proton, in nm.
+    """
+    length = _PROTON_BOND_LENGTHS.get(atom.element.symbol, _PROTON_BOND_LENGTH)
+    neighbors = sorted(atom.direct_bonds(), key=lambda particle: particle.name)
+    if len(neighbors) == 1:
+        bond = _unit(neighbors[0].pos - atom.pos)
+        far = sorted(
+            (
+                particle
+                for particle in neighbors[0].direct_bonds()
+                if particle is not atom
+            ),
+            key=lambda particle: particle.name,
+        )
+        across = _perpendicular(bond)
+        if far:
+            reference = far[0].pos - neighbors[0].pos
+            in_plane = reference - np.dot(reference, bond) * bond
+            if np.linalg.norm(in_plane) > 1e-8:
+                across = _unit(in_plane)
+        # cos(109.47 degrees) = -1/3 and sin(109.47 degrees) = sqrt(8)/3.
+        direction = -bond / 3.0 - across * np.sqrt(8.0) / 3.0
+    else:
+        direction = -sum(
+            (_unit(particle.pos - atom.pos) for particle in neighbors), np.zeros(3)
+        )
+        if np.linalg.norm(direction) < 1e-8:
+            # The neighbors surround the atom evenly, so one direction
+            # is as open as another. Take one across the first bond.
+            direction = _perpendicular(neighbors[0].pos - atom.pos)
+    return atom.pos + _unit(direction) * length
+
+
+def _perpendicular(vector):
+    """Return a unit vector perpendicular to ``vector``."""
+    axis = np.array([1.0, 0.0, 0.0])
+    if abs(np.dot(_unit(vector), axis)) > 0.9:
+        axis = np.array([0.0, 1.0, 0.0])
+    return _unit(np.cross(vector, axis))
 
 
 def _remove_particles_and_ports(root, atom, particles):
@@ -2585,3 +2685,278 @@ class Protein(Compound):
         return hits[0]
 
     # ------------------------------------------------------------------
+
+    def deprotonate(self, resnum, atom_name, chain_id=None, icode=""):
+        """Remove the acidic proton of one atom and update its charge.
+
+        The proton comes from the residue's matched template variant:
+        the acidic proton that the variant bonds to ``atom_name``. A new
+        variant is then constructed from that variant, with the proton
+        removed and the charge of the heavy atom decremented. The new
+        variant is assigned to the residue, so ``template``,
+        ``formal_charge`` and ``atom_formal_charges`` all describe the
+        deprotonated residue.
+
+        The template library is not searched, so the new variant can be
+        one that no library variant describes. A warning reports that
+        case, because a PDB written from such a residue does not reload.
+        A second warning reports two charged atoms that lie within
+        ``_SPLIT_CHARGE_MAX_BONDS`` bonds of each other.
+
+        The call changes nothing and logs a warning when the named atom
+        carries no acidic proton, for example because it is already
+        deprotonated. A notebook cell that calls this method therefore
+        runs a second time without an error.
+
+        The removed proton changes the protonation state of the
+        residue. The new state is recorded in ``residue.template``,
+        whose description names the absent proton. The proton is not a
+        leaving atom of a later bond, so it stays out of the
+        leaving-atom ledger and out of every bond record.
+
+        Parameters
+        ----------
+        resnum : int
+            Residue number of the target residue.
+        atom_name : str
+            Name of the heavy atom that loses the proton.
+        chain_id : str, optional
+            Chain of the target residue; required when residue numbers
+            repeat across chains.
+        icode : str, optional
+            Insertion code of the target residue.
+
+        Raises
+        ------
+        MBuildError
+            When the residue or the atom does not exist. The error
+            comes from ``get_residue`` and ``get_atom``.
+
+        Notes
+        -----
+        The method serves every site that reacts from its neutral or
+        anionic form. The sites are LYS NZ, SER OG, THR OG1, CYS SG,
+        TYR OH, and the ring nitrogens of HIS.
+
+        A protonated amine is not the reactive species in an acylation.
+        The neutral amine is the reactive species. The product of a
+        lysine N-acylation is a neutral secondary amide. It carries one
+        N-H and formal charge 0, as CCD component ALY does. Call this
+        method before ``attach``, so that the site starts from the
+        neutral form and the product carries the correct charge.
+
+        Examples
+        --------
+        >>> protein.deprotonate(63, "NZ", chain_id="A")
+        >>> protein.attach(fragment, resnum=63, atom_name="NZ", chain_id="A")
+        """
+        residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
+        atom = self._atom_of(residue, atom_name)
+        variant = residue.template
+        protons = []
+        if variant is not None:
+            bonded = variant.bonded_names(atom_name)
+            for name in _ACIDIC_PROTONS.get(residue.name, ()):
+                if name in bonded and _atom_in_residue(residue, name) is not None:
+                    protons.append(name)
+        if not protons:
+            logger.warning(
+                f"Atom {atom_name} of residue {_pdb_label(residue)} "
+                "carries no acidic proton, so nothing changed. The atom is "
+                "already deprotonated, or its protons are not acidic."
+            )
+            return
+        proton_name = protons[0]
+        _remove_particles_and_ports(
+            self, atom, [_atom_in_residue(residue, proton_name)]
+        )
+        _assign_template(residue, variant.deprotonated_at(proton_name))
+        self._warn_if_variant_is_absent(residue, atom_name, proton_name)
+        self._warn_on_split_charge(residue)
+
+    def protonate(self, resnum, atom_name, chain_id=None, icode=""):
+        """Add a proton to one atom and update its charge.
+
+        This is the mirror of ``deprotonate``. The proton is the one
+        that the CCD template of the residue bonds to ``atom_name``.
+        It is an acidic proton that the residue lost, or the proton of
+        a basic site such as the N-terminal amine. The new template
+        variant comes from the template library, so ``template``,
+        ``formal_charge`` and ``atom_formal_charges`` describe the
+        protonated residue, and a PDB written from it reloads.
+
+        ``deprotonate`` builds its new variant instead of matching one,
+        because a residue can lose a proton that no library variant
+        loses. Protonation is the opposite case: the library holds
+        every variant that carries an added proton, so the call selects
+        one and needs no ``_warn_if_variant_is_absent`` check.
+
+        The call changes nothing and logs a warning when the atom takes
+        no proton. That happens when the atom is already protonated, or
+        when it bonds to another residue. A notebook cell that calls
+        this method therefore runs a second time without an error.
+
+        The proton is placed at a standard bond length, in the most
+        open direction at the atom. The position ignores every other
+        atom, so run ``relax_fragments`` or an energy minimization
+        before a simulation.
+
+        Parameters
+        ----------
+        resnum : int
+            Residue number of the target residue.
+        atom_name : str
+            Name of the heavy atom that takes the proton.
+        chain_id : str, optional
+            Chain of the target residue; required when residue numbers
+            repeat across chains.
+        icode : str, optional
+            Insertion code of the target residue.
+
+        Raises
+        ------
+        MBuildError
+            When the residue or the atom does not exist. The error
+            comes from ``get_residue`` and ``_atom_of``.
+
+        Notes
+        -----
+        The method restores a site that ``deprotonate`` neutralized,
+        and it protonates a site that the loaded file left anionic,
+        such as the OD2 of an aspartate or the OXT of a C terminus. An
+        atom that carries an inter-residue bond takes no proton: the
+        bond uses the valence that the proton needs.
+
+        Examples
+        --------
+        >>> protein.deprotonate(63, "NZ", chain_id="A")
+        >>> protein.protonate(63, "NZ", chain_id="A")
+        """
+        residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
+        atom = self._atom_of(residue, atom_name)
+        variant = residue.template
+        base = self.library[residue.name][0]
+        protons = []
+        if variant is not None and atom_name in base.atom_names:
+            bonded = base.bonded_names(atom_name)
+            protons = [
+                name
+                for name in _ACIDIC_PROTONS.get(residue.name, ())
+                if name in bonded and name not in variant.atom_names
+            ]
+            protons += [
+                proton
+                for heavy, proton in _BASIC_ATOMS.get(residue.name, ())
+                if heavy == atom_name and proton not in variant.atom_names
+            ]
+        # An atom bonded to a second residue, such as the N of an
+        # internal residue or the SG of a disulfide, has no free
+        # valence. Its template proton is the leaving atom of that
+        # bond, so adding it back would over-coordinate the atom.
+        if any(other.parent is not residue for other in atom.direct_bonds()):
+            protons = []
+        target = None
+        for proton_name in protons:
+            wanted = variant.atom_names | {proton_name}
+            target = next(
+                (
+                    other
+                    for other in self.library[residue.name]
+                    if other.atom_names == wanted
+                ),
+                None,
+            )
+            if target is not None:
+                break
+        if target is None:
+            logger.warning(
+                f"Atom {atom_name} of residue {_pdb_label(residue)} "
+                "has no protonation variant in the CCD template, so nothing "
+                "changed. The atom is already protonated, it bonds to another "
+                "residue, or the template does not protonate it."
+            )
+            return
+        proton = Compound(name=proton_name, element="H", pos=_proton_position(atom))
+        residue.add(proton)
+        residue.add_bond((atom, proton), bond_order=1.0)
+        _assign_template(residue, target)
+        self._warn_on_split_charge(residue)
+
+    @staticmethod
+    def _warn_on_split_charge(residue):
+        """Warn when two charged atoms lie in one functional group.
+
+        ``ResidueTemplate.deprotonated_at`` decrements the charge of the
+        heavy atom that held the proton. It changes no other atom, so a
+        residue whose charge sat on a second atom now holds two charged
+        atoms. Two charges within ``_SPLIT_CHARGE_MAX_BONDS`` bonds sit
+        on one functional group, and they usually show that the template
+        model split a delocalized charge across it. Two charges that are
+        further apart sit on separate functional groups, where they can
+        be a real zwitterion. The warning therefore names only the pairs
+        of the first kind, and the call proceeds.
+
+        Parameters
+        ----------
+        residue : Residue
+            The residue, with its new template already assigned.
+        """
+        charges = {
+            name: charge
+            for name, charge in residue.atom_formal_charges.items()
+            if charge
+        }
+        if len(charges) < 2:
+            return
+        variant = residue.template
+        pairs = []
+        for first, second in combinations(sorted(charges), 2):
+            separation = _bond_separation(
+                variant, first, second, _SPLIT_CHARGE_MAX_BONDS
+            )
+            if separation is None:
+                continue
+            pairs.append(
+                f"{first} {charges[first]:+d} and {second} "
+                f"{charges[second]:+d}, {separation} bonds apart"
+            )
+        if not pairs:
+            return
+        logger.warning(
+            f"{_pdb_label(residue)} holds charged atoms within "
+            f"{_SPLIT_CHARGE_MAX_BONDS} bonds after this call: "
+            f"{'; '.join(pairs)}. Load the protein again and deprotonate "
+            "another atom if one charged atom is correct for the chemistry "
+            "you model."
+        )
+
+    def _warn_if_variant_is_absent(self, residue, atom_name, proton_name):
+        """Warn when no library variant describes the deprotonated residue.
+
+        ``deprotonate`` builds the new template variant from the old
+        one. The library holds fewer variants than that construction can
+        produce, so the result can be a residue that no library variant
+        describes. The loader matches a file against the library
+        variants, so a PDB written from such a residue does not reload.
+        The warning names the consequence and the call proceeds.
+
+        Parameters
+        ----------
+        residue : Residue
+            The residue, with its new template already assigned.
+        atom_name : str
+            Name of the heavy atom that lost the proton.
+        proton_name : str
+            Name of the removed proton.
+        """
+        variant = residue.template
+        library_variants = self.library[residue.name]
+        if any(other.atom_names == variant.atom_names for other in library_variants):
+            return
+        logger.warning(
+            f"{_pdb_label(residue)} atom {atom_name} lost {proton_name}. "
+            f"The template library holds no {residue.name} variant with the "
+            f"atoms of {variant.description}. A PDB written from this protein "
+            "does not reload with Protein(). Deprotonate another atom if the "
+            "written file must reload."
+        )
