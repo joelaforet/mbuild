@@ -1207,16 +1207,18 @@ class Protein(Compound):
     ):
         """Bond a fragment Compound onto a residue of this protein.
 
-        ``bond_order`` hydrogens leave each side. They are hydrogens
-        bonded to the named protein atom, and hydrogens bonded to the
-        named fragment atom. One hydrogen leaves per unit of bond order,
-        so a double bond removes two from each atom.
+        One leaving group leaves each side per unit of bond order, so a
+        double bond removes two from each atom. By default the leaving
+        groups are hydrogens bonded to the named protein atom and to the
+        named fragment atom. ``leaving_atom_names`` and
+        ``fragment_leaving_atom_names`` name other atoms; a heavy atom
+        takes the whole branch beyond its bond with it.
 
-        Ports along the removed-hydrogen vectors align the fragment
+        Ports along the broken bonds align the fragment
         (``force_overlap``). A bond with ``bond_order`` then forms
         between the two named atoms. The new inter-residue bond is
-        recorded in ``cross_bonds``, together with the removed (leaving)
-        hydrogen names. The record holds everything a downstream tool
+        recorded in ``cross_bonds``, together with the names of every
+        atom that left. The record holds everything a downstream tool
         needs to describe the modification (see ``bond_records``).
 
         The fragment is cloned; the original is not changed. Fragment
@@ -1258,14 +1260,23 @@ class Protein(Compound):
         bond_order : int, optional, default=1
             Order of the new bond.
         leaving_atom_names : str or sequence of str, optional
-            Names of the hydrogens that leave the protein atom. One
-            name per unit of bond order. The hydrogens on one atom are
-            chemically equivalent, so by default they are taken in
-            alphabetical order. A downstream residue library describes
-            the product by naming the atom that is absent, so pass the
-            name that library expects to make the written file match it.
+            Names of the atoms that leave the protein atom. One name
+            per unit of bond order, each bonded to the protein atom.
+            By default the leaving atoms are hydrogens, taken in
+            alphabetical order. The hydrogens on one atom are
+            chemically equivalent, so the choice does not change the
+            chemistry; a downstream residue library describes the
+            product by naming the atom that is absent, so pass the name
+            that library expects to make the written file match it.
+            A name may also be a heavy atom. Then the whole substituent
+            on the far side of that bond leaves with it, so naming the
+            oxygen of a hydroxyl group removes the oxygen and its
+            hydrogen together. A residue that this empties is dropped.
         fragment_leaving_atom_names : str or sequence of str, optional
-            The same, for the fragment atom.
+            The same, for the fragment atom. A glycan built by a glycan
+            builder ends in a hydroxyl residue on the anomeric carbon;
+            naming its oxygen here removes that residue and opens the
+            glycosidic bond site.
         relax : bool, optional, default=True
             When the placed fragment overlaps existing atoms, run an
             energy minimization that moves only the fragment
@@ -1298,15 +1309,23 @@ class Protein(Compound):
             fragment_leaving_atom_names,
         )
 
-        # One hydrogen leaves per bond order unit on each side (the
-        # polymer.add_monomer convention); the port points along the sum
-        # of the removed-hydrogen vectors. Both ports are opened while
+        # One leaving group per bond order unit on each side, a hydrogen
+        # by default (the polymer.add_monomer convention); the port
+        # points along the sum of the broken-bond vectors. Both ports
+        # are opened while
         # the fragment is still detached, so that each removal runs on
         # its own compound.
         site_port = self._port_along_hydrogens(self, site_atom, site_hydrogens)
         site_residue.add(site_port, label="attach_site")
         frag_port = self._port_along_hydrogens(added, frag_atom, frag_hydrogens)
         added.add(frag_port, label="attach_frag")
+        # A heavy leaving atom takes its substituent with it. When that
+        # substituent was a residue of its own (the hydroxyl residue a
+        # glycan builder puts on the anomeric carbon), ``Compound.remove``
+        # has already detached the emptied residue from the fragment.
+        # It is dropped from the list here too, so it is not numbered
+        # and never reaches the chain.
+        frag_residues[:] = [r for r in frag_residues if r is added or r.root is added]
 
         self._adopt_fragment(added, frag_residues, site_residue)
         self._align_on_ports(added, frag_port, site_port, bond_order)
@@ -1326,7 +1345,7 @@ class Protein(Compound):
             atom2_name=frag_atom.name,
             order=bond_order,
             leaving1=self._leaving_atoms[site_atom],
-            leaving2=tuple(sorted(h.name for h in frag_hydrogens)),
+            leaving2=self._leaving_atoms[frag_atom],
         )
         self.cross_bonds.append(record)
 
@@ -1396,7 +1415,7 @@ class Protein(Compound):
         icode : str
             Insertion code of the site.
         bond_order : int
-            Order of the new bond. One hydrogen leaves per unit.
+            Order of the new bond. One leaving group leaves per unit.
 
         Returns
         -------
@@ -1433,7 +1452,7 @@ class Protein(Compound):
         fragment_resnum : int or None
             Residue number, inside the fragment, of that atom.
         bond_order : int
-            Order of the new bond. One hydrogen leaves per unit.
+            Order of the new bond. One leaving group leaves per unit.
 
         Returns
         -------
@@ -1538,14 +1557,50 @@ class Protein(Compound):
             return
         logger.info("Relaxing the placed fragment with the protein held fixed.")
         self.relax_fragments(residues=frag_residues)
-        if not self._warn_on_clashes(added, site_atom, frag_atom):
-            logger.info("Fragment overlaps resolved by relaxation.")
+        # The user asked for the relaxation and got it, so the result is
+        # reported rather than warned about. Ordinary van der Waals
+        # contacts near 2 A are expected after a minimization; only a
+        # contact that stays well inside that means the minimizer failed.
+        closest = self._closest_contact(added, site_atom, frag_atom)
+        if closest is None:
+            return
+        if closest < 0.15:
+            logger.warning(
+                f"Relaxation left a fragment atom {closest * 10:.2f} A from an "
+                "existing atom. Inspect the site; the minimizer may not have "
+                "converged."
+            )
+        else:
+            logger.info(
+                f"Fragment relaxed; closest contact with existing atoms is now "
+                f"{closest * 10:.2f} A."
+            )
+
+    def _closest_contact(self, added, site_atom, frag_atom):
+        """Return the smallest distance (nm) from a fragment atom to any other atom.
+
+        The new bond pair is left out. Returns None when there is
+        nothing to compare against.
+        """
+        from scipy.spatial import cKDTree
+
+        added_particles = [p for p in added.particles() if p is not frag_atom]
+        added_set = set(added.particles()) | {site_atom}
+        others = [p for p in self.particles() if p not in added_set]
+        if not others or not added_particles:
+            return None
+        distances, _ = cKDTree([p.pos for p in others]).query(
+            [p.pos for p in added_particles]
+        )
+        return float(distances.min())
 
     def _port_along_hydrogens(self, root, atom, hydrogens):
-        """Remove the hydrogens and return a Port pointing along them.
+        """Remove the leaving groups and return a Port pointing along them.
 
-        The port points along the sum of the removed-hydrogen vectors,
-        or along the first hydrogen when the sum is degenerate.
+        ``hydrogens`` are the atoms whose bond to ``atom`` breaks; each
+        heavy one stands for its whole branch (``_substituent``). The
+        port points along the sum of the broken-bond vectors, or along
+        the first one when the sum is degenerate.
         ``Compound.remove`` leaves one auto-generated port on the atom
         per severed bond. Those ports are removed here, the same cleanup
         that ``Polymer.add_monomer`` does, so the returned Port is the
@@ -1561,29 +1616,63 @@ class Protein(Compound):
         orientation = sum(h.pos - atom.pos for h in hydrogens)
         if np.linalg.norm(orientation) < 1e-8:
             orientation = hydrogens[0].pos - atom.pos
-        _remove_particles_and_ports(root, atom, hydrogens)
+        leaving = []
+        for anchor in hydrogens:
+            leaving.extend(self._substituent(atom, anchor))
+        _remove_particles_and_ports(root, atom, leaving)
         self._leaving_atoms[atom] = tuple(
-            sorted(self._leaving_atoms.get(atom, ()) + tuple(h.name for h in hydrogens))
+            sorted(self._leaving_atoms.get(atom, ()) + tuple(p.name for p in leaving))
         )
         return Port(
             anchor=atom, orientation=orientation, separation=_PORT_SEPARATION / 2
         )
 
     @staticmethod
+    def _substituent(atom, anchor):
+        """Return the atoms that leave when the ``atom``-``anchor`` bond breaks.
+
+        For a hydrogen that is the hydrogen alone. For a heavy atom it
+        is every atom reachable from ``anchor`` without passing through
+        ``atom``: the whole group on the far side of the bond. A ring
+        that contains both atoms has no far side, so that case raises
+        instead of removing the rest of the molecule.
+        """
+        group = [anchor]
+        seen = {atom, anchor}
+        queue = deque([anchor])
+        while queue:
+            for neighbor in queue.popleft().direct_bonds():
+                if neighbor in seen:
+                    continue
+                if atom in neighbor.direct_bonds():
+                    raise MBuildError(
+                        f"Leaving atom {anchor.name} is in a ring with "
+                        f"{atom.name}, so there is no group on the far side "
+                        "of the bond to remove. Name a hydrogen or an atom "
+                        "outside the ring."
+                    )
+                seen.add(neighbor)
+                group.append(neighbor)
+                queue.append(neighbor)
+        return group
+
+    @staticmethod
     def _bonded_hydrogens(atom, residue_name, count, names=None):
-        """Return ``count`` hydrogens bonded to the atom.
+        """Return ``count`` leaving atoms bonded to the atom.
 
-        One hydrogen leaves per unit of bond order. Reactions that
-        remove other leaving groups (e.g. condensations) belong in
-        future reaction recipes that use ``attach``.
-
-        Without ``names`` the hydrogens are taken in alphabetical order.
-        That order is arbitrary as chemistry: the hydrogens on one atom
-        are equivalent, so any of them may leave. It is not arbitrary to
-        a downstream residue library, which describes the product by
+        One leaving atom per unit of bond order. Without ``names`` they
+        are hydrogens, taken in alphabetical order. That order is
+        arbitrary as chemistry: the hydrogens on one atom are
+        equivalent, so any of them may leave. It is not arbitrary to a
+        downstream residue library, which describes the product by
         naming the atom that is absent. Pass ``names`` to choose the
         hydrogens that leave, so the written file matches such a
         description.
+
+        A name may also be a heavy atom bonded to ``atom``. The bond to
+        it breaks in place of a bond to a hydrogen, and
+        ``_substituent`` takes the group beyond it along. That is how a
+        hydroxyl leaves an anomeric carbon when a glycan is attached.
 
         Parameters
         ----------
@@ -1594,14 +1683,14 @@ class Protein(Compound):
         count : int
             How many hydrogens leave; one per unit of bond order.
         names : str or sequence of str, optional
-            Names of the hydrogens that leave. Exactly ``count`` names
-            are required, and each must name a hydrogen bonded to
-            ``atom``.
+            Names of the atoms that leave. Exactly ``count`` names are
+            required, and each must name an atom bonded to ``atom``.
 
         Returns
         -------
         list of mbuild.Compound
-            The hydrogens to remove.
+            The atoms whose bond to ``atom`` breaks. A heavy atom in
+            the list stands for its whole substituent.
         """
         if not 1 <= count <= 3:
             raise MBuildError(f"bond_order must be 1, 2, or 3; you passed {count}.")
@@ -1626,10 +1715,10 @@ class Protein(Compound):
         if isinstance(names, str):
             names = [names]
         names = list(names)
-        available = {hydrogen.name: hydrogen for hydrogen in hydrogens}
+        available = {particle.name: particle for particle in atom.direct_bonds()}
         if len(names) != count:
             raise MBuildError(
-                f"A bond of order {count} replaces {count} hydrogens of "
+                f"A bond of order {count} replaces {count} bonds of "
                 f"atom {atom.name} of residue {residue_name}, but "
                 f"{len(names)} leaving-atom names were given: {names}."
             )
@@ -1637,18 +1726,33 @@ class Protein(Compound):
             raise MBuildError(
                 f"The leaving-atom names for atom {atom.name} of residue "
                 f"{residue_name} repeat: {names}. Each name must be a "
-                "different hydrogen."
+                "different atom."
             )
         missing = [name for name in names if name not in available]
         if missing:
             raise MBuildError(
                 f"Atom {atom.name} of residue {residue_name} has no bonded "
-                f"hydrogen named {missing[0]!r}. Its bonded hydrogens are "
+                f"atom named {missing[0]!r}. Its bonded atoms are "
                 f"{sorted(available)}."
             )
+        # Each leaving group frees one valence unit of the link atom, and
+        # the new bond uses one unit per leaving group. A leaving atom
+        # held by a double or triple bond would free more than that and
+        # leave the link atom short, which nothing downstream reports:
+        # RDKit sanitizes an under-valent atom as a radical. Refuse it.
+        graph = atom.root.bond_graph
+        for name in names:
+            order = graph.edges[atom, available[name]].get("bond_order", 1.0)
+            if order not in (1.0, 0.0):
+                raise MBuildError(
+                    f"Leaving atom {name} is joined to {atom.name} of residue "
+                    f"{residue_name} by a bond of order {order:g}. Only an "
+                    "atom held by a single bond can leave, because the new "
+                    "bond replaces one bond on each side."
+                )
         return [available[name] for name in names]
 
-    def _warn_on_clashes(self, added, site_atom, frag_atom, cutoff=0.1):
+    def _warn_on_clashes(self, added, site_atom, frag_atom, cutoff=0.2):
         """Warn when placed fragment atoms overlap the rest of the system.
 
         Port alignment is rigid; a bulky fragment can land inside the
