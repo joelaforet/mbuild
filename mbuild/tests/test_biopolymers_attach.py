@@ -7,10 +7,23 @@ import numpy as np
 import pytest
 
 import mbuild as mb
-from mbuild.biopolymers import Protein, prepare_fragment
+from mbuild.biopolymers import (
+    Protein,
+    fragment_from_ccd,
+    fragment_from_pdb,
+    prepare_fragment,
+)
 from mbuild.exceptions import MBuildError
 from mbuild.tests.base_test import BaseTest
 from mbuild.utils.io import get_fn, has_hoomd, has_openmm, has_rdkit
+
+
+def _chain_id(residue):
+    """Chain identifier of a residue, read from its Chain parent."""
+    parent = residue.parent
+    while parent is not None and not hasattr(parent, "chain_id"):
+        parent = parent.parent
+    return parent.chain_id
 
 
 class TestProteinModify(BaseTest):
@@ -264,7 +277,7 @@ class TestProteinModify(BaseTest):
         # platform="CPU" because a downstream consumer chooses the
         # OpenMM platform, and the name reaches
         # Platform.getPlatformByName. The test attaches a bulky fragment
-        # with relax=False, counts fragment atoms within the 0.1 nm
+        # with relax=False, counts fragment atoms within the 0.2 nm
         # clash cutoff of protein atoms before and after
         # relax_fragments(), and asserts the count decreased while the
         # protein coordinates did not change.
@@ -447,7 +460,7 @@ class TestProteinModify(BaseTest):
         # name what is available. This is needed because a silently
         # ignored name would write a file that the downstream library
         # rejects for a reason far from the call that caused it.
-        with pytest.raises(MBuildError, match="no bonded hydrogen named"):
+        with pytest.raises(MBuildError, match="no bonded atom named"):
             protein_6m03.attach(
                 prepare_fragment("*C(=O)C", "AC2"),
                 resnum=5,
@@ -513,6 +526,179 @@ class TestFragments(BaseTest):
             for name in names
             if name != "H1"  # the leaving hydrogen
         ]
+
+    def test_fragment_from_ccd_uses_the_component_names_and_geometry(
+        self, protein_6m03
+    ):
+        # Alanine is one of the shipped components, so no download. The
+        # fragment must carry the CCD atom names, the template's bonds
+        # with orders, ideal coordinates, and the link atom the caller
+        # named. Attaching it needs no fragment_atom_name.
+        from mbuild.biopolymers import CCDLibrary
+
+        alanine = fragment_from_ccd("ALA", link_atom="N", library=CCDLibrary())
+        assert alanine.name == "ALA" and alanine.hetatm
+        names = {particle.name for particle in alanine.particles()}
+        assert {"N", "CA", "C", "O", "OXT", "CB", "HB1"} <= names
+        orders = sorted(
+            d["bond_order"] for *_, d in alanine.bonds(return_bond_order=True)
+        )
+        assert orders.count(2.0) == 1
+        assert alanine.link_atoms == {"1": "N"}
+        assert any(abs(p.pos).max() > 0 for p in alanine.particles())
+        with pytest.raises(KeyError, match="no atom named"):
+            fragment_from_ccd("ALA", link_atom="XX", library=CCDLibrary())
+        lys = next(r for r in protein_6m03.residues() if r.name == "LYS")
+        record = protein_6m03.attach(
+            alanine,
+            resnum=lys.resnum,
+            atom_name="NZ",
+            chain_id=_chain_id(lys),
+            relax=False,
+        )
+        assert record.atom2_name == "N"
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_fragment_from_pdb_keeps_residues_and_perceives_orders(self):
+        # A GLYCAM-built disaccharide stub: a hydroxyl residue (ROH) on
+        # the anomeric carbon of an N-acetyl sugar (0VA). No template
+        # library knows these names, so the loader must keep them as
+        # they are, read every bond from the CONECT records, and find
+        # the one double bond (the acetamido C=O) from the geometry.
+        glycan = fragment_from_pdb(get_fn("glycam_G57321FI.pdb"))
+        residues = [(child.name, child.resnum) for child in glycan.children]
+        assert residues == [("ROH", 1), ("0VA", 2)]
+        assert glycan.n_particles == 30
+        orders = sorted(
+            data["bond_order"] for *_, data in glycan.bonds(return_bond_order=True)
+        )
+        assert orders.count(2.0) == 1 and orders.count(1.0) == 29
+        assert all(residue.formal_charge == 0 for residue in glycan.children)
+        names = {particle.name for particle in glycan.children[1].particles()}
+        assert {"C1", "C2N", "O2N", "H1"} <= names
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_fragment_from_pdb_requires_conect_records(self, tmp_path):
+        text = Path(get_fn("glycam_G57321FI.pdb")).read_text()
+        stripped = tmp_path / "no_conect.pdb"
+        stripped.write_text(
+            "".join(
+                line for line in text.splitlines(True) if not line.startswith("CONECT")
+            )
+        )
+        with pytest.raises(MBuildError, match="no CONECT records"):
+            fragment_from_pdb(stripped)
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach_heavy_leaving_atom_removes_its_group(self, protein_6m03):
+        # N-glycosylation: the glycan's anomeric carbon C1 loses the
+        # hydroxyl residue ROH (O1 and HO1), and the asparagine ND2
+        # loses one hydrogen. Naming O1 as the fragment leaving atom
+        # must remove O1 and HO1 together, drop the emptied ROH
+        # residue, keep the GLYCAM residue name of the sugar, and
+        # record every displaced atom.
+        glycan = fragment_from_pdb(get_fn("glycam_G57321FI.pdb"))
+        asn = next(r for r in protein_6m03.residues() if r.name == "ASN")
+        before = protein_6m03.n_particles
+        last = max(r.resnum for r in protein_6m03.residues(_chain_id(asn)))
+        record = protein_6m03.attach(
+            glycan,
+            fragment_atom_name="C1",
+            fragment_resnum=2,
+            resnum=asn.resnum,
+            atom_name="ND2",
+            chain_id=_chain_id(asn),
+            leaving_atom_names="HD22",
+            fragment_leaving_atom_names="O1",
+            relax=False,
+        )
+        assert protein_6m03.n_particles == before + 30 - 3
+        added = [r for r in protein_6m03.residues() if r.name in ("ROH", "0VA")]
+        assert [(r.name, r.resnum) for r in added] == [("0VA", last + 1)]
+        assert record.leaving1 == ("HD22",)
+        assert record.leaving2 == ("HO1", "O1")
+        c1 = protein_6m03.get_atom(last + 1, "C1", chain_id=_chain_id(asn))
+        nd2 = protein_6m03.get_atom(asn.resnum, "ND2", chain_id=_chain_id(asn))
+        assert nd2 in c1.direct_bonds()
+        assert {p.name for p in nd2.direct_bonds() if p.element.symbol == "H"} == {
+            "HD21"
+        }
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_renamed_site_residue_writes_under_its_new_name(
+        self, protein_6m03, tmp_path
+    ):
+        # GLYCAM06 parameterizes a glycosylated serine as OLS. The
+        # rename is the user's one line after attach, and it has to
+        # reach the written file and the bond record.
+        glycan = fragment_from_pdb(get_fn("glycam_G57321FI.pdb"))
+        ser = next(r for r in protein_6m03.residues() if r.name == "SER")
+        protein_6m03.attach(
+            glycan,
+            fragment_atom_name="C1",
+            fragment_resnum=2,
+            resnum=ser.resnum,
+            atom_name="OG",
+            chain_id=_chain_id(ser),
+            leaving_atom_names="HG",
+            fragment_leaving_atom_names="O1",
+            relax=False,
+        )
+        ser.name = "OLS"
+        written = tmp_path / "o_glycosylated.pdb"
+        protein_6m03.save_pdb(written)
+        lines = written.read_text().splitlines()
+        names = {
+            line[17:20]
+            for line in lines
+            if line.startswith("ATOM") and int(line[22:26]) == ser.resnum
+        }
+        assert names == {"OLS"}
+        assert protein_6m03.bond_records()[0]["residue_names"] == ("OLS", "0VA")
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach_rejects_a_double_bonded_leaving_atom(self, protein_6m03):
+        # Cutting the C=O of acetone would free two valence units of the
+        # carbon while the new single bond uses one. RDKit accepts the
+        # under-valent carbon as a radical, so attach has to refuse.
+        acetone = prepare_fragment("CC(=O)C", "ACE")
+        carbonyl_c = next(
+            p
+            for p in acetone.particles()
+            if p.element.symbol == "C"
+            and any(q.element.symbol == "O" for q in p.direct_bonds())
+        )
+        oxygen = next(q for q in carbonyl_c.direct_bonds() if q.element.symbol == "O")
+        lys = next(r for r in protein_6m03.residues() if r.name == "LYS")
+        with pytest.raises(MBuildError, match="bond of order 2"):
+            protein_6m03.attach(
+                acetone,
+                fragment_atom_name=carbonyl_c.name,
+                fragment_leaving_atom_names=oxygen.name,
+                resnum=lys.resnum,
+                atom_name="NZ",
+                chain_id=_chain_id(lys),
+                relax=False,
+            )
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_attach_rejects_a_ring_atom_as_leaving_atom(self, protein_6m03):
+        # O5 is in the pyranose ring with C1, so nothing lies on the far
+        # side of the C1-O5 bond. The call must refuse instead of
+        # removing the rest of the sugar.
+        glycan = fragment_from_pdb(get_fn("glycam_G57321FI.pdb"))
+        asn = next(r for r in protein_6m03.residues() if r.name == "ASN")
+        with pytest.raises(MBuildError, match="in a ring with"):
+            protein_6m03.attach(
+                glycan,
+                fragment_atom_name="C1",
+                fragment_resnum=2,
+                resnum=asn.resnum,
+                atom_name="ND2",
+                chain_id=_chain_id(asn),
+                fragment_leaving_atom_names="O5",
+                relax=False,
+            )
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     def test_prepare_fragment_keeps_multiple_residues(self):
