@@ -72,6 +72,9 @@ logger = logging.getLogger(__name__)
 #: This follows the ``Polymer.add_monomer`` convention. Relaxation
 #: corrects the length afterwards (see ``relax_fragments``).
 _PORT_SEPARATION = 0.15
+#: Length, in nm, of the bond to a hydrogen that a reaction moves or
+#: creates. It is a rounded value near the C-H, N-H and O-H lengths.
+_PROTON_BOND_LENGTH = 0.100
 
 
 #: Element symbols, in upper case, of the atoms that join two residues
@@ -1008,6 +1011,7 @@ class Protein(Compound):
                 "atom_names": (bond.atom1_name, bond.atom2_name),
                 "leaving_atoms": (list(bond.leaving1), list(bond.leaving2)),
                 "bond_order": bond.order,
+                **({"reaction": bond.reaction} if bond.reaction else {}),
             }
             for bond in self.cross_bonds
         ]
@@ -1227,6 +1231,7 @@ class Protein(Compound):
         relax=True,
         leaving_atom_names=None,
         fragment_leaving_atom_names=None,
+        reaction=None,
     ):
         """Bond a fragment Compound onto a residue of this protein.
 
@@ -1307,17 +1312,45 @@ class Protein(Compound):
             converges. When a build must return in bounded time, pass
             ``relax=False`` and call ``relax_fragments`` with a
             positive ``n_steps``.
+        reaction : str, optional
+            A reaction string, for a reaction that does more than
+            replace one bond on each side: a name from
+            ``mbuild.biopolymers.REACTIONS`` such as
+            ``"azide-alkyne triazole"``, or an RDKit reaction SMARTS
+            with the protein side as the first reactant template. The
+            string decides which atoms leave, which bonds form or
+            change order, and which formal charges change; see
+            ``mbuild.biopolymers.reactions``. The protein template
+            must include the atom named by ``atom_name``. With a
+            reaction, ``bond_order`` and the leaving-atom names are not
+            used, and the record carries the reaction.
 
         Returns
         -------
         InterResidueBond
-            The recorded bond, as appended to ``cross_bonds``.
+            The recorded bond, as appended to ``cross_bonds``. A
+            reaction that forms several bonds between the protein and
+            the fragment records each of them and returns the one at
+            the named atom.
         """
         # The name is checked first, before the attachment site is
         # read and before any warning is logged. The check ran inside
         # _as_residues before, so the charge warning of a valid site
         # reached the user ahead of the error about the name.
         _check_resname(fragment_resname)
+        if reaction is not None:
+            return self._attach_by_reaction(
+                fragment,
+                reaction,
+                fragment_atom_name,
+                resnum,
+                atom_name,
+                chain_id,
+                icode,
+                fragment_resnum,
+                fragment_resname,
+                relax,
+            )
         bond_order = int(bond_order)
         site_residue, site_atom, site_hydrogens = self._attachment_site(
             resnum, atom_name, chain_id, icode, bond_order, leaving_atom_names
@@ -1374,6 +1407,357 @@ class Protein(Compound):
 
         self._relax_if_clashing(added, site_atom, frag_atom, frag_residues, relax)
         return record
+
+    def _attach_by_reaction(
+        self,
+        fragment,
+        reaction,
+        fragment_atom_name,
+        resnum,
+        atom_name,
+        chain_id,
+        icode,
+        fragment_resnum,
+        fragment_resname,
+        relax,
+    ):
+        """Bond a fragment by the rule a reaction string states.
+
+        ``reactions.plan_reaction`` reads the string into leaving atoms,
+        formed, broken and reordered bonds, charges and new hydrogens.
+        This method applies them in that order with the same steps as
+        the plain ``attach``: leaving groups go, ports open at the two
+        atoms of the bond that joins the sides, the fragment is
+        aligned and bonded through ``force_overlap``, and the remaining
+        edits follow. A residue whose bonds or charges the reaction
+        changed keeps no template, because no CCD variant describes it;
+        its bond record does.
+        """
+        from mbuild.biopolymers.reactions import open_direction, plan_reaction
+
+        site_residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
+        site_anchor = self._atom_of(site_residue, atom_name)
+        added, frag_residues = _as_residues(clone(fragment), fragment_resname)
+        frag_anchor = None
+        if fragment_atom_name is not None:
+            frag_anchor, _ = self._find_fragment_atom(
+                frag_residues, fragment_atom_name, fragment_resnum
+            )
+        else:
+            linked = [
+                (r, name) for r in frag_residues for name in r.link_atoms.values()
+            ]
+            if len(linked) == 1:
+                frag_anchor = _atom_in_residue(*linked[0])
+        plan = plan_reaction(
+            reaction,
+            self,
+            list(site_residue.particles()),
+            site_anchor,
+            added,
+            list(added.particles()),
+            frag_anchor,
+        )
+        in_fragment = set(added.particles())
+        # A hydrogen that changes partners forms a bond too, but it is not
+        # a bond between the sides: it follows the fragment. Only bonds
+        # between atoms that stay put place the fragment and are recorded.
+        moving = {
+            atom
+            for pair in plan.removed
+            for atom in pair
+            if atom.element.symbol == "H"
+            and len([q for q in plan.removed if atom in q])
+            == len(list(atom.direct_bonds()))
+        }
+        cross = [
+            b
+            for b in plan.cross_bonds(in_fragment)
+            if not (b[0] in moving or b[1] in moving)
+        ]
+        if not cross:
+            raise MBuildError(
+                f"The reaction {plan.smarts!r} forms no bond between the protein "
+                "and the fragment, so there is nothing to attach."
+            )
+        primary = next((b for b in cross if site_anchor in b[:2]), cross[0])
+        site_atom, frag_atom = (
+            (primary[0], primary[1])
+            if primary[1] in in_fragment
+            else (primary[1], primary[0])
+        )
+
+        # 1. Leaving groups. The port at each bonding atom points along
+        #    its leaving group, or into its open site when nothing leaves.
+        def direction(atom):
+            vectors = [
+                leaving.pos - atom.pos for kept, leaving in plan.leaving if kept is atom
+            ]
+            total = np.sum(vectors, axis=0) if vectors else np.zeros(3)
+            return total if np.linalg.norm(total) > 1e-8 else open_direction(atom)
+
+        site_direction, frag_direction = direction(site_atom), direction(frag_atom)
+        for kept, leaving in plan.leaving:
+            root = added if leaving in in_fragment else self
+            group = self._substituent(kept, leaving)
+            _remove_particles_and_ports(root, kept, group)
+            self._leaving_atoms[kept] = tuple(
+                sorted(self._leaving_atoms.get(kept, ()) + tuple(p.name for p in group))
+            )
+        frag_residues[:] = [r for r in frag_residues if r is added or r.root is added]
+
+        # 2. Place the fragment along the bond that joins the sides.
+        site_port = Port(
+            anchor=site_atom,
+            orientation=site_direction,
+            separation=_PORT_SEPARATION / 2,
+        )
+        frag_port = Port(
+            anchor=frag_atom,
+            orientation=frag_direction,
+            separation=_PORT_SEPARATION / 2,
+        )
+        site_residue.add(site_port, label="attach_site")
+        added.add(frag_port, label="attach_frag")
+        self._adopt_fragment(added, frag_residues, site_residue)
+        self._align_on_ports(added, frag_port, site_port, primary[2])
+        if len(cross) > 1:
+            self._fit_placement(added, cross)
+
+        # 3. The other edits. Bonds are broken before any hydrogen that
+        #    moves is placed, so the open site it moves to is current.
+        ports_before = set(self.all_ports())
+        touched = set()
+        for atom1, atom2 in plan.removed:
+            self.remove_bond((atom1, atom2))
+            touched.update((atom1.parent, atom2.parent))
+        for atom1, atom2, order in plan.formed:
+            if {atom1, atom2} == {site_atom, frag_atom}:
+                continue
+            for moving, partner in ((atom1, atom2), (atom2, atom1)):
+                if moving.element.symbol == "H" and not list(moving.direct_bonds()):
+                    moving.pos = (
+                        partner.pos + open_direction(partner) * _PROTON_BOND_LENGTH
+                    )
+                    if moving.parent is not partner.parent:
+                        # From the file's point of view the hydrogen has
+                        # left the atom it was on, so the record names it
+                        # there, as a residue library expects.
+                        left = next(
+                            other
+                            for pair in plan.removed
+                            for other in pair
+                            if moving in pair and other is not moving
+                        )
+                        self._leaving_atoms[left] = tuple(
+                            sorted(self._leaving_atoms.get(left, ()) + (moving.name,))
+                        )
+                    self._move_hydrogen_to(moving, partner.parent)
+            self.add_bond((atom1, atom2), bond_order=order)
+            touched.update((atom1.parent, atom2.parent))
+        for atom1, atom2, order in plan.reordered:
+            self.add_bond((atom1, atom2), bond_order=order)
+            touched.update((atom1.parent, atom2.parent))
+        for heavy in plan.new_hydrogens:
+            new = Compound(
+                name=self._free_hydrogen_name(heavy.parent),
+                element="H",
+                pos=heavy.pos + open_direction(heavy) * _PROTON_BOND_LENGTH,
+            )
+            heavy.parent.add(new)
+            self.add_bond((heavy, new), bond_order=1.0)
+            touched.add(heavy.parent)
+        new_ports = [port for port in self.all_ports() if port not in ports_before]
+        if new_ports:
+            self.remove(new_ports)
+        for particle, charge in plan.charges.items():
+            residue = particle.parent
+            if charge:
+                residue.atom_formal_charges[particle.name] = charge
+            else:
+                residue.atom_formal_charges.pop(particle.name, None)
+            residue.formal_charge = sum(residue.atom_formal_charges.values())
+            touched.add(residue)
+        for residue in touched:
+            if getattr(residue, "template", None) is not None:
+                logger.info(
+                    f"The reaction changed the chemistry of {_pdb_label(residue)}, "
+                    "so it keeps no CCD definition; its bond record describes it."
+                )
+                residue.template = None
+
+        # 4. Records, one per bond between the sides, the reaction on each.
+        result = None
+        for atom1, atom2, order in cross:
+            protein_atom, fragment_atom = (
+                (atom1, atom2) if atom2 in in_fragment else (atom2, atom1)
+            )
+            record = InterResidueBond(
+                residue1=protein_atom.parent,
+                residue2=fragment_atom.parent,
+                atom1_name=protein_atom.name,
+                atom2_name=fragment_atom.name,
+                order=int(order) if float(order).is_integer() else order,
+                leaving1=self._leaving_atoms.get(protein_atom, ()),
+                leaving2=self._leaving_atoms.get(fragment_atom, ()),
+                reaction=plan.smarts,
+            )
+            self.cross_bonds.append(record)
+            if protein_atom is site_atom:
+                result = record
+        # A ring closure leaves its bonds long after the rigid placement,
+        # so the fragment is relaxed whether or not it clashes, and the
+        # bond lengths are checked afterwards. The minimizer now and
+        # then returns without moving an atom, so the check repeats
+        # the relaxation a few times before it gives up.
+        if relax and len(cross) > 1:
+            try:
+                import mbuild.simulation  # noqa: F401
+            except ImportError as error:
+                logger.warning(
+                    "Cannot relax the placed fragment: mbuild.simulation is not "
+                    f"importable ({error}). The ring-closing bonds keep their "
+                    "rigid-placement lengths until relax_fragments() runs."
+                )
+            else:
+                self._relax_until_bonded(frag_residues, cross)
+        else:
+            self._relax_if_clashing(added, site_atom, frag_atom, frag_residues, relax)
+        return result
+
+    def _relax_until_bonded(self, frag_residues, bonds, attempts=3, longest=0.18):
+        """Relax the fragment until every formed bond is at bond length.
+
+        Parameters
+        ----------
+        frag_residues : list of Residue
+            The residues that may move.
+        bonds : list of (mbuild.Compound, mbuild.Compound, float)
+            The formed bonds to check.
+        attempts : int, optional, default=3
+            How many relaxations to run before warning.
+        longest : float, optional, default=0.18
+            The bond length, in nm, above which a bond counts as open.
+        """
+
+        def open_bonds():
+            return [
+                (a.name, b.name, np.linalg.norm(a.pos - b.pos))
+                for a, b, _ in bonds
+                if np.linalg.norm(a.pos - b.pos) > longest
+            ]
+
+        for _ in range(attempts):
+            self.relax_fragments(residues=frag_residues, tolerance=1.0)
+            if not open_bonds():
+                return
+        for name1, name2, length in open_bonds():
+            logger.warning(
+                f"The bond {name1}-{name2} formed by the reaction is "
+                f"{length * 10:.2f} A long after relaxation. Inspect the site, "
+                "or call relax_fragments() again."
+            )
+
+    def _fit_placement(self, added, bonds):
+        """Move the fragment rigidly so that every formed bond can close.
+
+        Port alignment places the fragment for one bond. A reaction that
+        forms several bonds between the sides, a ring closure, needs
+        the fragment placed for all of them at once, and a terminal
+        atom such as the outer nitrogen of an azide gives no bond
+        direction that a single alignment could use. The fragment is
+        therefore moved as a rigid body, starting from the aligned
+        placement and from turns about the first bond, to the pose
+        that brings every formed bond to bond length while keeping the
+        fragment clear of the protein. Relaxation then refines the
+        geometry.
+
+        Parameters
+        ----------
+        added : mbuild.Compound
+            The placed fragment.
+        bonds : list of (mbuild.Compound, mbuild.Compound, float)
+            The formed bonds between the protein and the fragment.
+        """
+        from scipy.optimize import minimize
+        from scipy.spatial import cKDTree
+        from scipy.spatial.transform import Rotation
+
+        particles = list(added.particles())
+        fragment = set(particles)
+        index = {particle: i for i, particle in enumerate(particles)}
+        pairs = [(a, index[b]) if b in index else (b, index[a]) for a, b, _ in bonds]
+        bonded = {fixed for fixed, _ in pairs}
+        others = [p for p in self.particles() if p not in fragment and p not in bonded]
+        tree = cKDTree([p.pos for p in others]) if others else None
+        start = np.array([particle.pos for particle in particles])
+        centre = start.mean(axis=0)
+        site_atom, frag_index = pairs[0]
+        axis = start[frag_index] - site_atom.pos
+        axis = axis / np.linalg.norm(axis)
+
+        def posed(x):
+            return Rotation.from_rotvec(x[:3]).apply(start - centre) + centre + x[3:]
+
+        def cost(x):
+            positions = posed(x)
+            total = sum(
+                (np.linalg.norm(fixed.pos - positions[i]) - _PORT_SEPARATION) ** 2
+                for fixed, i in pairs
+            )
+            if tree is not None:
+                distances, _ = tree.query(positions)
+                close = distances[distances < 0.25]
+                total += ((0.25 - close) ** 2).sum()
+            return total
+
+        best = None
+        for angle in np.radians(np.arange(0.0, 360.0, 30.0)):
+            # Turn about the first bond, then correct the translation
+            # that the turn about the centroid introduced.
+            turned = Rotation.from_rotvec(axis * angle)
+            shift = (
+                turned.apply(start[frag_index] - centre) + centre - start[frag_index]
+            )
+            guess = np.concatenate([axis * angle, -shift])
+            result = minimize(
+                cost, guess, method="Powell", options={"xtol": 1e-4, "ftol": 1e-8}
+            )
+            if best is None or result.fun < best.fun:
+                best = result
+        for particle, position in zip(particles, posed(best.x)):
+            particle.pos = position
+
+    @staticmethod
+    def _move_hydrogen_to(hydrogen, residue):
+        """Move a hydrogen that changed partners into its new residue.
+
+        A hydrogen belongs to the residue of the atom it bonds, so one
+        that a reaction moves across the sides, as the thiol hydrogen
+        of a thiol-Michael addition does, changes residue. The written
+        file then lists it under the right residue. It keeps its name
+        unless that residue already uses it.
+        """
+        if hydrogen.parent is residue:
+            return
+        from mbuild.bond_graph import BondGraph
+
+        hydrogen.parent.children.remove(hydrogen)
+        hydrogen.parent = None
+        hydrogen.bond_graph = BondGraph()
+        hydrogen.bond_graph.add_node(hydrogen)
+        if any(p.name == hydrogen.name for p in residue.particles()):
+            hydrogen.name = Protein._free_hydrogen_name(residue)
+        residue.add(hydrogen)
+
+    @staticmethod
+    def _free_hydrogen_name(residue):
+        """Return a hydrogen name that no atom of the residue uses."""
+        taken = {particle.name for particle in residue.particles()}
+        index = 1
+        while f"H{index}" in taken:
+            index += 1
+        return f"H{index}"
 
     @staticmethod
     def _warn_on_kept_charge(residue, resnum, atom_name):
