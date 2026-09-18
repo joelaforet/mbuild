@@ -320,6 +320,74 @@ class TestResidueMatching(BaseTest):
         with pytest.raises(MBuildError, match="ALA A:1"):
             _match_residue(residues[0], library["ALA"], False, False)
 
+    def test_generic_hydrogen_names_are_placed_by_geometry(self, library):
+        # Tests that a residue whose hydrogens carry generic names such
+        # as H01, H02, ... still matches, and that each such record is
+        # assigned to a template hydrogen of the heavy atom it sits on.
+        # This is needed because PyMOL's h_add writes exactly these
+        # names, so a user who protonates a structure there hands the
+        # loader a file that no template names. Every hydrogen must
+        # come out with a CCD name, and no template atom may be used
+        # twice.
+        lines = []
+        counter = 0
+        for line in _gly_gly_with_ter(complete=True).splitlines():
+            if line.startswith("ATOM  ") and line[76:78].strip() == "H":
+                counter += 1
+                line = f"{line[:12]} H{counter:02d}{line[16:]}"
+            lines.append(line)
+        residues, _, _ = _parse_pdb("\n".join(lines) + "\n")
+        assert [r.name for r in residues[0].records if r.name[0] == "H"] == [
+            "H01",
+            "H02",
+            "H03",
+            "H04",
+            "H05",
+            "H06",
+        ]
+        matches = _match_residue(residues[0], library["GLY"], False, False)
+        match = matches[0]
+        assigned = {
+            record.name: match.record_atoms[id(record)].name
+            for record in residues[0].records
+        }
+        # The three amine hydrogens land on the N slots, the two alpha
+        # hydrogens on the CA slots, and the acid hydrogen on OXT.
+        assert {assigned["H01"], assigned["H02"], assigned["H03"]} == {
+            "H",
+            "H2",
+            "H3",
+        }
+        assert {assigned["H04"], assigned["H05"]} == {"HA2", "HA3"}
+        assert assigned["H06"] == "HXT"
+        assert len(set(assigned.values())) == len(assigned)
+        assert not match.missing
+
+    def test_a_misnamed_heavy_atom_is_still_rejected(self, library):
+        # Tests that the geometric rule applies to hydrogens only. A
+        # heavy atom with an unknown name must still reject the
+        # variant, because its name is the only statement of its
+        # chemistry and a distance cannot confirm it.
+        text = _gly_gly_with_ter(complete=True).replace(" CA  GLY", " CX  GLY")
+        residues, _, _ = _parse_pdb(text)
+        with pytest.raises(MBuildError, match="'CX' is not in the template"):
+            _match_residue(residues[0], library["GLY"], False, False)
+
+    def test_a_stray_hydrogen_is_rejected(self, library):
+        # Tests that a generically named hydrogen too far from every
+        # heavy atom rejects the variant with the naming reason, rather
+        # than being placed on some atom. Otherwise the loader would
+        # invent a bond for an atom the file does not explain.
+        text = _gly_gly_with_ter(complete=True)
+        moved = []
+        for line in text.splitlines():
+            if line.startswith("ATOM  ") and line[12:16] == " HA3":
+                line = f"{line[:12]} H99{line[16:30]}{'20.000':>8s}{'20.000':>8s}{'20.000':>8s}{line[54:]}"
+            moved.append(line)
+        residues, _, _ = _parse_pdb("\n".join(moved) + "\n")
+        with pytest.raises(MBuildError, match="'H99' is not in the template"):
+            _match_residue(residues[0], library["GLY"], False, False)
+
     def test_a_missing_sulfur_hydrogen_expects_a_crosslink(self, library):
         # Tests that a cysteine without HG matches a variant that expects
         # a crosslink. This is needed because a disulfide is formed only

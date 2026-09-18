@@ -250,7 +250,68 @@ def _ter_break_reason(earlier, later, earlier_variant, later_variant):
     return None
 
 
-def _assign_records(group, variant):
+#: Longest X-H bond, in nm, that the geometric hydrogen rule accepts.
+#: The S-H bond is the longest in a protein at 1.34 A. The value
+#: leaves room for the coordinates a preparation tool writes.
+_MAX_XH_BOND = 0.15
+
+
+def _is_hydrogen_record(record):
+    """Return True when a PDB record is a hydrogen.
+
+    The element column decides when the file fills it. Otherwise the
+    name decides: a protein hydrogen name starts with ``H`` after any
+    leading digit, such as ``H01``, ``HB2``, or ``2HB``.
+    """
+    if record.element:
+        return record.element.upper() == "H"
+    return record.name.lstrip("0123456789").upper().startswith("H")
+
+
+def _hydrogen_candidates_by_geometry(group, record, variant):
+    """Return the template hydrogens that a misnamed hydrogen record can be.
+
+    The heavy record nearest to ``record`` within ``_MAX_XH_BOND`` is
+    the atom the hydrogen bonds to. Its template atoms are read by
+    name, and the hydrogens the template bonds to them are the
+    candidates, in template order. An empty list means the hydrogen is
+    too far from every heavy atom, or the heavy atom carries no
+    hydrogen in this variant.
+
+    Parameters
+    ----------
+    group : _PdbResidue
+        The records of one PDB residue.
+    record : _PdbRecord
+        The hydrogen record whose name no template atom carries.
+    variant : mbuild.biopolymers.ccd.ResidueTemplate
+        The template variant under test.
+
+    Returns
+    -------
+    list of AtomTemplate
+        The hydrogen atoms that the record may be assigned to.
+    """
+    heavy = [r for r in group.records if not _is_hydrogen_record(r)]
+    if not heavy:
+        return []
+    distances = [np.linalg.norm(r.pos - record.pos) for r in heavy]
+    nearest = heavy[int(np.argmin(distances))]
+    if min(distances) > _MAX_XH_BOND:
+        return []
+    atom_by_name = variant._atom_by_name
+    candidates = []
+    for heavy_atom in variant.atoms_named(nearest.name):
+        for name in variant.bonded_names(heavy_atom.name):
+            atom = atom_by_name[name]
+            if atom.element.upper() == "H" and atom not in candidates:
+                candidates.append(atom)
+    # Template order keeps the assignment deterministic across runs.
+    order = {atom.name: i for i, atom in enumerate(variant.atoms)}
+    return sorted(candidates, key=lambda atom: order[atom.name])
+
+
+def _assign_records(group, variant, known_names=None):
     """Assign the records of one PDB residue to template atoms.
 
     The first pass gives every record the single atom that
@@ -276,7 +337,9 @@ def _assign_records(group, variant):
     ``mbuild.biopolymers.ccd.ResidueTemplate.atoms_named`` reports every
     template atom that one name can denote. After either reason, a
     second pass runs ``_assign_records_bipartite`` over the full
-    candidate list of every record.
+    candidate list of every record. That pass also places a hydrogen
+    whose name no template knows, such as the ``H01`` that PyMOL
+    writes, on the nearest heavy atom by distance.
 
     Parameters
     ----------
@@ -284,6 +347,10 @@ def _assign_records(group, variant):
         The records of one PDB residue, in file order.
     variant : mbuild.biopolymers.ccd.ResidueTemplate
         The template variant to assign the records to.
+    known_names : set of str, optional
+        Every atom name that any variant of this residue accepts. A
+        hydrogen record outside this set is placed by geometry in the
+        second pass. Default: the names of ``variant`` alone.
 
     Returns
     -------
@@ -320,11 +387,13 @@ def _assign_records(group, variant):
         record_atoms[id(record)] = atom
     if not names_disagree:
         return record_atoms, reason, False
-    record_atoms, reason = _assign_records_bipartite(group, variant, reason)
+    record_atoms, reason = _assign_records_bipartite(
+        group, variant, reason, known_names
+    )
     return record_atoms, reason, reason is None
 
 
-def _assign_records_bipartite(group, variant, reason):
+def _assign_records_bipartite(group, variant, reason, known_names=None):
     """Pair the records of one residue with template atoms when names alone
     do not decide.
 
@@ -358,6 +427,23 @@ def _assign_records_bipartite(group, variant, reason):
     are visited in file order and candidates stay in template order, so
     one file always gives one assignment.
 
+    A hydrogen record whose name no variant of the residue carries gets
+    its candidates from geometry instead. Preparation tools such as PyMOL's
+    ``h_add`` name the hydrogens they add ``H01``, ``H02``, ... in file
+    order, and no residue template carries those names. The heavy atom
+    that the hydrogen bonds to is the nearest heavy record within
+    ``_MAX_XH_BOND``, and the candidates are the template hydrogens of
+    that heavy atom, in template order. The bipartite search then gives
+    each such record one free hydrogen slot. The hydrogens on one heavy
+    atom are chemically equivalent, so which slot a record takes does
+    not change the chemistry, and the residue is built with the CCD
+    names. The rule applies to hydrogens only: a heavy atom with an
+    unknown name still rejects the variant, because a heavy atom names
+    a chemistry that a distance cannot confirm. A hydrogen name that
+    another variant does carry, such as ``H2`` on a variant that lacks
+    it, also rejects, because that name states a protonation state and
+    the record is then evidence for the other variant.
+
     Either every record gets an atom or the residue is rejected. A record
     with no template atom has no element, charge or bonds, so a partial
     pairing cannot build the residue.
@@ -372,6 +458,9 @@ def _assign_records_bipartite(group, variant, reason):
         The rejection reason of the first pass. It is reported again
         when the assignment fails, so that the error message keeps
         naming the record that the user must inspect.
+    known_names : set of str, optional
+        Every atom name that any variant of this residue accepts. See
+        ``_assign_records``.
 
     Returns
     -------
@@ -381,6 +470,8 @@ def _assign_records_bipartite(group, variant, reason):
     reason : str or None
         None on success, else the reason passed in.
     """
+    if known_names is None:
+        known_names = set(variant.name_to_atom)
     candidates = []
     for record in group.records:
         atoms = [
@@ -388,6 +479,8 @@ def _assign_records_bipartite(group, variant, reason):
             for atom in variant.atoms_named(record.name)
             if not record.element or record.element.upper() == atom.element.upper()
         ]
+        if not atoms and record.name not in known_names and _is_hydrogen_record(record):
+            atoms = _hydrogen_candidates_by_geometry(group, record, variant)
         if not atoms:
             return {}, reason
         candidates.append(atoms)
@@ -488,15 +581,16 @@ def _match_residue(group, variants, prior_possible, posterior_possible):
     """Match one PDB residue against its template variants.
 
     Returns the valid matches. Raises MBuildError with the per-variant
-    rejection reasons when nothing matches. Logs at info level when the
+    rejection reasons when nothing matches. Logs at debug level when the
     second assignment pass rescued the residue, so that the tolerance
     is visible in the log.
     """
     matches = []
     reasons = []
     rescued = []
+    known_names = set().union(*(variant.name_to_atom for variant in variants))
     for variant in variants:
-        record_atoms, reason, fallback = _assign_records(group, variant)
+        record_atoms, reason, fallback = _assign_records(group, variant, known_names)
         if reason is not None:
             reasons.append(f"{variant.description}: {reason}")
             continue
@@ -538,7 +632,10 @@ def _match_residue(group, variants, prior_possible, posterior_possible):
     if not matches:
         raise MBuildError(_no_match_message(group, variants, reasons))
     if rescued:
-        logger.info(
+        # One line per residue is too much for a file whose every
+        # residue is renamed, so this is a debug message. The loader
+        # warns once per load and names an example.
+        logger.debug(
             f"Residue {group.label}: the first-hit atom names did not fit, "
             f"and the second pass read {rescued} as alternative names."
         )
