@@ -39,7 +39,11 @@ import numpy as np
 
 from mbuild import clone, force_overlap
 from mbuild.biopolymers.ccd import CCDLibrary
-from mbuild.biopolymers.fragments import _as_residues, _check_resname
+from mbuild.biopolymers.fragments import (
+    _as_residues,
+    _check_resname,
+    _move_into_residue,
+)
 from mbuild.biopolymers.matching import (
     _bridge_scope_conflict,
     _bridge_scope_message,
@@ -1038,7 +1042,7 @@ class Protein(Compound):
             OpenMM platform name.
         """
         try:
-            from mbuild.simulation import OpenMMSimulation
+            import mbuild.simulation  # noqa: F401
         except ImportError as error:
             raise MBuildError(
                 "relax_fragments() needs mbuild.simulation, which is not "
@@ -1057,6 +1061,19 @@ class Protein(Compound):
         mobile = set()
         for residue in targets:
             mobile.update(residue.particles())
+        self._relax_particles(mobile, n_steps, tolerance, platform)
+
+    def _relax_particles(self, mobile, n_steps=0, tolerance=50.0, platform="CPU"):
+        """Minimize with every particle outside ``mobile`` held fixed.
+
+        This is the minimization behind ``relax_fragments``, which
+        moves whole residues, and behind ``attach`` with ``merge=True``,
+        which moves atoms that now sit inside a residue whose backbone
+        must not move. The parameters are those of ``relax_fragments``.
+        """
+        from mbuild.simulation import OpenMMSimulation
+
+        mobile = set(mobile)
         simulation = OpenMMSimulation(
             self, forcefield=None, kick=False, platform=platform
         )
@@ -1209,6 +1226,7 @@ class Protein(Compound):
         leaving_atom_names=None,
         fragment_leaving_atom_names=None,
         reaction=None,
+        merge=False,
     ):
         """Bond a fragment Compound onto a residue of this protein.
 
@@ -1301,14 +1319,27 @@ class Protein(Compound):
             must include the atom named by ``atom_name``. With a
             reaction, ``bond_order`` and the leaving-atom names are not
             used, and the record carries the reaction.
+        merge : bool, optional, default=False
+            Put the fragment's atoms into the site residue instead of
+            adding the fragment as a residue of its own. The fragment
+            must be one residue. The site residue keeps its name and
+            number, takes the fragment's formal charges, and drops its
+            CCD template, since no CCD component describes the product;
+            rename it for the residue library that will read the file.
+            Use this when a downstream library must describe the
+            product as one component: a ring-closing reaction joins the
+            two sides by more than one bond, which a per-residue
+            crosslink declaration cannot express. No inter-residue bond
+            is recorded, because there is none.
 
         Returns
         -------
-        InterResidueBond
+        InterResidueBond or Residue
             The recorded bond, as appended to ``cross_bonds``. A
             reaction that forms several bonds between the protein and
             the fragment records each of them and returns the one at
-            the named atom.
+            the named atom. With ``merge=True`` there is no record, and
+            the site residue is returned.
         """
         # The name is checked first, before the attachment site is
         # read and before any warning is logged. The check ran inside
@@ -1327,6 +1358,7 @@ class Protein(Compound):
                 fragment_resnum,
                 fragment_resname,
                 relax,
+                merge,
             )
         bond_order = int(bond_order)
         site_residue, site_atom, site_hydrogens = self._attachment_site(
@@ -1360,8 +1392,13 @@ class Protein(Compound):
         # and never reaches the chain.
         frag_residues[:] = [r for r in frag_residues if r is added or r.root is added]
 
-        self._adopt_fragment(added, frag_residues, site_residue)
-        self._align_on_ports(added, frag_port, site_port, bond_order)
+        placed = list(added.particles())
+        self._place_fragment(
+            added, frag_residues, site_residue, site_port, frag_port, bond_order, merge
+        )
+        if merge:
+            self._relax_if_clashing(placed, site_atom, frag_atom, relax)
+            return site_residue
 
         # The record is appended before the relaxation step, so the
         # protein state stays complete and consistent when relaxation
@@ -1382,7 +1419,7 @@ class Protein(Compound):
         )
         self.cross_bonds.append(record)
 
-        self._relax_if_clashing(added, site_atom, frag_atom, frag_residues, relax)
+        self._relax_if_clashing(placed, site_atom, frag_atom, relax)
         return record
 
     def _attach_by_reaction(
@@ -1397,6 +1434,7 @@ class Protein(Compound):
         fragment_resnum,
         fragment_resname,
         relax,
+        merge,
     ):
         """Bond a fragment by the rule a reaction string states.
 
@@ -1496,10 +1534,12 @@ class Protein(Compound):
         )
         site_residue.add(site_port, label="attach_site")
         added.add(frag_port, label="attach_frag")
-        self._adopt_fragment(added, frag_residues, site_residue)
-        self._align_on_ports(added, frag_port, site_port, primary[2])
+        placed = list(added.particles())
+        self._place_fragment(
+            added, frag_residues, site_residue, site_port, frag_port, primary[2], merge
+        )
         if len(cross) > 1:
-            self._fit_placement(added, cross)
+            self._fit_placement(placed, cross)
 
         # 3. The other edits. Bonds are broken before any hydrogen that
         #    moves is placed, so the open site it moves to is current.
@@ -1564,8 +1604,9 @@ class Protein(Compound):
                 residue.template = None
 
         # 4. Records, one per bond between the sides, the reaction on each.
-        result = None
-        for atom1, atom2, order in cross:
+        #    A merged fragment leaves no bond between residues to record.
+        result = site_residue if merge else None
+        for atom1, atom2, order in () if merge else cross:
             protein_atom, fragment_atom = (
                 (atom1, atom2) if atom2 in in_fragment else (atom2, atom1)
             )
@@ -1597,18 +1638,18 @@ class Protein(Compound):
                     "rigid-placement lengths until relax_fragments() runs."
                 )
             else:
-                self._relax_until_bonded(frag_residues, cross)
+                self._relax_until_bonded(placed, cross)
         else:
-            self._relax_if_clashing(added, site_atom, frag_atom, frag_residues, relax)
+            self._relax_if_clashing(placed, site_atom, frag_atom, relax)
         return result
 
-    def _relax_until_bonded(self, frag_residues, bonds, attempts=3, longest=0.18):
-        """Relax the fragment until every formed bond is at bond length.
+    def _relax_until_bonded(self, mobile, bonds, attempts=3, longest=0.18):
+        """Relax the placed atoms until every formed bond is at bond length.
 
         Parameters
         ----------
-        frag_residues : list of Residue
-            The residues that may move.
+        mobile : list of mbuild.Compound
+            The particles that may move.
         bonds : list of (mbuild.Compound, mbuild.Compound, float)
             The formed bonds to check.
         attempts : int, optional, default=3
@@ -1625,7 +1666,7 @@ class Protein(Compound):
             ]
 
         for _ in range(attempts):
-            self.relax_fragments(residues=frag_residues, tolerance=1.0)
+            self._relax_particles(mobile, tolerance=1.0)
             if not open_bonds():
                 return
         for name1, name2, length in open_bonds():
@@ -1651,8 +1692,8 @@ class Protein(Compound):
 
         Parameters
         ----------
-        added : mbuild.Compound
-            The placed fragment.
+        added : list of mbuild.Compound
+            The placed particles.
         bonds : list of (mbuild.Compound, mbuild.Compound, float)
             The formed bonds between the protein and the fragment.
         """
@@ -1660,7 +1701,7 @@ class Protein(Compound):
         from scipy.spatial import cKDTree
         from scipy.spatial.transform import Rotation
 
-        particles = list(added.particles())
+        particles = list(added)
         fragment = set(particles)
         index = {particle: i for i, particle in enumerate(particles)}
         pairs = [(a, index[b]) if b in index else (b, index[a]) for a, b, _ in bonds]
@@ -1872,6 +1913,86 @@ class Protein(Compound):
         )
         return atom, residue, hydrogens
 
+    def _place_fragment(
+        self, added, frag_residues, site_residue, site_port, frag_port, order, merge
+    ):
+        """Place the fragment and bond it, as its own residues or merged.
+
+        Without ``merge`` the fragment residues join the chain and
+        ``force_overlap`` aligns the ports and adds the bond. With
+        ``merge`` the fragment is aligned while still detached, its one
+        residue's atoms move into the site residue, and the bond is
+        added there. The site residue takes the fragment's formal
+        charges and drops its template.
+        """
+        if not merge:
+            self._adopt_fragment(added, frag_residues, site_residue)
+            self._align_on_ports(added, frag_port, site_port, order)
+            return
+        if len(frag_residues) != 1:
+            raise MBuildError(
+                f"merge=True puts one residue into the site residue, but the "
+                f"fragment holds {len(frag_residues)}."
+            )
+        fragment = frag_residues[0]
+        force_overlap(
+            move_this=added,
+            from_positions=frag_port,
+            to_positions=site_port,
+            add_bond=False,
+        )
+        site_atom, frag_atom = site_port.anchor, frag_port.anchor
+        self.remove([site_port])
+        added.remove([frag_port])
+        self._rename_clashing_atoms(fragment, site_residue)
+        charges = dict(fragment.atom_formal_charges)
+        _move_into_residue(added, site_residue)
+        self.add_bond((site_atom, frag_atom), bond_order=float(order))
+        site_residue.atom_formal_charges.update(charges)
+        site_residue.formal_charge = sum(site_residue.atom_formal_charges.values())
+        if site_residue.template is not None:
+            logger.info(
+                f"{_pdb_label(site_residue)} now holds the fragment's atoms, so it "
+                "keeps no CCD definition; rename it for the residue library that "
+                "reads the file."
+            )
+            site_residue.template = None
+
+    @staticmethod
+    def _rename_clashing_atoms(frag, residue):
+        """Give fragment atoms names that the residue does not use yet.
+
+        A fragment can carry any atom name, so a fragment atom named
+        like an atom of the residue it joins is renamed element plus
+        index, skipping names in use, and the charge and bond-site maps
+        of the fragment follow.
+        """
+        taken = {particle.name for particle in residue.particles()}
+        renamed = {}
+        counters = {}
+        for particle in frag.particles():
+            if particle.name not in taken:
+                taken.add(particle.name)
+                continue
+            symbol = particle.element.symbol.upper()
+            while True:
+                counters[symbol] = counters.get(symbol, 0) + 1
+                candidate = f"{symbol}{counters[symbol]}"
+                if candidate not in taken:
+                    break
+            renamed[particle.name] = candidate
+            particle.name = candidate
+            taken.add(candidate)
+        if renamed:
+            frag.atom_formal_charges = {
+                renamed.get(name, name): charge
+                for name, charge in frag.atom_formal_charges.items()
+            }
+            frag.link_atoms = {
+                label: renamed.get(name, name)
+                for label, name in frag.link_atoms.items()
+            }
+
     def _adopt_fragment(self, added, frag_residues, site_residue):
         """Renumber the fragment residues and add them to the chain.
 
@@ -1901,24 +2022,22 @@ class Protein(Compound):
             bond_order=float(bond_order),
         )
 
-    def _relax_if_clashing(self, added, site_atom, frag_atom, frag_residues, relax):
-        """Relax the placed fragment when it overlaps other atoms.
+    def _relax_if_clashing(self, added, site_atom, frag_atom, relax):
+        """Relax the placed atoms when they overlap other atoms.
 
         Port alignment is rigid, so a bulky fragment can land inside the
-        protein. The relaxation moves only the fragment residues. It
-        needs the simulation dependencies; without them the method warns
-        and keeps the rigid placement.
+        protein. The relaxation moves only the placed atoms. It needs
+        the simulation dependencies; without them the method warns and
+        keeps the rigid placement.
 
         Parameters
         ----------
-        added : mbuild.Compound
-            The placed fragment.
+        added : list of mbuild.Compound
+            The placed particles, which relaxation may move.
         site_atom : mbuild.Compound
             The protein atom of the new bond.
         frag_atom : mbuild.Compound
-            The fragment atom of the new bond.
-        frag_residues : list of Residue
-            The residues that relaxation may move.
+            The placed atom of the new bond.
         relax : bool
             False leaves the rigid placement in place.
         """
@@ -1939,8 +2058,8 @@ class Protein(Compound):
                 "rigid placement."
             )
             return
-        logger.info("Relaxing the placed fragment with the protein held fixed.")
-        self.relax_fragments(residues=frag_residues)
+        logger.info("Relaxing the placed atoms with the protein held fixed.")
+        self._relax_particles(added)
         # The user asked for the relaxation and got it, so the result is
         # reported rather than warned about. Ordinary van der Waals
         # contacts near 2 A are expected after a minimization; only a
@@ -1961,15 +2080,15 @@ class Protein(Compound):
             )
 
     def _closest_contact(self, added, site_atom, frag_atom):
-        """Return the smallest distance (nm) from a fragment atom to any other atom.
+        """Return the smallest distance (nm) from a placed atom to any other atom.
 
-        The new bond pair is left out. Returns None when there is
-        nothing to compare against.
+        ``added`` lists the placed particles. The new bond pair is left
+        out. Returns None when there is nothing to compare against.
         """
         from scipy.spatial import cKDTree
 
-        added_particles = [p for p in added.particles() if p is not frag_atom]
-        added_set = set(added.particles()) | {site_atom}
+        added_particles = [p for p in added if p is not frag_atom]
+        added_set = set(added) | {site_atom}
         others = [p for p in self.particles() if p not in added_set]
         if not others or not added_particles:
             return None
@@ -2137,29 +2256,30 @@ class Protein(Compound):
         return [available[name] for name in names]
 
     def _warn_on_clashes(self, added, site_atom, frag_atom, cutoff=0.2):
-        """Warn when placed fragment atoms overlap the rest of the system.
+        """Warn when placed atoms overlap the rest of the system.
 
         Port alignment is rigid; a bulky fragment can land inside the
-        protein. The check compares every added atom against every other
-        atom, and it leaves out the new bond pair. It warns below
-        ``cutoff`` nm, so the user knows to relax the structure before
-        simulating.
+        protein. The check compares every particle in ``added`` against
+        every other atom, and it leaves out the new bond pair. It warns
+        below ``cutoff`` nm, so the user knows to relax the structure
+        before simulating.
         """
         from scipy.spatial import cKDTree
 
-        added_particles = list(added.particles())
+        added_particles = list(added)
         added_set = set(added_particles) | {site_atom}
         others = [p for p in self.particles() if p not in added_set]
         if not others or not added_particles:
             return
+        placed = [p.pos for p in added_particles if p is not frag_atom]
+        if not placed:
+            return 0
         tree = cKDTree([p.pos for p in others])
-        distances, _ = tree.query(
-            [p.pos for p in added_particles if p is not frag_atom]
-        )
+        distances, _ = tree.query(placed)
         n_clashes = int((distances < cutoff).sum())
         if n_clashes:
             logger.warning(
-                f"{n_clashes} atoms of the attached fragment sit within "
+                f"{n_clashes} placed atoms sit within "
                 f"{cutoff * 10:.1f} A of existing atoms (closest: "
                 f"{distances.min() * 10:.2f} A). Relax the structure before "
                 "simulating (e.g. relax_fragments(), which holds the "
