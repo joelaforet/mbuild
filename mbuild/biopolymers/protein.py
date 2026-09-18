@@ -293,10 +293,43 @@ class Protein(Compound):
             _matches_agree(candidates, group)
             for candidates, group in zip(all_candidates, groups)
         ]
+        self._warn_on_renamed_hydrogens(groups, matches)
 
         self._build(groups, matches, conects, crosslink_orders)
         if box is not None:
             self.box = box
+
+    @staticmethod
+    def _warn_on_renamed_hydrogens(groups, matches):
+        """Warn once when hydrogens were assigned by geometry and renamed.
+
+        The matcher places a hydrogen whose name no template carries on
+        the nearest heavy atom and gives it that atom's CCD hydrogen
+        name (see ``matching._hydrogen_candidates_by_geometry``). The
+        particles, and every file written from them, then carry the
+        CCD names and not the names of the input file. One warning for
+        the whole load says so, with an example, so the user is not
+        surprised by the renamed atoms and can check the placement.
+        """
+        renamed = 0
+        example = None
+        for group, match in zip(groups, matches):
+            hit = False
+            for record in group.records:
+                atom = match.record_atoms[id(record)]
+                if record.name != atom.name and atom.element.upper() == "H":
+                    hit = True
+                    if example is None:
+                        example = f"{record.name} of {group.label} is now {atom.name}"
+            renamed += hit
+        if renamed:
+            logger.warning(
+                f"{renamed} residues carry hydrogen names that no residue "
+                f"template uses (for example, {example}). Each such "
+                "hydrogen was assigned to the heavy atom nearest to it "
+                "and renamed to the CCD name. Files written from this "
+                "structure carry the CCD names."
+            )
 
     def _build(self, groups, matches, conects, crosslink_orders):
         """Build chains, residues, particles, and intra-residue bonds."""

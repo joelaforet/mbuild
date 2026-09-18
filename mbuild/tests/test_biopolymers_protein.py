@@ -208,6 +208,42 @@ class TestProteinLoad(BaseTest):
             == [-1] * 5 + [0] + [1] * 5
         )
 
+    def test_pymol_generic_hydrogen_names(self, tmp_path, caplog):
+        # Tests that a file whose hydrogens carry the generic names a
+        # preparation tool such as PyMOL's h_add writes (H01, H02, ...)
+        # loads, that every hydrogen comes out with its CCD name, and
+        # that one warning for the whole load names the renaming. This
+        # is needed because such a file is the common case for a user
+        # who protonated a structure in a viewer, and the templates
+        # know no such names. The test rewrites the hydrogen names of
+        # the bundled 8ciq asset per residue and compares the loaded
+        # atom names against the load of the original file.
+        original = Protein(get_fn("8ciq.pdb"))
+        lines = []
+        counters = {}
+        for line in Path(get_fn("8ciq.pdb")).read_text().splitlines():
+            if line.startswith("ATOM") and line[76:78].strip() == "H":
+                key = line[17:27]
+                counters[key] = counters.get(key, 0) + 1
+                line = f"{line[:12]} H{counters[key]:02d}{line[16:]}"
+            lines.append(line)
+        renamed = tmp_path / "8ciq_pymol_names.pdb"
+        renamed.write_text("\n".join(lines) + "\n")
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein = Protein(str(renamed))
+        warnings = [r for r in caplog.records if "hydrogen names" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "H01 of" in warnings[0].getMessage()
+        assert protein.n_particles == original.n_particles
+        assert protein.n_bonds == original.n_bonds
+        for before, after in zip(original.residues(), protein.residues()):
+            assert after.name == before.name
+            assert after.template.description == before.template.description
+            assert sorted(p.name for p in after.particles()) == sorted(
+                p.name for p in before.particles()
+            )
+        assert not any(p.name.startswith("H0") for p in protein.particles())
+
     def test_amber_digit_first_hydrogen_names(self):
         # Tests that a capped arginine written with digit-first
         # hydrogen names (2HB, 1HH1) loads with the canonical names of
