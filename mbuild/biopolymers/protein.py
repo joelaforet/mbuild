@@ -50,6 +50,7 @@ from mbuild.biopolymers.matching import (
     _matches_agree,
     _ter_break_reason,
 )
+from mbuild.biopolymers.mutate import _mutate
 from mbuild.biopolymers.protein_pdb_io import (
     _check_residue_membership,
     _parse_pdb,
@@ -1293,3 +1294,105 @@ class Protein(Compound):
         >>> protein.protonate(63, "NZ", chain_id="A")
         """
         return _protonate(self, resnum, atom_name, chain_id, icode)
+
+    def mutate(
+        self,
+        resnum,
+        to,
+        *,
+        chain_id=None,
+        icode="",
+        resname=None,
+        stereo=None,
+        relax=True,
+    ):
+        """Replace the side chain of one residue, keeping its backbone in place.
+
+        The old side chain, every atom beyond the bond from ``CA`` to
+        its one heavy non-backbone neighbour (``CB`` in the canonical
+        residues), leaves. The new side chain is built from a CCD
+        component or taken from a fragment, aligned along that old bond
+        direction with the ``Port`` machinery that ``attach`` uses, and
+        bonded to ``CA``. Its atoms then move into the residue, the
+        residue takes the new name, and its definition is re-matched, so
+        ``template``, ``formal_charge`` and ``atom_formal_charges``
+        describe the mutant. The backbone atoms ``N``, ``CA``, ``C``,
+        ``O`` and their hydrogens keep their coordinates. When the new
+        side chain overlaps other atoms, it is relaxed together with the
+        side chains within 4 A of it, with every backbone atom fixed.
+
+        A CCD component gives the side chain in its default protonation
+        state, which is the charged form for LYS, ARG, ASP and GLU.
+        Call ``deprotonate`` or ``protonate`` afterwards for another
+        state.
+
+        Parameters
+        ----------
+        resnum : int
+            Residue number of the residue to mutate.
+        to : str or mbuild.Compound
+            The new side chain. A string is a CCD code of an alpha amino
+            acid, canonical (``"PHE"``) or not (``"4II"``,
+            p-azido-L-phenylalanine). The component supplies the atom
+            names, the chemistry and the geometry; everything but its
+            side chain is discarded. A code the bundled library does not
+            hold needs a Protein built with ``download=True``.
+            A Compound is a side chain alone, with one atom marked as the
+            bond site, as ``prepare_fragment("*Cc1ccccc1", "PHE")``
+            builds it. The marked atom bonds to ``CA`` in place of one
+            of its hydrogens.
+        chain_id : str, optional
+            Chain of the residue; required when residue numbers repeat
+            across chains.
+        icode : str, optional
+            Insertion code of the residue.
+        resname : str, optional
+            Residue name for a Compound side chain, of three characters
+            or fewer. A Residue input keeps its own name when this is
+            omitted. Ignored for a CCD code.
+        stereo : {"L", "D"}, optional
+            Handedness of the alpha carbon after the mutation. ``"L"``
+            or ``"D"`` flips the alpha hydrogen and the side chain when
+            the residue has the other handedness. The default for a
+            CCD code is the handedness of the component, read from its
+            ideal coordinates, so ``"PHE"`` gives L-phenylalanine and
+            ``"DPN"`` gives D-phenylalanine whatever the residue was.
+            The default for a fragment is the current handedness of
+            the residue, which puts the new ``CB`` where the old one
+            was. A glycine has no handedness; there a fragment gives
+            an L residue.
+        relax : bool, optional, default=True
+            When the placed side chain overlaps existing atoms, minimize
+            with only the new atoms free (see ``relax_fragments``).
+
+        Returns
+        -------
+        Residue
+            The mutated residue, the same object as before the call.
+
+        Raises
+        ------
+        MBuildError
+            When the residue lacks ``N``, ``CA`` or ``C``; when the
+            side chain cannot be removed because it bonds the backbone
+            twice, as in proline; when the target is proline, for the
+            same reason; when the CCD code is not an alpha amino acid;
+            or when no definition of the new residue describes the
+            result.
+
+        Examples
+        --------
+        >>> protein.mutate(1381, "4II", chain_id="A")   # serine to AzF
+        >>> protein.mutate(1500, "CYS", chain_id="A")
+        >>> protein.mutate(7, "ALA", chain_id="A", stereo="D")
+        """
+        return _mutate(
+            self,
+            resnum,
+            to,
+            chain_id=chain_id,
+            icode=icode,
+            resname=resname,
+            stereo=stereo,
+            relax=relax,
+        )
