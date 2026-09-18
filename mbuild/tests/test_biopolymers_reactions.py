@@ -118,6 +118,45 @@ class TestReactionStrings(BaseTest):
         assert len(records) == 2
         assert all(r["residue_names"] == ("4II", "PRG") for r in records)
 
+    def test_merge_writes_the_click_product_as_one_residue(self, azf_protein):
+        # Tests that merge=True puts the alkyne fragment's atoms into
+        # the 4II residue, so the triazole product is one residue with
+        # the fragment's charges folded in, no bond record, and no
+        # template. This is needed because a residue library declares
+        # one crosslink per residue, so a ring closure between two
+        # residues cannot be described; as one residue it can, from the
+        # residue's own atoms and bonds. The test renames the residue
+        # as a user would and checks the written file reloads nothing
+        # under the old name.
+        protein = azf_protein
+        azf = protein.get_residue(5, chain_id="A")
+        n_atoms, n_residues = azf.n_particles, len(list(protein.residues()))
+        n_records = len(protein.cross_bonds)
+        result = protein.attach(
+            prepare_fragment("CC#C", "PRG"),
+            resnum=5,
+            atom_name="N3",
+            chain_id="A",
+            reaction="azide-alkyne triazole",
+            merge=True,
+        )
+        assert result is azf
+        assert azf.n_particles == n_atoms + 7
+        assert len(list(protein.residues())) == n_residues
+        assert len(protein.cross_bonds) == n_records
+        assert azf.template is None
+        assert azf.atom_formal_charges == {} and azf.formal_charge == 0
+        names = [p.name for p in azf.particles()]
+        assert len(names) == len(set(names))
+        ca = protein.get_atom(5, "CA", chain_id="A")
+        assert protein.get_atom(5, "N1", chain_id="A") is not None
+        azf.name = "TZ1"
+        mol = protein.to_rdkit()
+        assert any(
+            a.GetPDBResidueInfo().GetResidueName() == "TZ1" for a in mol.GetAtoms()
+        )
+        assert ca.parent is azf
+
     def test_reaction_written_fragment_first_still_matches(self, azf_protein):
         # Tests that a reaction whose first template is the fragment is
         # accepted, because attach() tries the two orders. This is

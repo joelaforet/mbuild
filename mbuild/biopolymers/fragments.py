@@ -104,30 +104,49 @@ def _wrap_in_residue(compound, fragment_resname):
         # The compound is itself a particle; add it directly.
         residue.add(compound)
     else:
-        particles = list(compound.particles())
-        bonds = [
-            (particle1, particle2, data["bond_order"])
-            for particle1, particle2, data in compound.bonds(return_bond_order=True)
-        ]
-        ports = list(compound.all_ports())
-        for part in particles + ports:
-            part.parent.children.remove(part)
-            part.parent = None
-        for particle in particles:
-            # Compound.add removes the parent from the bond graph only
-            # when the added child carries a graph. Give each detached
-            # particle the single-node graph a standalone particle has,
-            # so the Residue itself does not stay in the graph as a
-            # spurious particle node.
-            particle.bond_graph = BondGraph()
-            particle.bond_graph.add_node(particle)
-        residue.add(particles)
-        for port in ports:
-            residue.add(port)
-        for particle1, particle2, order in bonds:
-            residue.add_bond((particle1, particle2), bond_order=order)
+        _move_into_residue(compound, residue)
     logger.info(f"Fragment {compound.name!r} wrapped into residue {resname!r}.")
     return residue
+
+
+def _move_into_residue(compound, residue):
+    """Move the particles, ports and bonds of a compound into a residue.
+
+    The particles become direct children of ``residue`` and every bond
+    is added again with its bond order. ``compound`` is left empty.
+    ``_wrap_in_residue`` uses this to flatten a fragment into a new
+    residue, and ``Protein.mutate`` uses it to move a placed side chain
+    into the residue it now belongs to.
+
+    Parameters
+    ----------
+    compound : mbuild.Compound
+        The compound to empty. It must be detached from any Protein.
+    residue : Residue
+        The residue that receives the particles.
+    """
+    particles = list(compound.particles())
+    bonds = [
+        (particle1, particle2, data["bond_order"])
+        for particle1, particle2, data in compound.bonds(return_bond_order=True)
+    ]
+    ports = list(compound.all_ports())
+    for part in particles + ports:
+        part.parent.children.remove(part)
+        part.parent = None
+    for particle in particles:
+        # Compound.add removes the parent from the bond graph only
+        # when the added child carries a graph. Give each detached
+        # particle the single-node graph a standalone particle has,
+        # so the Residue itself does not stay in the graph as a
+        # spurious particle node.
+        particle.bond_graph = BondGraph()
+        particle.bond_graph.add_node(particle)
+    residue.add(particles)
+    for port in ports:
+        residue.add(port)
+    for particle1, particle2, order in bonds:
+        residue.add_bond((particle1, particle2), bond_order=order)
 
 
 def _ensure_unique_atom_names(residue):

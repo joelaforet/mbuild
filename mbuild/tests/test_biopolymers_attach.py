@@ -45,6 +45,42 @@ class TestProteinModify(BaseTest):
     def acetone(self):
         return mb.load("CC(C)=O", smiles=True)
 
+    def test_attach_merge_joins_the_site_residue(self, protein_6m03, acetone):
+        # Tests that merge=True adds the fragment's atoms to the site
+        # residue instead of a new residue: the residue count is
+        # unchanged, the atoms carry names unique in the residue, the
+        # bond is made, no record is written, and the residue is
+        # returned. This is needed for products that a residue library
+        # must describe as one component. A fragment of several
+        # residues is refused.
+        protein = protein_6m03
+        lys = protein.get_residue(5, chain_id="A")
+        n_atoms, n_residues = lys.n_particles, len(list(protein.residues()))
+        result = protein.attach(
+            acetone,
+            "C1",
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            merge=True,
+            relax=False,
+        )
+        assert result is lys
+        assert len(list(protein.residues())) == n_residues
+        assert lys.n_particles == n_atoms - 1 + 9  # one H left, acetone lost one
+        names = [p.name for p in lys.particles()]
+        assert len(names) == len(set(names))
+        assert lys.template is None
+        assert not [b for b in protein.cross_bonds if b.residue1 is lys]
+        nz = protein.get_atom(5, "NZ", chain_id="A")
+        assert any(
+            p.parent is lys
+            and p.name != "CE"
+            and p.element.symbol == "C"
+            and p.name not in ("CA", "C", "CB", "CG", "CD")
+            for p in nz.direct_bonds()
+        )
+
     def test_attach(self, protein_6m03, acetone):
         # Tests that attach() substitutes one hydrogen on each side,
         # bonds the named atoms, adds the fragment as its own HETATM
