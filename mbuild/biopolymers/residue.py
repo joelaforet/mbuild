@@ -99,3 +99,6 @@ class InterResidueBond:
     order: int = 1
     leaving1: tuple = ()
     leaving2: tuple = ()
+    #: The reaction string that made the bond, or None for a plain
+    #: substitution of leaving atoms. See ``mbuild.biopolymers.reactions``.
+    reaction: str = None
