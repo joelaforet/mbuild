@@ -255,6 +255,129 @@ def fragment_from_smiles(smiles, resname):
     return residue
 
 
+def draw_fragment(compound, highlight=(), size=(700, 450), hydrogens=True):
+    """Draw a fragment in 2D with every atom labelled by its name.
+
+    ``attach`` and ``mutate`` address atoms by name, and a fragment that
+    ``prepare_fragment`` or ``fragment_from_pdb`` built carries names
+    the caller has not chosen. This drawing shows them, so the caller
+    can read off the atom that bonds (``fragment_atom_name``) and the
+    atom that leaves (``fragment_leaving_atom_names``). Atoms recorded
+    as bond sites in ``Residue.link_atoms`` are circled in blue, and
+    any name in ``highlight`` is circled in red. In a fragment of
+    several residues each residue's atoms sit on a tint of their own,
+    and a legend names the residues, so ``fragment_resnum`` can be
+    read off as well.
+
+    Parameters
+    ----------
+    compound : mbuild.Compound
+        A fragment: a ``Residue``, or a Compound of ``Residue`` children.
+    highlight : str or sequence of str, optional
+        Atom names to circle in red, for example the leaving atom you
+        intend to name.
+    size : tuple of int, optional, default=(700, 450)
+        Width and height of the drawing in pixels.
+    hydrogens : bool, optional, default=True
+        Draw the hydrogens. They carry the names that leave most
+        often, so they are shown by default; a large fragment reads
+        better without them.
+
+    Returns
+    -------
+    IPython.display.SVG or str
+        The drawing, shown inline when returned from a notebook cell.
+        The SVG text when IPython is not installed.
+    """
+    from rdkit import Chem
+    from rdkit.Chem import rdDepictor
+    from rdkit.Chem.Draw import rdMolDraw2D
+
+    if isinstance(highlight, str):
+        highlight = [highlight]
+    residues = (
+        [compound]
+        if isinstance(compound, Residue)
+        else [child for child in compound.successors() if isinstance(child, Residue)]
+    ) or [compound]
+    several = len(residues) > 1
+    orders = {
+        1.0: Chem.BondType.SINGLE,
+        2.0: Chem.BondType.DOUBLE,
+        3.0: Chem.BondType.TRIPLE,
+    }
+    # Pastel tints, one per residue; none of them blue or red, which
+    # mark the bond site and the highlighted atoms.
+    tints = [
+        (0.88, 1.0, 0.88),
+        (1.0, 0.95, 0.8),
+        (0.95, 0.88, 1.0),
+        (0.9, 0.9, 0.9),
+        (0.85, 1.0, 1.0),
+        (1.0, 0.92, 0.85),
+    ]
+    editable = Chem.RWMol()
+    index = {}
+    labels = {}
+    colors = {}
+    legend = []
+    for number, residue in enumerate(residues):
+        charges = getattr(residue, "atom_formal_charges", {})
+        sites = set(getattr(residue, "link_atoms", {}).values())
+        tint = tints[number % len(tints)]
+        if several:
+            legend.append(f"{residue.name} {residue.resnum}")
+        for particle in residue.particles():
+            if not hydrogens and particle.element.symbol == "H":
+                continue
+            atom = Chem.Atom(particle.element.symbol)
+            atom.SetFormalCharge(charges.get(particle.name, 0))
+            atom.SetNoImplicit(True)
+            i = editable.AddAtom(atom)
+            index[particle] = i
+            labels[i] = particle.name
+            if several:
+                colors[i] = tint
+            if particle.name in sites:
+                colors[i] = (0.4, 0.55, 1.0)
+            if particle.name in highlight:
+                colors[i] = (1.0, 0.35, 0.35)
+    for particle1, particle2, data in compound.bonds(return_bond_order=True):
+        if particle1 in index and particle2 in index:
+            order = orders.get(float(data["bond_order"]), Chem.BondType.SINGLE)
+            editable.AddBond(index[particle1], index[particle2], order)
+    mol = editable.GetMol()
+    try:
+        Chem.SanitizeMol(mol)
+    except Chem.rdchem.MolSanitizeException:  # a cut fragment may not sanitize
+        mol.UpdatePropertyCache(strict=False)
+    rdDepictor.Compute2DCoords(mol)
+    for i, label in labels.items():
+        mol.GetAtomWithIdx(i).SetProp("atomNote", label)
+    drawer = rdMolDraw2D.MolDraw2DSVG(*size)
+    options = drawer.drawOptions()
+    options.annotationFontScale = 0.65
+    options.legendFontSize = 14
+    caption = []
+    if several:
+        caption.append("residues, by tint: " + ", ".join(legend))
+    caption.append("blue: bond site; red: highlighted")
+    rdMolDraw2D.PrepareAndDrawMolecule(
+        drawer,
+        mol,
+        legend="   |   ".join(caption),
+        highlightAtoms=list(colors),
+        highlightAtomColors=colors,
+    )
+    drawer.FinishDrawing()
+    svg = drawer.GetDrawingText()
+    try:
+        from IPython.display import SVG
+    except ImportError:
+        return svg
+    return SVG(svg)
+
+
 def fragment_from_ccd(code, link_atom, library=None):
     """Build a fragment Residue from a Chemical Component Dictionary entry.
 

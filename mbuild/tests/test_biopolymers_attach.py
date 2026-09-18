@@ -81,6 +81,30 @@ class TestProteinModify(BaseTest):
             for p in nz.direct_bonds()
         )
 
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_draw_fragment_labels_atoms(self):
+        # Tests that draw_fragment returns an SVG drawing for a single
+        # residue and for a multi-residue glycan, with and without
+        # hydrogens, and accepts a highlighted name. The labels are
+        # glyph paths in the SVG, so the test checks that a drawing is
+        # produced and that the inputs a user would pass are accepted;
+        # the drawing itself is what a user reads the atom names from
+        # before choosing fragment_atom_name and the leaving atom.
+        from mbuild.biopolymers import draw_fragment
+
+        def text(drawing):
+            return drawing.data if hasattr(drawing, "data") else drawing
+
+        octanoyl = prepare_fragment("*C(=O)CCCCCCC", "OC8")
+        assert text(draw_fragment(octanoyl)).startswith("<?xml") or "<svg" in text(
+            draw_fragment(octanoyl)
+        )
+        glycan = fragment_from_pdb(get_fn("glycam_G57321FI.pdb"))
+        full = text(draw_fragment(glycan, highlight="O1"))
+        heavy = text(draw_fragment(glycan, highlight=["O1", "C1"], hydrogens=False))
+        assert "<svg" in full and "<svg" in heavy
+        assert len(heavy) < len(full)
+
     def test_attach(self, protein_6m03, acetone):
         # Tests that attach() substitutes one hydrogen on each side,
         # bonds the named atoms, adds the fragment as its own HETATM
