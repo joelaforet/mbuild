@@ -328,46 +328,78 @@ class TestProteinModify(BaseTest):
         not (has_hoomd and has_openmm),
         reason="relax_fragments needs mbuild.simulation (hoomd) and openmm",
     )
-    def test_relax_fragments(self, protein_6m03):
-        # Tests that relax_fragments() pulls a clashing attached
-        # fragment out of steric overlap while the protein stays fixed.
-        # This is needed because attach() places fragments rigidly, and
-        # relax=False leaves any overlap in place for a later explicit
-        # relax call; this is the only test of that call. It passes
-        # platform="CPU" because a downstream consumer chooses the
-        # OpenMM platform, and the name reaches
-        # Platform.getPlatformByName. The test attaches a bulky fragment
-        # with relax=False, counts fragment atoms within the 0.2 nm
-        # clash cutoff of protein atoms before and after
-        # relax_fragments(), and asserts the count decreased while the
-        # protein coordinates did not change.
+    def test_relax_fragments(self, protein_6m03, caplog):
+        # Tests that the relaxation attach() runs pulls a clashing bulky
+        # fragment out of steric overlap while the protein stays fixed,
+        # and leaves every bond intact; and that the direct
+        # relax_fragments() call refuses to return a torn fragment. This
+        # is needed because attach() places fragments rigidly, and a
+        # minimizer started from atoms 0.4 A apart tears bonds rather
+        # than untangling them: attach() first turns the fragment to a
+        # clear pose, and relax_fragments() checks its result and puts
+        # the positions back with a warning when a bond was stretched
+        # beyond recognition. The test attaches a triphenylmethyl group
+        # to LYS 5 with and without relaxation and compares the clash
+        # counts, the bond lengths and the protein coordinates.
         from scipy.spatial import cKDTree
 
-        protein = protein_6m03
         bulky = mb.load("C(c1ccccc1)(c1ccccc1)c1ccccc1", smiles=True)
-        protein.attach(
-            bulky,
-            "C1",
-            resnum=5,
-            atom_name="NZ",
-            chain_id="A",
-            fragment_resname="TPM",
-            relax=False,
-        )
-        fragment_atoms = set(protein.get_residue(307, chain_id="A").particles())
-        others = [p for p in protein.particles() if p not in fragment_atoms]
 
-        def clash_count():
-            tree = cKDTree([p.pos for p in others])
-            distances, _ = tree.query([p.pos for p in fragment_atoms])
-            return int((distances < 0.1).sum())
+        def attach(protein, relax):
+            protein.attach(
+                bulky,
+                "C1",
+                resnum=5,
+                atom_name="NZ",
+                chain_id="A",
+                fragment_resname="TPM",
+                relax=relax,
+            )
+            fragment = set(protein.get_residue(307, chain_id="A").particles())
+            others = [p for p in protein.particles() if p not in fragment]
+            distances, _ = cKDTree([p.pos for p in others]).query(
+                [p.pos for p in fragment]
+            )
+            lengths = [
+                np.linalg.norm(a.pos - b.pos)
+                for a, b in protein.bonds()
+                if a in fragment or b in fragment
+            ]
+            return int((distances < 0.1).sum()), lengths, others
 
-        protein_positions = np.array([p.pos for p in others])
-        before = clash_count()
-        assert before > 0
-        protein.relax_fragments(n_steps=50, platform="CPU")
-        assert clash_count() < before
-        assert np.allclose([p.pos for p in others], protein_positions)
+        rigid = protein_6m03
+        relaxed = mb.clone(protein_6m03)
+        clashes_rigid, _, others_rigid = attach(rigid, relax=False)
+        protein_positions = np.array([p.pos for p in others_rigid])
+        clashes_relaxed, lengths, others_relaxed = attach(relaxed, relax=True)
+        assert clashes_rigid > 0
+        assert clashes_relaxed < clashes_rigid
+        # Intact means no bond stretched toward breaking; the generic
+        # force field can leave a bond a tenth or two long, which the
+        # real force field downstream corrects.
+        assert all(0.09 < length < 0.22 for length in lengths)
+        backbone = [p for p in others_relaxed if p.name in ("N", "CA", "C", "O")]
+        backbone_rigid = [p for p in others_rigid if p.name in ("N", "CA", "C", "O")]
+        assert np.allclose([p.pos for p in backbone], [p.pos for p in backbone_rigid])
+
+        # The direct call on the rigid placement, with no fit before it.
+        # Either the minimizer copes and every bond stays intact, or it
+        # tears the fragment, in which case the positions are kept and
+        # a warning names the worst bond. A torn fragment is never
+        # returned.
+        before = np.array([p.pos for p in rigid.particles()])
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            rigid.relax_fragments(n_steps=50, platform="CPU")
+        fragment = set(rigid.get_residue(307, chain_id="A").particles())
+        lengths = [
+            np.linalg.norm(a.pos - b.pos)
+            for a, b in rigid.bonds()
+            if a in fragment or b in fragment
+        ]
+        if "stretched" in caplog.text:
+            assert np.allclose([p.pos for p in rigid.particles()], before)
+        else:
+            assert all(0.09 < length < 0.22 for length in lengths)
 
     def test_add_port_at(self, protein_6m03):
         # Tests add_port_at, the low-level alternative to attach(). It

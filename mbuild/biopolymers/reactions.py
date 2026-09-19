@@ -52,7 +52,7 @@ REACTIONS = {
     # so a dye's other double bonds do not match.
     "thiol-maleimide": (
         "[S:1][H:2].[O:5]=[C:6]1[N:7][C:8](=[O:9])[C:3]=[C:4]1"
-        ">>[S:1][C:3]1[C:4]([H:2])[C:8](=[O:9])[N:7][C:6]1=[O:5]"
+        ">>[S:1][C:3]1[C:8](=[O:9])[N:7][C:6](=[O:5])[C:4]1[H:2]"
     ),
     # Azide plus alkyne to a 1,2,3-triazole (a click reaction). Both new
     # ring bonds form, and the azide charges vanish.
