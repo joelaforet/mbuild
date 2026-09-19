@@ -61,6 +61,7 @@ from mbuild.biopolymers.protein_pdb_io import (
     write_pdb,
 )
 from mbuild.biopolymers.residue import Chain, InterResidueBond, Residue
+from mbuild.box import Box
 from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
 from mbuild.port import Port
@@ -1097,13 +1098,56 @@ class Protein(Compound):
         from mbuild.simulation import OpenMMSimulation
 
         mobile = set(mobile)
-        simulation = OpenMMSimulation(
-            self, forcefield=None, kick=False, platform=platform
-        )
-        for index, particle in enumerate(self.particles()):
-            if particle not in mobile:
-                simulation.system.setParticleMass(index, 0.0)
-        simulation.minimize(n_steps=n_steps, tolerance=tolerance)
+        bonds = [
+            (a, b, np.linalg.norm(a.pos - b.pos))
+            for a, b in self.bonds()
+            if a in mobile or b in mobile
+        ]
+        before = {particle: particle.pos.copy() for particle in mobile}
+        # The box of a loaded protein is the crystal cell of the input
+        # file, which is metadata, not a simulation box: a protein that
+        # is longer than its cell has periodic images on top of itself.
+        # The relaxation therefore runs in a box that holds the whole
+        # structure with room for the cutoff on every side, so that no
+        # image comes near any atom, and the cell is put back afterwards.
+        # A box is kept, rather than none, because a system without one
+        # has no cutoff and every force call visits every pair of atoms.
+        box = self.box
+        extent = self.xyz.max(axis=0) - self.xyz.min(axis=0)
+        self.box = Box(lengths=extent + 3.0)
+        try:
+            simulation = OpenMMSimulation(
+                self, forcefield=None, kick=False, platform=platform
+            )
+            for index, particle in enumerate(self.particles()):
+                if particle not in mobile:
+                    simulation.system.setParticleMass(index, 0.0)
+            self._descend_in_bounded_steps(simulation, mobile)
+            simulation.minimize(n_steps=n_steps, tolerance=tolerance)
+        finally:
+            self.box = box
+        # The generic force field can tear a molecule apart when the
+        # start is bad enough: the repulsion between overlapping atoms
+        # then outweighs every bond term. A torn fragment must never be
+        # returned as if it were relaxed. Any bond that ended more than
+        # half again its starting length puts the positions back and
+        # warns, so the caller knows the site needs another look.
+        torn = [
+            (a.name, b.name, np.linalg.norm(a.pos - b.pos) * 10)
+            for a, b, length in bonds
+            if np.linalg.norm(a.pos - b.pos) > 1.5 * max(length, 0.1)
+        ]
+        if torn:
+            for particle, position in before.items():
+                particle.pos = position
+            worst = max(torn, key=lambda t: t[2])
+            logger.warning(
+                f"Relaxation stretched {len(torn)} bonds beyond recognition "
+                f"(worst {worst[0]}-{worst[1]} at {worst[2]:.1f} A), so the "
+                "positions before it were kept. The placed atoms overlap the "
+                "protein too badly for the generic force field; choose another "
+                "site or fragment conformer, or relax with a real force field."
+            )
 
     # ------------------------------------------------------------------
     # Functionalization
@@ -1610,6 +1654,17 @@ class Protein(Compound):
         new_ports = [port for port in self.all_ports() if port not in ports_before]
         if new_ports:
             self.remove(new_ports)
+        # A hydrogen that crossed to the fragment now moves with it, in
+        # the relaxation and in any conformer the relaxation tries.
+        placed.extend(
+            atom
+            for atom in moving
+            if atom not in in_fragment
+            and any(
+                (a is atom and b in in_fragment) or (b is atom and a in in_fragment)
+                for a, b, _ in plan.formed
+            )
+        )
         for particle, charge in plan.charges.items():
             residue = particle.parent
             if charge:
@@ -1688,6 +1743,12 @@ class Protein(Compound):
                 if np.linalg.norm(a.pos - b.pos) > longest
             ]
 
+        # The side chains around the site move too. A fragment bonded to
+        # a residue in a groove cannot clear the protein while every
+        # protein atom stands still; a real minimization would move
+        # those side chains, so this one does. The backbone keeps the
+        # coordinates of the file.
+        mobile = list(mobile) + self._side_chains_near(mobile)
         for _ in range(attempts):
             self._relax_particles(mobile, tolerance=1.0)
             if not open_bonds():
@@ -1742,7 +1803,10 @@ class Protein(Compound):
 
         def cost(x):
             positions = posed(x)
-            total = sum(
+            # The bond term weighs a hundred times the clash term: a pose
+            # that trades bond length for clearance is not a placement,
+            # since the minimizer that follows only removes overlap.
+            total = 100 * sum(
                 (np.linalg.norm(fixed.pos - positions[i]) - _PORT_SEPARATION) ** 2
                 for fixed, i in pairs
             )
@@ -1769,6 +1833,48 @@ class Protein(Compound):
         for particle, position in zip(particles, posed(best.x)):
             particle.pos = position
 
+    def _side_chains_near(self, placed, radius=0.4):
+        """Return the side-chain atoms of the protein within ``radius`` of placed atoms.
+
+        Backbone atoms (``N``, ``CA``, ``C``, ``O`` and their hydrogens)
+        are never returned, so a relaxation that frees these atoms keeps
+        the backbone where the file put it.
+
+        Parameters
+        ----------
+        placed : iterable of mbuild.Compound
+            The atoms the relaxation is about.
+        radius : float, optional, default=0.4
+            Distance in nm.
+        """
+        from scipy.spatial import cKDTree
+
+        placed = set(placed)
+        backbone = {
+            "N",
+            "CA",
+            "C",
+            "O",
+            "H",
+            "H2",
+            "H3",
+            "HA",
+            "HA2",
+            "HA3",
+            "OXT",
+            "HXT",
+        }
+        others = [
+            p for p in self.particles() if p not in placed and p.name not in backbone
+        ]
+        if not others or not placed:
+            return []
+        tree = cKDTree([p.pos for p in others])
+        near = set()
+        for hits in tree.query_ball_point([p.pos for p in placed], radius):
+            near.update(hits)
+        return [others[i] for i in sorted(near)]
+
     @staticmethod
     def _move_hydrogen_to(hydrogen, residue):
         """Move a hydrogen that changed partners into its new residue.
@@ -1790,6 +1896,81 @@ class Protein(Compound):
         if any(p.name == hydrogen.name for p in residue.particles()):
             hydrogen.name = Protein._free_hydrogen_name(residue)
         residue.add(hydrogen)
+
+    def _try_conformers(self, added, site_atom, frag_atom, count=8):
+        """Re-embed the placed atoms in other conformers and keep the clearest.
+
+        The conformer a fragment arrives in is one of many, and a long
+        flexible one may cross the protein in every rigid pose. This
+        builds an RDKit molecule from the placed atoms and their bonds,
+        embeds ``count`` conformers, fits each rigidly with the bond
+        kept at length, and keeps the pose whose closest contact with
+        the protein is largest. The original pose competes on the same
+        terms. Nothing is done when the molecule cannot be embedded.
+
+        Parameters
+        ----------
+        added : list of mbuild.Compound
+            The placed particles.
+        site_atom, frag_atom : mbuild.Compound
+            The two atoms of the new bond.
+        count : int, optional, default=8
+            Conformers to try.
+        """
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+
+        particles = list(added)
+        index = {particle: i for i, particle in enumerate(particles)}
+        orders = {
+            1.0: Chem.BondType.SINGLE,
+            1.5: Chem.BondType.AROMATIC,
+            2.0: Chem.BondType.DOUBLE,
+            3.0: Chem.BondType.TRIPLE,
+        }
+        editable = Chem.RWMol()
+        for particle in particles:
+            atom = Chem.Atom(particle.element.symbol)
+            charges = getattr(particle.parent, "atom_formal_charges", {})
+            atom.SetFormalCharge(charges.get(particle.name, 0))
+            atom.SetNoImplicit(True)
+            editable.AddAtom(atom)
+        for a, b, data in self.bonds(return_bond_order=True):
+            if a in index and b in index:
+                editable.AddBond(
+                    index[a],
+                    index[b],
+                    orders.get(float(data["bond_order"]), Chem.BondType.SINGLE),
+                )
+        mol = editable.GetMol()
+        try:
+            Chem.SanitizeMol(mol)
+            conformers = list(
+                AllChem.EmbedMultipleConfs(mol, numConfs=count, randomSeed=0)
+            )
+        except Exception:  # noqa: BLE001 - RDKit raises several unrelated types
+            conformers = []
+        if not conformers:
+            return
+        best = [particle.pos.copy() for particle in particles]
+        best_clearance = self._closest_contact(added, site_atom, frag_atom)
+        for conformer in conformers:
+            positions = np.array(mol.GetConformer(conformer).GetPositions()) / 10.0
+            # Put the bonding atom where it is now, then fit the rest.
+            positions += frag_atom.pos - positions[index[frag_atom]]
+            for particle, position in zip(particles, positions):
+                particle.pos = position
+            self._fit_placement(added, [(site_atom, frag_atom, 1.0)])
+            clearance = self._closest_contact(added, site_atom, frag_atom)
+            if clearance > best_clearance:
+                best_clearance = clearance
+                best = [particle.pos.copy() for particle in particles]
+        for particle, position in zip(particles, best):
+            particle.pos = position
+        logger.info(
+            f"Tried {len(conformers)} conformers of the placed fragment; the "
+            f"clearest sits {best_clearance * 10:.2f} A from the protein."
+        )
 
     @staticmethod
     def _free_hydrogen_name(residue):
@@ -2045,6 +2226,61 @@ class Protein(Compound):
             bond_order=float(bond_order),
         )
 
+    @staticmethod
+    def _descend_in_bounded_steps(simulation, mobile, max_step=0.005, rounds=200):
+        """Walk the mobile atoms down the force with a capped step per round.
+
+        A rigidly placed fragment can leave atoms a fraction of an
+        angstrom from the protein, where the repulsion is enormous. A
+        line-search minimizer started there takes a huge first step and
+        stretches bonds instead of untangling atoms. This walk moves
+        every mobile atom along its force by at most ``max_step`` nm per
+        round, so overlapping atoms slide apart while their bonds hold,
+        and stops as soon as the largest force is ordinary. The
+        minimizer then finishes from a start it can handle.
+
+        Parameters
+        ----------
+        simulation : mbuild.simulation.OpenMMSimulation
+            The built simulation; its context is created here.
+        mobile : set of mbuild.Compound
+            The particles that may move.
+        max_step : float, optional, default=0.005
+            Largest displacement per atom per round, in nm.
+        rounds : int, optional, default=200
+            Most rounds to take.
+        """
+        import openmm
+        import openmm.unit as u
+
+        simulation._create_simulation(
+            openmm.LangevinIntegrator(
+                300 * u.kelvin, 1.0 / u.picosecond, 0.001 * u.picoseconds
+            )
+        )
+        context = simulation.simulation.context
+        particles = list(simulation.compound.particles())
+        moving = np.array([particle in mobile for particle in particles])
+        positions = np.array(
+            context.getState(getPositions=True)
+            .getPositions(asNumpy=True)
+            .value_in_unit(u.nanometer)
+        )
+        for _ in range(rounds):
+            forces = np.array(
+                context.getState(getForces=True)
+                .getForces(asNumpy=True)
+                .value_in_unit(u.kilojoule_per_mole / u.nanometer)
+            )
+            forces[~moving] = 0.0
+            largest = np.linalg.norm(forces, axis=1).max()
+            if largest < 5000.0:
+                break
+            # Scale so that the most-pushed atom moves max_step; others less.
+            positions = positions + forces * (max_step / largest)
+            context.setPositions(positions * u.nanometer)
+        simulation.positions = context.getState(getPositions=True).getPositions()
+
     def _relax_if_clashing(self, added, site_atom, frag_atom, relax):
         """Relax the placed atoms when they overlap other atoms.
 
@@ -2067,6 +2303,16 @@ class Protein(Compound):
         clashes = self._warn_on_clashes(added, site_atom, frag_atom)
         if not (clashes and relax):
             return
+        # Port alignment fixes the fragment up to a turn about the new
+        # bond. Before the minimizer sees the overlap, turn and shift
+        # the fragment rigidly to the pose that keeps the bond at length
+        # and the fragment clear of the protein. A minimizer started from
+        # atoms 0.3 A apart tears bonds; from a clear pose it converges.
+        # A floppy fragment may have no clear rigid pose in the
+        # conformer it arrived in, so other conformers are tried too.
+        self._fit_placement(added, [(site_atom, frag_atom, 1.0)])
+        if self._closest_contact(added, site_atom, frag_atom) < 0.1:
+            self._try_conformers(added, site_atom, frag_atom)
         try:
             import mbuild.simulation  # noqa: F401
         except ImportError as error:
@@ -2081,8 +2327,8 @@ class Protein(Compound):
                 "rigid placement."
             )
             return
-        logger.info("Relaxing the placed atoms with the protein held fixed.")
-        self._relax_particles(added)
+        logger.info("Relaxing the placed atoms with the protein backbone held fixed.")
+        self._relax_until_bonded(added, [(site_atom, frag_atom, 1.0)])
         # The user asked for the relaxation and got it, so the result is
         # reported rather than warned about. Ordinary van der Waals
         # contacts near 2 A are expected after a minimization; only a

@@ -207,6 +207,24 @@ class TestReactionStrings(BaseTest):
         # One bond joins the sides; the moved hydrogen's new bond is not
         # a bond between residues and is not recorded.
         assert [b for b in protein.cross_bonds if b.reaction] == [record]
+        # The imide ring keeps every bond it had; only the C=C became C-C
+        # and the two new bonds (S-C and C-H) were added. A product
+        # template wired differently from the reactant ring would show
+        # up here as bonds removed and bonds added inside the fragment.
+        after = {
+            frozenset((a.name, b.name))
+            for a, b in protein.bonds()
+            if a.parent is record.residue2 and b.parent is record.residue2
+        }
+        fragment_bonds_before = {
+            frozenset((a.name, b.name))
+            for a, b in prepare_fragment("C1=CC(=O)N(C)C1=O", "MAL").bonds()
+        }
+        assert fragment_bonds_before <= after
+        assert len(after - fragment_bonds_before) == 1  # the moved hydrogen
+        for a, b in protein.bonds():
+            if a.parent is record.residue2 or b.parent is record.residue2:
+                assert 0.09 < np.linalg.norm(a.pos - b.pos) < 0.19
         bonded_carbon = next(
             p for p in sg.direct_bonds() if p.parent is record.residue2
         )
