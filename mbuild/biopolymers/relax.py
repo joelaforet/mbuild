@@ -143,8 +143,8 @@ def _relax_particles(protein, mobile, n_steps=0, tolerance=50.0, platform=None):
     """Minimize with every particle outside ``mobile`` held fixed.
 
     This is the minimization behind ``relax_fragments``, which
-    moves whole residues, and behind ``attach`` with ``merge=True``,
-    which moves atoms that now sit inside a residue whose backbone
+    moves whole residues, and behind ``attach`` with ``merge=True``
+    and ``mutate``, which move atoms inside a residue whose backbone
     must not move. The parameters are those of ``relax_fragments``;
     ``platform`` None means ``_default_platform()``.
     """
