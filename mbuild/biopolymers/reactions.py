@@ -32,8 +32,7 @@ string.
 
 from dataclasses import dataclass, field
 
-import numpy as np
-
+from mbuild.biopolymers.residue import _rdkit_mol
 from mbuild.exceptions import MBuildError
 
 __all__ = ["REACTIONS"]
@@ -116,26 +115,7 @@ def _query_mol(compound, particles):
     """
     from rdkit import Chem
 
-    orders = {value: getattr(Chem.BondType, key) for key, value in _BOND_ORDERS.items()}
-    residues = {}
-    for particle in particles:
-        residues.setdefault(id(particle.parent), particle.parent)
-    charges = {}
-    for residue in residues.values():
-        for name, charge in getattr(residue, "atom_formal_charges", {}).items():
-            for particle in residue.particles_by_name(name):
-                charges[particle] = charge
-    editable = Chem.RWMol()
-    index = {}
-    for particle in particles:
-        atom = Chem.Atom(particle.element.symbol)
-        atom.SetFormalCharge(charges.get(particle, 0))
-        atom.SetNoImplicit(True)
-        index[particle] = editable.AddAtom(atom)
-    for particle1, particle2, data in compound.bonds(return_bond_order=True):
-        if particle1 in index and particle2 in index:
-            order = orders.get(float(data["bond_order"]), Chem.BondType.SINGLE)
-            editable.AddBond(index[particle1], index[particle2], order)
+    editable, index = _rdkit_mol(compound, particles)
     mol = editable.GetMol()
     mol.UpdatePropertyCache(strict=False)
     Chem.FastFindRings(mol)
@@ -323,35 +303,3 @@ def plan_reaction(
             )
         plan.new_hydrogens.append(by_map[neighbours[0].GetAtomMapNum()])
     return plan
-
-
-def open_direction(atom):
-    """Return a unit vector into the open coordination site of an atom.
-
-    It points away from the mean of the unit vectors along the atom's
-    bonds. Unit vectors, not bond vectors, so that a long and a short
-    bond on a linear atom do not leave a spurious direction along the
-    axis. When that mean vanishes, the atom is linear or trigonal
-    planar, and the open site is perpendicular: to the plane of a
-    planar atom, which is where an addition to an alkene carbon goes,
-    or to the axis of a linear atom such as an alkyne carbon. It is
-    where a new bond or a new hydrogen goes when no leaving atom shows
-    the way.
-    """
-    vectors = []
-    for neighbour in atom.direct_bonds():
-        vector = neighbour.pos - atom.pos
-        vectors.append(vector / np.linalg.norm(vector))
-    if not vectors:
-        return np.array([1.0, 0.0, 0.0])
-    total = -np.sum(vectors, axis=0)
-    if np.linalg.norm(total) > 0.3:
-        return total / np.linalg.norm(total)
-    normal = np.cross(vectors[0], vectors[1]) if len(vectors) > 1 else np.zeros(3)
-    if np.linalg.norm(normal) < 1e-3:
-        # Linear: any perpendicular to the axis.
-        axis = np.array([1.0, 0.0, 0.0])
-        if abs(np.dot(vectors[0], axis)) > 0.9:
-            axis = np.array([0.0, 1.0, 0.0])
-        normal = np.cross(vectors[0], axis)
-    return normal / np.linalg.norm(normal)

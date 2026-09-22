@@ -17,7 +17,7 @@ from mbuild.biopolymers.ccd import (
     _parse_cif_blocks,
 )
 from mbuild.biopolymers.protein_pdb_io import _parse_pdb
-from mbuild.biopolymers.residue import Residue
+from mbuild.biopolymers.residue import Residue, _rdkit_mol
 from mbuild.bond_graph import BondGraph
 from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
@@ -113,6 +113,31 @@ def _wrap_in_residue(compound, fragment_resname):
     return residue
 
 
+def _detach_particles(particles):
+    """Take particles out of their parents so that ``Compound.add`` can re-add them.
+
+    mBuild has no operation that moves a particle between parents while
+    its bonds survive: ``Compound.remove`` drops the bonds as well. So
+    each particle is taken out of its parent's children and given the
+    single-node bond graph a standalone particle has. The last step
+    matters because ``Compound.add`` removes the parent from the bond
+    graph only when the added child carries a graph; without it the
+    receiving Residue would stay in the graph as a spurious node.
+    The bonds themselves live in the root's graph and are added again
+    by the caller.
+
+    Parameters
+    ----------
+    particles : iterable of mbuild.Compound
+        Particles, each with a parent.
+    """
+    for particle in particles:
+        particle.parent.children.remove(particle)
+        particle.parent = None
+        particle.bond_graph = BondGraph()
+        particle.bond_graph.add_node(particle)
+
+
 def _move_into_residue(compound, residue):
     """Move the particles, ports and bonds of a compound into a residue.
 
@@ -135,17 +160,10 @@ def _move_into_residue(compound, residue):
         for particle1, particle2, data in compound.bonds(return_bond_order=True)
     ]
     ports = list(compound.all_ports())
-    for part in particles + ports:
-        part.parent.children.remove(part)
-        part.parent = None
-    for particle in particles:
-        # Compound.add removes the parent from the bond graph only
-        # when the added child carries a graph. Give each detached
-        # particle the single-node graph a standalone particle has,
-        # so the Residue itself does not stay in the graph as a
-        # spurious particle node.
-        particle.bond_graph = BondGraph()
-        particle.bond_graph.add_node(particle)
+    for port in ports:
+        port.parent.children.remove(port)
+        port.parent = None
+    _detach_particles(particles)
     residue.add(particles)
     for port in ports:
         residue.add(port)
@@ -305,11 +323,6 @@ def draw_fragment(compound, highlight=(), size=(700, 450), hydrogens=True):
         else [child for child in compound.successors() if isinstance(child, Residue)]
     ) or [compound]
     several = len(residues) > 1
-    orders = {
-        1.0: Chem.BondType.SINGLE,
-        2.0: Chem.BondType.DOUBLE,
-        3.0: Chem.BondType.TRIPLE,
-    }
     # Pastel tints, one per residue; none of them blue or red, which
     # mark the bond site and the highlighted atoms.
     tints = [
@@ -320,25 +333,25 @@ def draw_fragment(compound, highlight=(), size=(700, 450), hydrogens=True):
         (0.85, 1.0, 1.0),
         (1.0, 0.92, 0.85),
     ]
-    editable = Chem.RWMol()
-    index = {}
+    particles = [
+        particle
+        for residue in residues
+        for particle in residue.particles()
+        if hydrogens or particle.element.symbol != "H"
+    ]
+    editable, index = _rdkit_mol(compound, particles)
     labels = {}
     colors = {}
     legend = []
     for number, residue in enumerate(residues):
-        charges = getattr(residue, "atom_formal_charges", {})
         sites = set(getattr(residue, "link_atoms", {}).values())
         tint = tints[number % len(tints)]
         if several:
             legend.append(f"{residue.name} {residue.resnum}")
         for particle in residue.particles():
-            if not hydrogens and particle.element.symbol == "H":
+            if particle not in index:
                 continue
-            atom = Chem.Atom(particle.element.symbol)
-            atom.SetFormalCharge(charges.get(particle.name, 0))
-            atom.SetNoImplicit(True)
-            i = editable.AddAtom(atom)
-            index[particle] = i
+            i = index[particle]
             labels[i] = particle.name
             if several:
                 colors[i] = tint
@@ -346,10 +359,6 @@ def draw_fragment(compound, highlight=(), size=(700, 450), hydrogens=True):
                 colors[i] = (0.4, 0.55, 1.0)
             if particle.name in highlight:
                 colors[i] = (1.0, 0.35, 0.35)
-    for particle1, particle2, data in compound.bonds(return_bond_order=True):
-        if particle1 in index and particle2 in index:
-            order = orders.get(float(data["bond_order"]), Chem.BondType.SINGLE)
-            editable.AddBond(index[particle1], index[particle2], order)
     mol = editable.GetMol()
     try:
         Chem.SanitizeMol(mol)
