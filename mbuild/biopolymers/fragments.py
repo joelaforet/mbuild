@@ -11,7 +11,11 @@ import logging
 from pathlib import Path
 
 from mbuild import clone
-from mbuild.biopolymers.ccd import CCDLibrary, _cif_category_rows, _parse_cif_blocks
+from mbuild.biopolymers.ccd import (
+    CCDLibrary,
+    _cif_category_rows,
+    _parse_cif_blocks,
+)
 from mbuild.biopolymers.protein_pdb_io import _parse_pdb
 from mbuild.biopolymers.residue import Residue
 from mbuild.bond_graph import BondGraph

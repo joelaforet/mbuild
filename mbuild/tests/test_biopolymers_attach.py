@@ -370,7 +370,6 @@ class TestProteinModify(BaseTest):
         rigid = protein_6m03
         relaxed = mb.clone(protein_6m03)
         clashes_rigid, _, others_rigid = attach(rigid, relax=False)
-        protein_positions = np.array([p.pos for p in others_rigid])
         clashes_relaxed, lengths, others_relaxed = attach(relaxed, relax=True)
         assert clashes_rigid > 0
         assert clashes_relaxed < clashes_rigid
