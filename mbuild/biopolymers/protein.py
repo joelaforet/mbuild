@@ -57,6 +57,7 @@ from mbuild.biopolymers.protein_pdb_io import (
     pdb_text,
     write_pdb,
 )
+from mbuild.biopolymers.protonation import _deprotonate, _protonate
 from mbuild.biopolymers.relax import _relax_particles
 from mbuild.biopolymers.residue import (
     Chain,
@@ -1166,3 +1167,129 @@ class Protein(Compound):
             reaction=reaction,
             merge=merge,
         )
+
+    def deprotonate(self, resnum, atom_name, chain_id=None, icode=""):
+        """Remove the acidic proton of one atom and update its charge.
+
+        The proton comes from the residue's matched template variant:
+        the acidic proton that the variant bonds to ``atom_name``. A new
+        variant is then constructed from that variant, with the proton
+        removed and the charge of the heavy atom decremented. The new
+        variant is assigned to the residue, so ``template``,
+        ``formal_charge`` and ``atom_formal_charges`` all describe the
+        deprotonated residue.
+
+        The template library is not searched, so the new variant can be
+        one that no library variant describes. A warning reports that
+        case, because a PDB written from such a residue does not reload.
+        A second warning reports two charged atoms that lie within
+        ``_SPLIT_CHARGE_MAX_BONDS`` bonds of each other.
+
+        The call changes nothing and logs a warning when the named atom
+        carries no acidic proton, for example because it is already
+        deprotonated. A notebook cell that calls this method therefore
+        runs a second time without an error.
+
+        The removed proton changes the protonation state of the
+        residue. The new state is recorded in ``residue.template``,
+        whose description names the absent proton. The proton is not a
+        leaving atom of a later bond, so it stays out of the
+        leaving-atom ledger and out of every bond record.
+
+        Parameters
+        ----------
+        resnum : int
+            Residue number of the target residue.
+        atom_name : str
+            Name of the heavy atom that loses the proton.
+        chain_id : str, optional
+            Chain of the target residue; required when residue numbers
+            repeat across chains.
+        icode : str, optional
+            Insertion code of the target residue.
+
+        Raises
+        ------
+        MBuildError
+            When the residue or the atom does not exist. The error
+            comes from ``get_residue`` and ``get_atom``.
+
+        Notes
+        -----
+        The method serves every site that reacts from its neutral or
+        anionic form. The sites are LYS NZ, SER OG, THR OG1, CYS SG,
+        TYR OH, and the ring nitrogens of HIS.
+
+        A protonated amine is not the reactive species in an acylation.
+        The neutral amine is the reactive species. The product of a
+        lysine N-acylation is a neutral secondary amide. It carries one
+        N-H and formal charge 0, as CCD component ALY does. Call this
+        method before ``attach``, so that the site starts from the
+        neutral form and the product carries the correct charge.
+
+        Examples
+        --------
+        >>> protein.deprotonate(63, "NZ", chain_id="A")
+        >>> protein.attach(fragment, resnum=63, atom_name="NZ", chain_id="A")
+        """
+        return _deprotonate(self, resnum, atom_name, chain_id, icode)
+
+    def protonate(self, resnum, atom_name, chain_id=None, icode=""):
+        """Add a proton to one atom and update its charge.
+
+        This is the mirror of ``deprotonate``. The proton is the one
+        that the CCD template of the residue bonds to ``atom_name``.
+        It is an acidic proton that the residue lost, or the proton of
+        a basic site such as the N-terminal amine. The new template
+        variant comes from the template library, so ``template``,
+        ``formal_charge`` and ``atom_formal_charges`` describe the
+        protonated residue, and a PDB written from it reloads.
+
+        ``deprotonate`` builds its new variant instead of matching one,
+        because a residue can lose a proton that no library variant
+        loses. Protonation is the opposite case: the library holds
+        every variant that carries an added proton, so the call selects
+        one and needs no ``_warn_if_variant_is_absent`` check.
+
+        The call changes nothing and logs a warning when the atom takes
+        no proton. That happens when the atom is already protonated, or
+        when it bonds to another residue. A notebook cell that calls
+        this method therefore runs a second time without an error.
+
+        The proton is placed at a standard bond length, in the most
+        open direction at the atom. The position ignores every other
+        atom, so run ``relax_fragments`` or an energy minimization
+        before a simulation.
+
+        Parameters
+        ----------
+        resnum : int
+            Residue number of the target residue.
+        atom_name : str
+            Name of the heavy atom that takes the proton.
+        chain_id : str, optional
+            Chain of the target residue; required when residue numbers
+            repeat across chains.
+        icode : str, optional
+            Insertion code of the target residue.
+
+        Raises
+        ------
+        MBuildError
+            When the residue or the atom does not exist. The error
+            comes from ``get_residue`` and ``_atom_of``.
+
+        Notes
+        -----
+        The method restores a site that ``deprotonate`` neutralized,
+        and it protonates a site that the loaded file left anionic,
+        such as the OD2 of an aspartate or the OXT of a C terminus. An
+        atom that carries an inter-residue bond takes no proton: the
+        bond uses the valence that the proton needs.
+
+        Examples
+        --------
+        >>> protein.deprotonate(63, "NZ", chain_id="A")
+        >>> protein.protonate(63, "NZ", chain_id="A")
+        """
+        return _protonate(self, resnum, atom_name, chain_id, icode)

@@ -29,6 +29,91 @@ logger = logging.getLogger(__name__)
 _PORT_SEPARATION = 0.15
 
 
+#: Length of a new X-H bond, in nm, keyed by the element symbol of the
+#: heavy atom X. The values are the standard single-bond lengths: N-H
+#: 1.01 A, O-H 0.96 A, S-H 1.34 A. Any other element gets
+#: ``_PROTON_BOND_LENGTH``, which is a rounded value near the three
+#: lengths.
+_PROTON_BOND_LENGTHS = {"N": 0.101, "O": 0.096, "S": 0.134}
+_PROTON_BOND_LENGTH = 0.100
+
+
+def _unit(vector):
+    """Return the vector scaled to length one, or unchanged if it is zero."""
+    norm = np.linalg.norm(vector)
+    return vector / norm if norm > 1e-8 else vector
+
+
+def _perpendicular(vector):
+    """Return a unit vector perpendicular to ``vector``."""
+    axis = np.array([1.0, 0.0, 0.0])
+    if abs(np.dot(_unit(vector), axis)) > 0.9:
+        axis = np.array([0.0, 1.0, 0.0])
+    return _unit(np.cross(vector, axis))
+
+
+def _proton_position(atom):
+    """Return a position for a proton added to ``atom``.
+
+    The proton goes in the most open direction at the atom, which is
+    the reverse of the sum of the unit vectors to its bonded neighbors
+    (``_open_direction``).
+    An atom with one neighbor has no such direction, because every
+    direction around that one bond is equally open. The proton then
+    goes at 109.47 degrees from the bond, which is the tetrahedral
+    angle. The direction lies in the plane of the bond and one atom
+    bonded to the neighbor. It points to the far side of the bond from
+    that atom. A hydroxyl placed this way is anti to that atom.
+
+    The result is a starting geometry. The bond length is correct and
+    the angle is a standard value, but the position ignores every other
+    atom. Run ``relax_fragments`` or an energy minimization to set the
+    exact angle and torsion.
+
+    This function computes the position. It does not use a ``Port``
+    and ``force_overlap``. ``force_overlap`` superposes a port of a
+    fragment on a port of the target and moves the whole fragment. The
+    added proton is one particle, and it holds no port. No fragment
+    moves, and no port is superposed. The direction comes from the
+    atoms already bonded to ``atom``. This function reads those atoms
+    directly.
+
+    Parameters
+    ----------
+    atom : mbuild.Compound
+        The heavy atom that takes the proton. It must carry at least
+        one bond.
+
+    Returns
+    -------
+    numpy.ndarray
+        The position of the proton, in nm.
+    """
+    length = _PROTON_BOND_LENGTHS.get(atom.element.symbol, _PROTON_BOND_LENGTH)
+    neighbors = sorted(atom.direct_bonds(), key=lambda particle: particle.name)
+    if len(neighbors) == 1:
+        bond = _unit(neighbors[0].pos - atom.pos)
+        far = sorted(
+            (
+                particle
+                for particle in neighbors[0].direct_bonds()
+                if particle is not atom
+            ),
+            key=lambda particle: particle.name,
+        )
+        across = _perpendicular(bond)
+        if far:
+            reference = far[0].pos - neighbors[0].pos
+            in_plane = reference - np.dot(reference, bond) * bond
+            if np.linalg.norm(in_plane) > 1e-8:
+                across = _unit(in_plane)
+        # cos(109.47 degrees) = -1/3 and sin(109.47 degrees) = sqrt(8)/3.
+        direction = -bond / 3.0 - across * np.sqrt(8.0) / 3.0
+    else:
+        direction = _open_direction(atom)
+    return atom.pos + _unit(direction) * length
+
+
 @lru_cache(maxsize=1)
 def _default_platform():
     """Return ``"CUDA"`` when OpenMM can run on a GPU here, else ``"CPU"``.
