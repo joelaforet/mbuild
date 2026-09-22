@@ -11,6 +11,7 @@ torn fragment: any bond it stretched puts the positions back.
 """
 
 import logging
+from functools import lru_cache
 
 import numpy as np
 
@@ -28,16 +29,43 @@ logger = logging.getLogger(__name__)
 _PORT_SEPARATION = 0.15
 
 
-def _relax_particles(protein, mobile, n_steps=0, tolerance=50.0, platform="CPU"):
+@lru_cache(maxsize=1)
+def _default_platform():
+    """Return ``"CUDA"`` when OpenMM can run on a GPU here, else ``"CPU"``.
+
+    OpenMM lists the CUDA platform whenever its plugin loads, which
+    says nothing about the driver, so the check builds a one-particle
+    context on it. A minimization of a whole protein takes minutes on
+    the CPU and seconds on a GPU, so the GPU is used whenever that
+    context can be made. The answer is cached for the process.
+    """
+    import openmm
+
+    try:
+        system = openmm.System()
+        system.addParticle(1.0)
+        openmm.Context(
+            system,
+            openmm.VerletIntegrator(0.001),
+            openmm.Platform.getPlatformByName("CUDA"),
+        )
+    except Exception:  # noqa: BLE001 - OpenMM raises its own exception types
+        return "CPU"
+    return "CUDA"
+
+
+def _relax_particles(protein, mobile, n_steps=0, tolerance=50.0, platform=None):
     """Minimize with every particle outside ``mobile`` held fixed.
 
     This is the minimization behind ``relax_fragments``, which
     moves whole residues, and behind ``attach`` with ``merge=True``,
     which moves atoms that now sit inside a residue whose backbone
-    must not move. The parameters are those of ``relax_fragments``.
+    must not move. The parameters are those of ``relax_fragments``;
+    ``platform`` None means ``_default_platform()``.
     """
     from mbuild.simulation import OpenMMSimulation
 
+    platform = platform or _default_platform()
     mobile = set(mobile)
     bonds = [
         (a, b, np.linalg.norm(a.pos - b.pos))
@@ -54,7 +82,10 @@ def _relax_particles(protein, mobile, n_steps=0, tolerance=50.0, platform="CPU")
     # A box is kept, rather than none, because a system without one
     # has no cutoff and every force call visits every pair of atoms.
     box = protein.box
-    extent = protein.xyz.max(axis=0) - protein.xyz.min(axis=0)
+    particles = list(protein.particles())
+    fixed = np.array([particle not in mobile for particle in particles])
+    original = protein.xyz
+    extent = original.max(axis=0) - original.min(axis=0)
     protein.box = Box(lengths=extent + 3.0)
     try:
         simulation = OpenMMSimulation(
@@ -67,6 +98,12 @@ def _relax_particles(protein, mobile, n_steps=0, tolerance=50.0, platform="CPU")
         simulation.minimize(n_steps=n_steps, tolerance=tolerance)
     finally:
         protein.box = box
+    # The simulation writes every position back, and a GPU platform
+    # returns them in single precision. The fixed atoms did not move, so
+    # they keep the coordinates they had, to the last digit.
+    relaxed = protein.xyz
+    relaxed[fixed] = original[fixed]
+    protein.xyz = relaxed
     # The generic force field can tear a molecule apart when the
     # start is bad enough: the repulsion between overlapping atoms
     # then outweighs every bond term. A torn fragment must never be

@@ -328,6 +328,21 @@ class TestProteinModify(BaseTest):
         not (has_hoomd and has_openmm),
         reason="relax_fragments needs mbuild.simulation (hoomd) and openmm",
     )
+    def test_default_platform_is_one_openmm_can_use(self):
+        # Tests that the relaxation picks a platform OpenMM can build a
+        # context on: CUDA when a working GPU is present, CPU otherwise.
+        # This is needed because attach and mutate relax on their own,
+        # with no platform argument, and a whole-protein minimization
+        # on the CPU takes minutes where a GPU takes seconds.
+        import openmm
+
+        from mbuild.biopolymers.relax import _default_platform
+
+        name = _default_platform()
+        assert name in ("CUDA", "CPU")
+        openmm.Platform.getPlatformByName(name)
+        assert _default_platform() is name  # cached
+
     def test_relax_fragments(self, protein_6m03, caplog):
         # Tests that the relaxation attach() runs pulls a clashing bulky
         # fragment out of steric overlap while the protein stays fixed,

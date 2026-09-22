@@ -834,7 +834,7 @@ class Protein(Compound):
         residues=None,
         n_steps=0,
         tolerance=50.0,
-        platform="CPU",
+        platform=None,
     ):
         """Relax attached fragments while the protein stays fixed.
 
@@ -862,8 +862,11 @@ class Protein(Compound):
             minimization with a real force field before a simulation.
         tolerance : float, optional, default=50.0
             Energy tolerance in kJ/mol/nm.
-        platform : str, optional, default="CPU"
-            OpenMM platform name.
+        platform : str, optional
+            OpenMM platform name. The default is ``"CUDA"`` when OpenMM
+            can run on a GPU here and ``"CPU"`` otherwise; the same
+            choice applies to the relaxation that ``attach`` and
+            ``mutate`` run on their own.
         """
         try:
             import mbuild.simulation  # noqa: F401
