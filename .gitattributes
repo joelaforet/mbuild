@@ -1,2 +1,5 @@
 # Vendored reference data: collapse in diffs.
 mbuild/lib/biomolecules/ccd_cache/*.cif linguist-generated=true
+mbuild/utils/reference/6m03_protonated.pdb linguist-generated=true
+mbuild/utils/reference/8ciq.pdb linguist-generated=true
+mbuild/utils/reference/2MUM_icode.pdb linguist-generated=true
