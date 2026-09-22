@@ -213,8 +213,6 @@ class Protein(Compound):
             text = handle.read()
         groups, conects, box = _parse_pdb(text)
 
-        crosslink_orders = {}
-
         # Peptide adjacency: consecutive peptide-capable residues in the
         # same chain with no TER between them may bond.
         peptide_capable = []
@@ -295,7 +293,7 @@ class Protein(Compound):
         ]
         self._warn_on_renamed_hydrogens(groups, matches)
 
-        self._build(groups, matches, conects, crosslink_orders)
+        self._build(groups, matches, conects)
         if box is not None:
             self.box = box
 
@@ -331,7 +329,7 @@ class Protein(Compound):
                 "structure carry the CCD names."
             )
 
-    def _build(self, groups, matches, conects, crosslink_orders):
+    def _build(self, groups, matches, conects):
         """Build chains, residues, particles, and intra-residue bonds."""
         # Build each residue fully while it is detached, and attach whole
         # chains at the end: Compound.add composes the parent's entire
@@ -378,7 +376,7 @@ class Protein(Compound):
             self.add(chain)
 
         self._bond_backbone(groups, matches, residues)
-        self._bond_crosslinks(groups, matches, residues, conects, crosslink_orders)
+        self._bond_crosslinks(groups, matches, residues, conects)
         self._check_conects(conects, serial_to_particle)
 
     def _bond_backbone(self, groups, matches, residues):
@@ -425,14 +423,12 @@ class Protein(Compound):
                     "they are separate molecules."
                 )
 
-    def _bond_crosslinks(self, groups, matches, residues, conects, crosslink_orders):
+    def _bond_crosslinks(self, groups, matches, residues, conects):
         """Form the crosslink bonds and record them in ``cross_bonds``.
 
-        ``crosslink_orders`` holds the bond order of each record of a
-        bond-records file, keyed by the two residue addresses of that
-        record: chain identifier, residue number, insertion code and
-        atom name. A bond that no record names is a disulfide from the
-        CCD templates, and it takes the order 1.
+        A CONECT record carries no bond order, and the bridges the CCD
+        templates describe are single bonds, so every crosslink takes
+        the order 1.
         """
         expecting = {}
         for group, match, residue in zip(groups, matches, residues):
@@ -462,33 +458,17 @@ class Protein(Compound):
                     "atoms, which signals a crosslink, but no CONECT record "
                     "connects it to a crosslink partner."
                 )
-            other_group, other_match, other_residue, other_record = expecting[
-                partner_serial
-            ]
+            _, other_match, other_residue, other_record = expecting[partner_serial]
             particle1 = _atom_in_residue(residue, record.name)
             particle2 = _atom_in_residue(other_residue, other_record.name)
-            order = crosslink_orders.get(
-                frozenset(
-                    (
-                        (group.chain_id, group.resnum, group.icode, record.name),
-                        (
-                            other_group.chain_id,
-                            other_group.resnum,
-                            other_group.icode,
-                            other_record.name,
-                        ),
-                    )
-                ),
-                1,
-            )
-            self.add_bond((particle1, particle2), bond_order=float(order))
+            self.add_bond((particle1, particle2), bond_order=1.0)
             self.cross_bonds.append(
                 InterResidueBond(
                     residue1=residue,
                     residue2=other_residue,
                     atom1_name=record.name,
                     atom2_name=other_record.name,
-                    order=order,
+                    order=1,
                     leaving1=tuple(
                         sorted(match.variant.leaving_fragment_of(record.name))
                     ),
@@ -538,8 +518,7 @@ class Protein(Compound):
                 )
 
     # ------------------------------------------------------------------
-    # Canonical Compound verbs, routed to residue-aware behavior
-    # ------------------------------------------------------------------
+    # Hierarchy queries
     # ------------------------------------------------------------------
     @property
     def chains(self):
@@ -663,8 +642,6 @@ class Protein(Compound):
         The chemistry exports resolve each particle's residue through
         this one map, so the traversal rules (recursive fragment
         residues) stay in ``residues()`` alone.
-        ``_residue_of_particles`` calls this method, so
-        ``residue_labels`` reads the same walk for a ``Protein``.
         """
         mapping = {}
         for chain in self.chains:
