@@ -33,10 +33,14 @@ Reduce: https://github.com/rlabduke/reduce
 import logging
 from collections import deque
 from dataclasses import replace
-from functools import lru_cache
 
 import numpy as np
 
+from mbuild.biopolymers.attach import (
+    _attach,
+    _bonded_hydrogens,
+    _port_along_hydrogens,
+)
 from mbuild.biopolymers.ccd import CCDLibrary
 from mbuild.biopolymers.matching import (
     _bridge_scope_conflict,
@@ -48,13 +52,23 @@ from mbuild.biopolymers.matching import (
 )
 from mbuild.biopolymers.protein_pdb_io import (
     _check_residue_membership,
-    _format_residue_label,
     _parse_pdb,
     _pdb_name_field,
     pdb_text,
     write_pdb,
 )
-from mbuild.biopolymers.residue import Chain, InterResidueBond, Residue
+from mbuild.biopolymers.relax import _relax_particles
+from mbuild.biopolymers.residue import (
+    Chain,
+    InterResidueBond,
+    Residue,
+    _assign_template,
+    _atom_in_residue,
+    _atom_of,
+    _chain_of,
+    _pdb_label,
+    _rdkit_mol,
+)
 from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
 from mbuild.utils.io import import_
@@ -66,106 +80,6 @@ logger = logging.getLogger(__name__)
 #: through one covalent bond in a PDB entry. The CYS-CYS disulfide and
 #: the SEC-SEC diselenide are the two common bridges.
 _BRIDGING_ELEMENTS = frozenset(("S", "SE"))
-
-
-def _chain_of(residue):
-    """Return the Chain ancestor of a residue.
-
-    A fragment residue can sit under a wrapper Compound inside its
-    Chain, so the direct parent is not always the Chain.
-    """
-    return next(
-        ancestor for ancestor in residue.ancestors() if isinstance(ancestor, Chain)
-    )
-
-
-def _pdb_label(residue):
-    """Return the loader-style label of a residue, such as ``CYS A:22``.
-
-    The loader labels a residue by its PDB fields while it reads the
-    file, in ``_PdbResidue.label``. This function writes the same text
-    for a built residue. Every error and every warning that the module
-    writes after the build names a residue in this one format.
-
-    Parameters
-    ----------
-    residue : Residue
-        The residue to label.
-
-    Returns
-    -------
-    str
-        The residue name, the chain identifier, and the residue number
-        with its insertion code.
-    """
-    chain_id = _chain_of(residue).chain_id
-    return _format_residue_label(residue.name, chain_id, residue.resnum, residue.icode)
-
-
-def _atom_in_residue(residue, atom_name):
-    """Return the named particle of a residue, or None.
-
-    Particles are found by name instead of by label, because labels can
-    go stale after ``remove()``.
-    """
-    return next(residue.particles_by_name(atom_name), None)
-
-
-def _assign_template(residue, variant):
-    """Assign a template variant and its formal charges to a residue.
-
-    Only the atoms the residue holds contribute to the charges. A
-    residue inside a chain is missing the leaving atoms of its peptide
-    bonds, and those absent atoms must add no charge.
-
-    Parameters
-    ----------
-    residue : Residue
-        The residue to write. Its particles must already be added.
-    variant : mbuild.biopolymers.ccd.ResidueTemplate
-        The matched template variant.
-    """
-    name_to_atom = variant.name_to_atom
-    charges = {}
-    for particle in residue.particles():
-        atom = name_to_atom.get(particle.name)
-        if atom is not None and atom.formal_charge:
-            charges[particle.name] = atom.formal_charge
-    residue.template = variant
-    residue.atom_formal_charges = charges
-    residue.formal_charge = sum(charges.values())
-
-
-@lru_cache(maxsize=1)
-def _rdkit_bond_orders():
-    """Return the RDKit bond type of every bond order this package uses.
-
-    The table is built on the first call, not at import, because RDKit
-    is an optional dependency and the module must import without it.
-    ``lru_cache`` then holds the one table, so a caller that reads it
-    per bond does not rebuild it. ``Protein.to_rdkit`` is the only
-    reader in this package: it maps each mBuild bond order to an RDKit
-    bond type. One table keeps that mapping in one place, so a new bond
-    order is added once.
-
-    The table is stricter than the map in ``mbuild.conversion`` by
-    intent. That map turns UNSPECIFIED into the order 0.0. This
-    package needs a real bond order on every bond, so an absent key must fail.
-
-    Returns
-    -------
-    dict
-        Map of bond order (float) -> ``rdkit.Chem.BondType``.
-    """
-    rdkit = import_("rdkit")  # noqa: F841
-    from rdkit import Chem
-
-    return {
-        1.0: Chem.BondType.SINGLE,
-        1.5: Chem.BondType.AROMATIC,
-        2.0: Chem.BondType.DOUBLE,
-        3.0: Chem.BondType.TRIPLE,
-    }
 
 
 class Protein(Compound):
@@ -212,8 +126,17 @@ class Protein(Compound):
         super().__init__(name=name)
         self.library = library or CCDLibrary(download=download)
         #: Inter-residue bonds that residue adjacency does not imply:
-        #: the disulfides and other crosslinks found at load time.
+        #: the disulfides and other crosslinks found at load time, and
+        #: every bond that attach() or record_bond() forms.
         self.cross_bonds = []
+        #: Map of anchor particle -> tuple of the hydrogen names that
+        #: were removed at that particle to open a port. Repeated ports
+        #: at one atom accumulate in the entry.
+        #: ``_port_along_hydrogens`` is the only writer, so the entry
+        #: names the hydrogens that a bond displaces and no other
+        #: removed atom.
+        #: ``record_bond`` reads it for its default leaving-atom lists.
+        self._leaving_atoms = {}
         if filename is not None:
             self._load_pdb(filename)
 
@@ -243,6 +166,14 @@ class Protein(Compound):
             )
             for bond in self.cross_bonds
         ]
+        # The leaving-atom ledger holds default values for
+        # record_bond, not state the protein depends on, so an anchor
+        # that left this Protein is dropped instead of raising.
+        newone._leaving_atoms = {
+            clone_of[anchor]: names
+            for anchor, names in self._leaving_atoms.items()
+            if anchor in clone_of
+        }
         return newone
 
     # ------------------------------------------------------------------
@@ -658,19 +589,7 @@ class Protein(Compound):
             the atom does not exist.
         """
         residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
-        return self._atom_of(residue, atom_name)
-
-    @staticmethod
-    def _atom_of(residue, atom_name):
-        """Return the named atom of the given residue, or raise."""
-        particle = _atom_in_residue(residue, atom_name)
-        if particle is None:
-            raise MBuildError(
-                f"Residue {residue.name} {residue.resnum} has no atom "
-                f"{atom_name!r}. Its atoms are "
-                f"{[p.name for p in residue.particles()]}."
-            )
-        return particle
+        return _atom_of(residue, atom_name)
 
     @property
     def net_formal_charge(self):
@@ -725,19 +644,14 @@ class Protein(Compound):
                 "Protein.to_rdkit ignores embed=True: the export always "
                 "carries the protein's real coordinates."
             )
-        rdkit = import_("rdkit")  # noqa: F841
-        from rdkit import Chem
-
-        editable = Chem.RWMol()
-        particle_index = {}
         particle_residue = self._particle_residues()
         particles = list(self.particles())
         _check_residue_membership(particles, particle_residue)
-        for particle in particles:
+        editable, particle_index = _rdkit_mol(self, particles)
+        from rdkit import Chem
+
+        for particle, index in particle_index.items():
             chain_id, residue = particle_residue[particle]
-            atom = Chem.Atom(particle.element.atomic_number)
-            atom.SetFormalCharge(residue.atom_formal_charges.get(particle.name, 0))
-            atom.SetNoImplicit(True)
             info = Chem.AtomPDBResidueInfo()
             info.SetName(_pdb_name_field(particle.name))
             info.SetResidueName(residue.name)
@@ -745,32 +659,7 @@ class Protein(Compound):
             info.SetChainId(chain_id or " ")
             info.SetInsertionCode(residue.icode or " ")
             info.SetIsHeteroAtom(residue.hetatm)
-            atom.SetPDBResidueInfo(info)
-            particle_index[particle] = editable.AddAtom(atom)
-
-        aromatic_pairs = []
-        bond_types = _rdkit_bond_orders()
-        for particle1, particle2, data in self.bonds(return_bond_order=True):
-            if particle1 not in particle_index or particle2 not in particle_index:
-                continue
-            order = float(data["bond_order"])
-            if order <= 0.0:
-                raise MBuildError(
-                    f"Bond {particle1.name}-{particle2.name} has no bond "
-                    "order; cannot export chemistry to RDKit."
-                )
-            bond_type = bond_types[order]
-            editable.AddBond(
-                particle_index[particle1], particle_index[particle2], bond_type
-            )
-            if order == 1.5:
-                aromatic_pairs.append((particle1, particle2))
-        for particle1, particle2 in aromatic_pairs:
-            for particle in (particle1, particle2):
-                editable.GetAtomWithIdx(particle_index[particle]).SetIsAromatic(True)
-            editable.GetBondBetweenAtoms(
-                particle_index[particle1], particle_index[particle2]
-            ).SetIsAromatic(True)
+            editable.GetAtomWithIdx(index).SetPDBResidueInfo(info)
 
         mol = editable.GetMol()
         conformer = Chem.Conformer(len(particles))
@@ -927,6 +816,7 @@ class Protein(Compound):
                 "atom_names": (bond.atom1_name, bond.atom2_name),
                 "leaving_atoms": (list(bond.leaving1), list(bond.leaving2)),
                 "bond_order": bond.order,
+                **({"reaction": bond.reaction} if bond.reaction else {}),
             }
             for bond in self.cross_bonds
         ]
@@ -937,4 +827,342 @@ class Protein(Compound):
                 for side in (0, 1)
                 for key in ("chain_ids", "residue_numbers", "icodes", "atom_names")
             ),
+        )
+
+    def relax_fragments(
+        self,
+        residues=None,
+        n_steps=0,
+        tolerance=50.0,
+        platform=None,
+    ):
+        """Relax attached fragments while the protein stays fixed.
+
+        Runs an energy minimization with mBuild's generic
+        UFF-style parameters (``OpenMMSimulation`` with
+        ``forcefield=None``). The force field does not matter here: the
+        goal is only to pull a rigidly placed fragment out of steric
+        overlap so a downstream simulation stays stable. Every atom
+        outside the given residues gets zero mass, which OpenMM treats
+        as immobile, so the protein coordinates do not change.
+
+        Parameters
+        ----------
+        residues : iterable of Residue, optional
+            The residues allowed to move. Default: every HETATM
+            residue (i.e. all attached fragments).
+        n_steps : int, optional, default=0
+            Maximum minimization iterations. It reaches OpenMM as
+            ``maxIterations``. ``0`` has OpenMM's meaning: the
+            minimizer runs until it meets ``tolerance``, with no
+            iteration limit. A positive value caps the iterations
+            instead. The generic force field here is not a
+            production force field, so this relaxation only removes
+            bad geometry. The user must still run an energy
+            minimization with a real force field before a simulation.
+        tolerance : float, optional, default=50.0
+            Energy tolerance in kJ/mol/nm.
+        platform : str, optional
+            OpenMM platform name. The default is ``"CUDA"`` when OpenMM
+            can run on a GPU here and ``"CPU"`` otherwise; the same
+            choice applies to the relaxation that ``attach`` and
+            ``mutate`` run on their own.
+        """
+        try:
+            import mbuild.simulation  # noqa: F401
+        except ImportError as error:
+            raise MBuildError(
+                "relax_fragments() needs mbuild.simulation, which is not "
+                f"importable here ({error}). Install the simulation "
+                "dependencies (hoomd, openmm; see environment-dev.yml) "
+                "to relax fragments."
+            ) from error
+
+        targets = (
+            list(residues)
+            if residues is not None
+            else [residue for residue in self.residues() if residue.hetatm]
+        )
+        if not targets:
+            return
+        mobile = set()
+        for residue in targets:
+            mobile.update(residue.particles())
+        _relax_particles(self, mobile, n_steps, tolerance, platform)
+
+    # ------------------------------------------------------------------
+    # Functionalization
+
+    def add_port_at(
+        self,
+        resnum,
+        atom_name,
+        chain_id=None,
+        icode="",
+        bond_order=1,
+    ):
+        """Create and return a real Port at the named atom.
+
+        This is the low-level alternative under ``attach()``:
+        the named atom loses ``bond_order`` hydrogens, and a ``Port``
+        pointing along the removed hydrogens is added to the residue.
+        Use it with ``force_overlap`` for placements ``attach()`` does
+        not cover. ``force_overlap`` forms the bond but writes no
+        record, so call ``record_bond`` after it:
+
+        >>> port = protein.add_port_at(12, "NZ", chain_id="A")
+        >>> force_overlap(fragment, fragment_port, port, add_bond=True)
+        >>> protein.record_bond(port.anchor, fragment_atom)
+
+        ``record_bond`` takes the names of the hydrogens removed here
+        as the leaving atoms of the record, so ``bond_records``
+        describes such a bond the way it describes an ``attach`` bond.
+
+        Parameters
+        ----------
+        resnum : int
+            Residue number of the target residue.
+        atom_name : str
+            Name of the atom that anchors the port. It must have at
+            least ``bond_order`` bonded hydrogens.
+        chain_id : str, optional
+            Chain of the target residue; required when residue numbers
+            repeat across chains.
+        icode : str, optional
+            Insertion code of the target residue.
+        bond_order : int, optional, default=1
+            Order of the bond the port will form; one hydrogen leaves
+            per unit.
+
+        Returns
+        -------
+        mbuild.Port
+            The port, anchored at the named atom.
+        """
+        residue = self.get_residue(resnum, chain_id=chain_id, icode=icode)
+        atom = _atom_of(residue, atom_name)
+        hydrogens = _bonded_hydrogens(atom, residue.name, int(bond_order))
+        port = _port_along_hydrogens(self, self, atom, hydrogens)
+        residue.add(port, label="port[$]")
+        return port
+
+    def record_bond(self, atom1, atom2, order=1, leaving1=None, leaving2=None):
+        """Record a bond formed outside ``attach`` in ``cross_bonds``.
+
+        ``add_port_at`` with ``force_overlap`` forms a bond but writes
+        no record, so ``bond_records`` does not report it and
+        ``save_pdb`` cannot describe it to a downstream loader. This
+        method adds the record for a bond that already exists.
+
+        The leaving atom names default to the hydrogens that
+        ``add_port_at`` removed at each atom. Pass ``leaving1`` or
+        ``leaving2`` when the bond replaced other atoms.
+
+        Parameters
+        ----------
+        atom1, atom2 : mbuild.Compound
+            The two bonded atoms. They must be bonded already, and they
+            must sit in two different residues of this protein.
+        order : int, optional, default=1
+            Order of the bond.
+        leaving1 : sequence of str, optional
+            Names of the atoms removed from the residue of ``atom1``.
+        leaving2 : sequence of str, optional
+            Names of the atoms removed from the residue of ``atom2``.
+
+        Returns
+        -------
+        InterResidueBond
+            The record, as appended to ``cross_bonds``.
+
+        Raises
+        ------
+        MBuildError
+            When an atom is not in a residue of this protein, when the
+            two atoms are not bonded, or when both sit in one residue.
+        """
+        residues = self._particle_residues()
+        for atom in (atom1, atom2):
+            if atom not in residues:
+                raise MBuildError(
+                    f"Atom {atom.name} is not in a residue of this "
+                    "Protein, so a bond to it cannot be recorded."
+                )
+        if atom2 not in atom1.direct_bonds():
+            raise MBuildError(
+                f"Atoms {atom1.name} and {atom2.name} are not bonded. "
+                "Form the bond first (for example with force_overlap), "
+                "then record it."
+            )
+        residue1 = residues[atom1][1]
+        residue2 = residues[atom2][1]
+        if residue1 is residue2:
+            raise MBuildError(
+                f"Atoms {atom1.name} and {atom2.name} are both in residue "
+                f"{residue1.name} {residue1.resnum}. cross_bonds holds "
+                "bonds between two residues."
+            )
+        record = InterResidueBond(
+            residue1=residue1,
+            residue2=residue2,
+            atom1_name=atom1.name,
+            atom2_name=atom2.name,
+            order=int(order),
+            leaving1=tuple(
+                self._leaving_atoms.get(atom1, ()) if leaving1 is None else leaving1
+            ),
+            leaving2=tuple(
+                self._leaving_atoms.get(atom2, ()) if leaving2 is None else leaving2
+            ),
+        )
+        self.cross_bonds.append(record)
+        return record
+
+    def attach(
+        self,
+        fragment,
+        fragment_atom_name=None,
+        *,
+        resnum,
+        atom_name,
+        chain_id=None,
+        icode="",
+        fragment_resnum=None,
+        fragment_resname=None,
+        bond_order=1,
+        relax=True,
+        leaving_atom_names=None,
+        fragment_leaving_atom_names=None,
+        reaction=None,
+        merge=False,
+    ):
+        """Bond a fragment Compound onto a residue of this protein.
+
+        One leaving group leaves each side per unit of bond order, so a
+        double bond removes two from each atom. By default the leaving
+        groups are hydrogens bonded to the named protein atom and to the
+        named fragment atom. ``leaving_atom_names`` and
+        ``fragment_leaving_atom_names`` name other atoms; a heavy atom
+        takes the whole branch beyond its bond with it.
+
+        Ports along the broken bonds align the fragment
+        (``force_overlap``). A bond with ``bond_order`` then forms
+        between the two named atoms. The new inter-residue bond is
+        recorded in ``cross_bonds``, together with the names of every
+        atom that left. The record holds everything a downstream tool
+        needs to describe the modification (see ``bond_records``).
+
+        The fragment is cloned; the original is not changed. Fragment
+        residues keep their identity. A fragment whose children are
+        ``Residue`` compounds is added residue-per-residue, with the
+        metadata intact: a single PTM residue, a linear polymer, or a
+        branched glycan. Any other Compound is wrapped into one new
+        ``Residue``. To build branched, multiply-linked structures, call
+        ``attach`` repeatedly. An attached residue is addressable like
+        any other, so a later call can target it. Every call records its
+        bond, so residues may carry any number of links inside mBuild.
+
+        Parameters
+        ----------
+        fragment : mbuild.Compound
+            The group to add. Cloned before use.
+        fragment_atom_name : str
+            Name of the fragment atom that forms the new bond. It must
+            have at least ``bond_order`` bonded hydrogens.
+        resnum : int
+            Residue number of the protein attachment site.
+        atom_name : str
+            Name of the protein atom that forms the new bond. It must
+            have at least ``bond_order`` bonded hydrogens.
+        chain_id : str, optional
+            Chain of the attachment site; required when residue numbers
+            repeat across chains.
+        icode : str, optional
+            Insertion code of the attachment site.
+        fragment_resnum : int, optional
+            Residue number, within the fragment, of the fragment atom;
+            required when the fragment atom name repeats across the
+            fragment's residues.
+        fragment_resname : str, optional
+            Residue name given to a fragment that is not made of
+            Residue compounds and therefore gets wrapped. The name
+            takes three characters or fewer; a longer name raises a
+            ValueError.
+        bond_order : int, optional, default=1
+            Order of the new bond.
+        leaving_atom_names : str or sequence of str, optional
+            Names of the atoms that leave the protein atom. One name
+            per unit of bond order, each bonded to the protein atom.
+            By default the leaving atoms are hydrogens, taken in
+            alphabetical order. The hydrogens on one atom are
+            chemically equivalent, so the choice does not change the
+            chemistry; a downstream residue library describes the
+            product by naming the atom that is absent, so pass the name
+            that library expects to make the written file match it.
+            A name may also be a heavy atom. Then the whole substituent
+            on the far side of that bond leaves with it, so naming the
+            oxygen of a hydroxyl group removes the oxygen and its
+            hydrogen together. A residue that this empties is dropped.
+        fragment_leaving_atom_names : str or sequence of str, optional
+            The same, for the fragment atom. A glycan built by a glycan
+            builder ends in a hydroxyl residue on the anomeric carbon;
+            naming its oxygen here removes that residue and opens the
+            glycosidic bond site.
+        relax : bool, optional, default=True
+            When the placed fragment overlaps existing atoms, run an
+            energy minimization that moves only the fragment
+            (see ``relax_fragments``). The minimization runs until it
+            converges. When a build must return in bounded time, pass
+            ``relax=False`` and call ``relax_fragments`` with a
+            positive ``n_steps``.
+        reaction : str, optional
+            A reaction string, for a reaction that does more than
+            replace one bond on each side: a name from
+            ``mbuild.biopolymers.REACTIONS`` such as
+            ``"azide-alkyne triazole"``, or an RDKit reaction SMARTS
+            with the protein side as the first reactant template. The
+            string decides which atoms leave, which bonds form or
+            change order, and which formal charges change; see
+            ``mbuild.biopolymers.reactions``. The protein template
+            must include the atom named by ``atom_name``. With a
+            reaction, ``bond_order`` and the leaving-atom names are not
+            used, and the record carries the reaction.
+        merge : bool, optional, default=False
+            Put the fragment's atoms into the site residue instead of
+            adding the fragment as a residue of its own. The fragment
+            must be one residue. The site residue keeps its name and
+            number, takes the fragment's formal charges, and drops its
+            CCD template, since no CCD component describes the product;
+            rename it for the residue library that will read the file.
+            Use this when a downstream library must describe the
+            product as one component: a ring-closing reaction joins the
+            two sides by more than one bond, which a per-residue
+            crosslink declaration cannot express. No inter-residue bond
+            is recorded, because there is none.
+
+        Returns
+        -------
+        InterResidueBond or Residue
+            The recorded bond, as appended to ``cross_bonds``. A
+            reaction that forms several bonds between the protein and
+            the fragment records each of them and returns the one at
+            the named atom. With ``merge=True`` there is no record, and
+            the site residue is returned.
+        """
+        return _attach(
+            self,
+            fragment,
+            fragment_atom_name,
+            resnum=resnum,
+            atom_name=atom_name,
+            chain_id=chain_id,
+            icode=icode,
+            fragment_resnum=fragment_resnum,
+            fragment_resname=fragment_resname,
+            bond_order=bond_order,
+            relax=relax,
+            leaving_atom_names=leaving_atom_names,
+            fragment_leaving_atom_names=fragment_leaving_atom_names,
+            reaction=reaction,
+            merge=merge,
         )
