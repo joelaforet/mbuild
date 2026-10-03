@@ -64,6 +64,7 @@ def _attach(
     fragment_leaving_atom_names=None,
     reaction=None,
     merge=False,
+    platform=None,
 ):
     # The name is checked first, before the attachment site is
     # read and before any warning is logged. The check ran inside
@@ -84,6 +85,7 @@ def _attach(
             fragment_resname,
             relax,
             merge,
+            platform,
         )
     bond_order = int(bond_order)
     site_residue, site_atom, site_hydrogens = _attachment_site(
@@ -129,7 +131,7 @@ def _attach(
         merge,
     )
     if merge:
-        _relax_if_clashing(protein, placed, site_atom, frag_atom, relax)
+        _relax_if_clashing(protein, placed, site_atom, frag_atom, relax, platform)
         return site_residue
 
     # The record is appended before the relaxation step, so the
@@ -151,7 +153,7 @@ def _attach(
     )
     protein.cross_bonds.append(record)
 
-    _relax_if_clashing(protein, placed, site_atom, frag_atom, relax)
+    _relax_if_clashing(protein, placed, site_atom, frag_atom, relax, platform)
     return record
 
 
@@ -168,6 +170,7 @@ def _attach_by_reaction(
     fragment_resname,
     relax,
     merge,
+    platform=None,
 ):
     """Bond a fragment by the rule a reaction string states.
 
@@ -381,9 +384,9 @@ def _attach_by_reaction(
                 "rigid-placement lengths until relax_fragments() runs."
             )
         else:
-            _relax_until_bonded(protein, placed, cross)
+            _relax_until_bonded(protein, placed, cross, platform=platform)
     else:
-        _relax_if_clashing(protein, placed, site_atom, frag_atom, relax)
+        _relax_if_clashing(protein, placed, site_atom, frag_atom, relax, platform)
     return result
 
 

@@ -415,6 +415,64 @@ class TestProteinModify(BaseTest):
         else:
             assert all(0.09 < length < 0.22 for length in lengths)
 
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    @pytest.mark.skipif(
+        not (has_hoomd and has_openmm),
+        reason="relax_fragments needs mbuild.simulation (hoomd) and openmm",
+    )
+    def test_relaxation_simulates_only_the_neighbourhood(
+        self, protein_6m03, monkeypatch
+    ):
+        # Tests that a relaxation builds its simulation from the atoms
+        # near the mobile ones, that it moves them where a simulation
+        # of the whole protein moves them, and that attach() passes its
+        # platform on. This is needed because the generic force field
+        # is parameterized afresh for every relaxation, and on a
+        # glycoprotein of 50,000 atoms that took most of a minute per
+        # attach while the atoms that can feel the fragment are a few
+        # thousand. The test relaxes one rigid placement twice, once
+        # with a margin wide enough to take in every atom, and compares
+        # the simulated atom counts and the relaxed positions.
+        import mbuild.simulation
+        from mbuild.biopolymers import relax
+
+        built = []
+
+        class Recording(mbuild.simulation.OpenMMSimulation):
+            def __init__(self, system, *args, **kwargs):
+                built.append((system.n_particles, kwargs.get("platform")))
+                super().__init__(system, *args, **kwargs)
+
+        monkeypatch.setattr(mbuild.simulation, "OpenMMSimulation", Recording)
+        acetone = mb.load("CC(C)=O", smiles=True)
+        protein_6m03.attach(
+            acetone, "C1", resnum=5, atom_name="NZ", chain_id="A", relax=False
+        )
+        local, whole = protein_6m03, mb.clone(protein_6m03)
+        fragment = [p for p in protein_6m03.residues() if p.hetatm][-1]
+        index = [i for i, p in enumerate(local.particles()) if p in set(fragment)]
+
+        # A tight tolerance, because OpenMM's convergence test counts
+        # the fixed atoms too, so at the default the larger simulation
+        # stops sooner, short of the same minimum.
+        local.relax_fragments(platform="CPU", tolerance=1.0)
+        monkeypatch.setattr(relax, "_NEIGHBOURHOOD_MARGIN", 100.0)
+        whole.relax_fragments(platform="CPU", tolerance=1.0)
+        assert built[0][0] < local.n_particles
+        assert built[-1][0] == whole.n_particles
+        assert np.allclose(local.xyz[index], whole.xyz[index], atol=0.005)
+
+        built.clear()
+        local.attach(
+            acetone,
+            "C1",
+            resnum=12,
+            atom_name="NZ",
+            chain_id="A",
+            platform="CPU",
+        )
+        assert all(platform == "CPU" for _, platform in built)
+
     def test_add_port_at(self, protein_6m03):
         # Tests add_port_at, the low-level alternative to attach(). It
         # removes bond_order hydrogens from the named atom and returns a

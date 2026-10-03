@@ -28,6 +28,14 @@ logger = logging.getLogger(__name__)
 #: corrects the length afterwards (see ``relax_fragments``).
 _PORT_SEPARATION = 0.15
 
+#: Nonbonded cutoff, in nm, of the relaxation's generic force field.
+_RELAX_CUTOFF = 1.0
+#: Distance, in nm, that a mobile atom may move in one relaxation
+#: before the neighbourhood it was relaxed in is rebuilt around it.
+_NEIGHBOURHOOD_MARGIN = 0.2
+#: Most neighbourhoods one relaxation builds.
+_NEIGHBOURHOOD_ROUNDS = 3
+
 
 @lru_cache(maxsize=1)
 def _default_platform():
@@ -62,48 +70,31 @@ def _relax_particles(protein, mobile, n_steps=0, tolerance=50.0, platform=None):
     which moves atoms that now sit inside a residue whose backbone
     must not move. The parameters are those of ``relax_fragments``;
     ``platform`` None means ``_default_platform()``.
-    """
-    from mbuild.simulation import OpenMMSimulation
 
+    Only the mobile atoms and the atoms that can act on them enter the
+    simulation (``_neighbourhood``), so the cost follows the size of
+    the site, not of the protein.
+    """
     platform = platform or _default_platform()
     mobile = set(mobile)
+    if not mobile:
+        return
     bonds = [
         (a, b, np.linalg.norm(a.pos - b.pos))
         for a, b in protein.bonds()
         if a in mobile or b in mobile
     ]
     before = {particle: particle.pos.copy() for particle in mobile}
-    # The box of a loaded protein is the crystal cell of the input
-    # file, which is metadata, not a simulation box: a protein that
-    # is longer than its cell has periodic images on top of itself.
-    # The relaxation therefore runs in a box that holds the whole
-    # structure with room for the cutoff on every side, so that no
-    # image comes near any atom, and the cell is put back afterwards.
-    # A box is kept, rather than none, because a system without one
-    # has no cutoff and every force call visits every pair of atoms.
-    box = protein.box
-    particles = list(protein.particles())
-    fixed = np.array([particle not in mobile for particle in particles])
-    original = protein.xyz
-    extent = original.max(axis=0) - original.min(axis=0)
-    protein.box = Box(lengths=extent + 3.0)
-    try:
-        simulation = OpenMMSimulation(
-            protein, forcefield=None, kick=False, platform=platform
-        )
-        for index, particle in enumerate(protein.particles()):
-            if particle not in mobile:
-                simulation.system.setParticleMass(index, 0.0)
-        _descend_in_bounded_steps(simulation, mobile)
-        simulation.minimize(n_steps=n_steps, tolerance=tolerance)
-    finally:
-        protein.box = box
-    # The simulation writes every position back, and a GPU platform
-    # returns them in single precision. The fixed atoms did not move, so
-    # they keep the coordinates they had, to the last digit.
-    relaxed = protein.xyz
-    relaxed[fixed] = original[fixed]
-    protein.xyz = relaxed
+    # Each round minimizes in the neighbourhood of where the mobile
+    # atoms start. A round that moves an atom further than the margin
+    # may have brought it within the cutoff of an atom the
+    # neighbourhood left out, so it runs again from where it ended.
+    for _ in range(_NEIGHBOURHOOD_ROUNDS):
+        start = {particle: particle.pos.copy() for particle in mobile}
+        _relax_neighbourhood(protein, mobile, n_steps, tolerance, platform)
+        moved = max(np.linalg.norm(p.pos - start[p]) for p in mobile)
+        if moved <= _NEIGHBOURHOOD_MARGIN:
+            break
     # The generic force field can tear a molecule apart when the
     # start is bad enough: the repulsion between overlapping atoms
     # then outweighs every bond term. A torn fragment must never be
@@ -126,6 +117,67 @@ def _relax_particles(protein, mobile, n_steps=0, tolerance=50.0, platform=None):
             "protein too badly for the generic force field; choose another "
             "site or fragment conformer, or relax with a real force field."
         )
+
+
+def _relax_neighbourhood(protein, mobile, n_steps, tolerance, platform):
+    """Minimize the mobile atoms in a copy of their neighbourhood.
+
+    The copy holds every atom within the nonbonded cutoff of a mobile
+    atom, widened by one bond and by ``_NEIGHBOURHOOD_MARGIN``, and the
+    bonds among those atoms with their orders. The generic force field
+    has bonded terms and a cut-off van der Waals term, and no
+    electrostatics, so no atom outside the copy exerts a force on a
+    mobile atom. An atom at the edge of the copy can lose a bonded
+    partner, which changes the type the force field gives it, but such
+    an atom is beyond the cutoff of every mobile atom, so its type
+    changes no force that moves anything. Only the mobile atoms'
+    positions are written back to the protein.
+    """
+    from scipy.spatial import cKDTree
+
+    from mbuild.compound import Compound
+    from mbuild.simulation import OpenMMSimulation
+
+    particles = list(protein.particles())
+    xyz = protein.xyz
+    index = {particle: i for i, particle in enumerate(particles)}
+    radius = _RELAX_CUTOFF + _PORT_SEPARATION + _NEIGHBOURHOOD_MARGIN
+    near = set()
+    for hits in cKDTree(xyz).query_ball_point(
+        xyz[[index[particle] for particle in mobile]], radius
+    ):
+        near.update(hits)
+    copies = {}
+    for i in sorted(near):
+        particle = particles[i]
+        copies[particle] = Compound(
+            name=particle.name, element=particle.element, pos=xyz[i]
+        )
+    site = Compound(name="Neighbourhood")
+    site.add(list(copies.values()))
+    for a, b, order in protein.bond_graph.edges.data("bond_order"):
+        if a in copies and b in copies:
+            site.add_bond((copies[a], copies[b]), bond_order=order)
+    # The simulation needs a box: without one there is no cutoff, and
+    # every force call visits every pair of atoms. The box holds the
+    # whole neighbourhood with room for the cutoff on every side, so
+    # that no periodic image comes near any atom.
+    extent = site.xyz.max(axis=0) - site.xyz.min(axis=0)
+    site.box = Box(lengths=extent + 3.0)
+    simulation = OpenMMSimulation(
+        site, forcefield=None, kick=False, platform=platform, r_cut=_RELAX_CUTOFF
+    )
+    moving = {copies[particle] for particle in mobile}
+    for i, copy in enumerate(site.particles()):
+        if copy not in moving:
+            simulation.system.setParticleMass(i, 0.0)
+    _descend_in_bounded_steps(simulation, moving)
+    simulation.minimize(n_steps=n_steps, tolerance=tolerance)
+    # Writing back only the mobile atoms also keeps the fixed atoms at
+    # their coordinates to the last digit, which a GPU platform, with
+    # its single-precision positions, would otherwise round.
+    for particle in mobile:
+        particle.pos = copies[particle].pos
 
 
 def _descend_in_bounded_steps(simulation, mobile, max_step=0.005, rounds=200):
@@ -183,7 +235,9 @@ def _descend_in_bounded_steps(simulation, mobile, max_step=0.005, rounds=200):
     simulation.positions = context.getState(getPositions=True).getPositions()
 
 
-def _relax_until_bonded(protein, mobile, bonds, attempts=3, longest=0.18):
+def _relax_until_bonded(
+    protein, mobile, bonds, attempts=3, longest=0.18, platform=None
+):
     """Relax the placed atoms until every formed bond is at bond length.
 
     Parameters
@@ -196,6 +250,8 @@ def _relax_until_bonded(protein, mobile, bonds, attempts=3, longest=0.18):
         How many relaxations to run before warning.
     longest : float, optional, default=0.18
         The bond length, in nm, above which a bond counts as open.
+    platform : str, optional
+        OpenMM platform name; None means ``_default_platform()``.
     """
 
     def open_bonds():
@@ -212,7 +268,7 @@ def _relax_until_bonded(protein, mobile, bonds, attempts=3, longest=0.18):
     # coordinates of the file.
     mobile = list(mobile) + _side_chains_near(protein, mobile)
     for _ in range(attempts):
-        _relax_particles(protein, mobile, tolerance=1.0)
+        _relax_particles(protein, mobile, tolerance=1.0, platform=platform)
         if not open_bonds():
             return
     for name1, name2, length in open_bonds():
@@ -223,7 +279,7 @@ def _relax_until_bonded(protein, mobile, bonds, attempts=3, longest=0.18):
         )
 
 
-def _relax_if_clashing(protein, added, site_atom, frag_atom, relax):
+def _relax_if_clashing(protein, added, site_atom, frag_atom, relax, platform=None):
     """Relax the placed atoms when they overlap other atoms.
 
     Port alignment is rigid, so a bulky fragment can land inside the
@@ -241,6 +297,8 @@ def _relax_if_clashing(protein, added, site_atom, frag_atom, relax):
         The placed atom of the new bond.
     relax : bool
         False leaves the rigid placement in place.
+    platform : str, optional
+        OpenMM platform name; None means ``_default_platform()``.
     """
     clashes = _warn_on_clashes(protein, added, site_atom, frag_atom)
     if not (clashes and relax):
@@ -270,7 +328,9 @@ def _relax_if_clashing(protein, added, site_atom, frag_atom, relax):
         )
         return
     logger.info("Relaxing the placed atoms with the protein backbone held fixed.")
-    _relax_until_bonded(protein, added, [(site_atom, frag_atom, 1.0)])
+    _relax_until_bonded(
+        protein, added, [(site_atom, frag_atom, 1.0)], platform=platform
+    )
     # The user asked for the relaxation and got it, so the result is
     # reported rather than warned about. Ordinary van der Waals
     # contacts near 2 A are expected after a minimization; only a
@@ -329,6 +389,9 @@ def _fit_placement(protein, added, bonds):
     axis = start[frag_index] - site_atom.pos
     axis = axis / np.linalg.norm(axis)
 
+    anchors = np.array([fixed.pos for fixed, _ in pairs])
+    bonding = np.array([i for _, i in pairs])
+
     def posed(x):
         return Rotation.from_rotvec(x[:3]).apply(start - centre) + centre + x[3:]
 
@@ -337,12 +400,14 @@ def _fit_placement(protein, added, bonds):
         # The bond term weighs a hundred times the clash term: a pose
         # that trades bond length for clearance is not a placement,
         # since the minimizer that follows only removes overlap.
-        total = 100 * sum(
-            (np.linalg.norm(fixed.pos - positions[i]) - _PORT_SEPARATION) ** 2
-            for fixed, i in pairs
+        stretch = (
+            np.linalg.norm(anchors - positions[bonding], axis=1) - _PORT_SEPARATION
         )
+        total = 100 * stretch @ stretch
         if tree is not None:
-            distances, _ = tree.query(positions)
+            # Only contacts closer than 0.25 nm count, so the search
+            # stops there; atoms with no such contact come back as inf.
+            distances, _ = tree.query(positions, distance_upper_bound=0.25)
             close = distances[distances < 0.25]
             total += ((0.25 - close) ** 2).sum()
         return total
@@ -359,6 +424,11 @@ def _fit_placement(protein, added, bonds):
         )
         if best is None or result.fun < best.fun:
             best = result
+        # The cost is never negative, and it is zero for a pose with
+        # every bond at length and no contact inside 0.25 nm. No other
+        # start can improve on such a pose, so the search stops there.
+        if best.fun < 1e-6:
+            break
     for particle, position in zip(particles, posed(best.x)):
         particle.pos = position
 

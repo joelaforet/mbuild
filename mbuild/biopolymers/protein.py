@@ -1035,6 +1035,7 @@ class Protein(Compound):
         fragment_leaving_atom_names=None,
         reaction=None,
         merge=False,
+        platform=None,
     ):
         """Bond a fragment Compound onto a residue of this protein.
 
@@ -1115,6 +1116,10 @@ class Protein(Compound):
             converges. When a build must return in bounded time, pass
             ``relax=False`` and call ``relax_fragments`` with a
             positive ``n_steps``.
+        platform : str, optional
+            OpenMM platform of that minimization, as in
+            ``relax_fragments``: ``"CUDA"`` when OpenMM can run on a GPU
+            here and ``"CPU"`` otherwise, unless named.
         reaction : str, optional
             A reaction string, for a reaction that does more than
             replace one bond on each side: a name from
@@ -1165,4 +1170,5 @@ class Protein(Compound):
             fragment_leaving_atom_names=fragment_leaving_atom_names,
             reaction=reaction,
             merge=merge,
+            platform=platform,
         )
