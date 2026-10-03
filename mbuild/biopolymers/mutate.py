@@ -7,7 +7,16 @@ old bond with the ``Port`` machinery that ``attach`` uses, moved into
 the residue, and the residue is re-matched to a definition. Each
 function takes the ``Protein`` as its first argument, and the class
 keeps only the public verb.
+
+A side chain that also bonds the backbone nitrogen, as proline's does,
+breaks that pattern twice. Leaving, its ring is opened at the nitrogen
+first, and the nitrogen takes back the amide hydrogen. Arriving, it has
+no single bond along which a port could align it, so the whole CCD
+component is superposed on the residue's backbone instead, as PyMOL's
+mutagenesis wizard does, and only its side-chain atoms are kept.
 """
+
+import logging
 
 import numpy as np
 
@@ -24,7 +33,13 @@ from mbuild.biopolymers.fragments import (
     fragment_from_ccd,
 )
 from mbuild.biopolymers.matching import _leaving_expectations
-from mbuild.biopolymers.relax import _PORT_SEPARATION, _relax_if_clashing, _unit
+from mbuild.biopolymers.relax import (
+    _PORT_SEPARATION,
+    _proton_position,
+    _relax_if_clashing,
+    _relax_until_bonded,
+    _unit,
+)
 from mbuild.biopolymers.residue import (
     _assign_template,
     _atom_in_residue,
@@ -34,6 +49,8 @@ from mbuild.biopolymers.residue import (
 from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
 from mbuild.port import Port
+
+logger = logging.getLogger(__name__)
 
 #: The 20 residue names that a PDB file writes as ATOM records. Every
 #: other residue, including a non-canonical amino acid from the CCD, is
@@ -67,6 +84,17 @@ _STANDARD_RESNAMES = frozenset(
 #: Length of a C-H bond, in nm, for the alpha hydrogen that a mutation
 #: to glycine adds.
 _ALPHA_H_BOND = 0.109
+
+#: Backbone phi, in degrees, that a proline ring imposes, and the
+#: deviation from it beyond which ``mutate`` warns. Pyrrolidine ring
+#: closure holds proline's phi near -65 degrees; observed values
+#: rarely leave -90 to -40.
+_PROLINE_PHI = -65.0
+_PROLINE_PHI_SPREAD = 25.0
+
+#: Names of the hydrogens on a backbone nitrogen, in the order the CCD
+#: components name them.
+_AMIDE_HYDROGENS = ("H", "H2", "H3")
 
 
 def _alpha_handedness(n, ca, c, cb):
@@ -135,6 +163,7 @@ def _mutate(
     resname=None,
     stereo=None,
     relax=True,
+    platform=None,
 ):
     """Replace the side chain of one residue; see ``Protein.mutate``."""
     if stereo is not None:
@@ -149,8 +178,8 @@ def _mutate(
             f"mutate() needs the backbone atoms N, CA and C of {label}, "
             "and at least one of them is absent."
         )
-    frag, link, anchor, new_name, hetatm, component_stereo = _side_chain_fragment(
-        protein, to, resname
+    frag, link, anchor, new_name, hetatm, component_stereo, closure = (
+        _side_chain_fragment(protein, to, resname)
     )
     if stereo is None:
         stereo = component_stereo
@@ -162,7 +191,14 @@ def _mutate(
     _remove_particles_and_ports(protein, ca, leaving)
 
     # 2. The new side chain arrives. A glycine needs only a hydrogen.
-    if frag is None:
+    #    One that closes a ring on the backbone nitrogen is superposed.
+    formed = []
+    if closure is not None:
+        added, formed = _place_ring_side_chain(
+            protein, residue, n, ca, c, frag, link, closure, orientation
+        )
+        frag_charges = {}
+    elif frag is None:
         new_h = Compound(
             name="HA3",
             element="H",
@@ -234,8 +270,122 @@ def _mutate(
         residue.atom_formal_charges = charges
         residue.formal_charge = sum(charges.values())
 
-    _relax_if_clashing(protein, added + moved, ca, link, relax)
+    if formed and relax:
+        # The rigid superposition leaves the ring bonds at whatever
+        # length the residue's backbone allows, so the side chain is
+        # relaxed whether or not it clashes, and those bonds checked.
+        _relax_until_bonded(protein, added + moved, formed, platform=platform)
+    elif not formed:
+        _relax_if_clashing(protein, added + moved, ca, link, relax, platform)
     return residue
+
+
+def _place_ring_side_chain(
+    protein, residue, n, ca, c, frag, link, closure, orientation
+):
+    """Superpose a CCD component on the backbone and keep its side chain.
+
+    The component's ``N``, ``CA``, ``C`` and side-chain atom on ``CA``
+    are fitted (Kabsch) to the residue's ``N``, ``CA`` and ``C`` and to
+    a point along ``orientation``, the direction ``_old_side_chain``
+    chose for the side chain, so the handedness is the one asked for.
+    The side-chain atoms move into the residue and bond to ``CA`` and
+    to ``N``; the component's backbone is discarded. ``N`` gives up one
+    hydrogen, the one nearest the atom that now bonds it.
+
+    Returns
+    -------
+    added : list of mbuild.Compound
+        The side-chain atoms, which relaxation may move.
+    formed : list of (mbuild.Compound, mbuild.Compound, float)
+        The two bonds that close the ring, for the relaxation to check.
+    """
+    fn, fca, fc = (_atom_in_residue(frag, name) for name in ("N", "CA", "C"))
+    reach = np.linalg.norm(link.pos - fca.pos)
+    target = np.array([n.pos, ca.pos, c.pos, ca.pos + _unit(orientation) * reach])
+    source = np.array([fn.pos, fca.pos, fc.pos, link.pos])
+    rotation, shift = _kabsch(source, target)
+    for particle in frag.particles():
+        particle.pos = particle.pos @ rotation.T + shift
+    _warn_on_proline_phi(n, ca, c)
+
+    # The side chain is every atom reachable from the atom on CA
+    # without passing through the component's N or CA.
+    side, queue = {link}, [link]
+    while queue:
+        for neighbor in queue.pop().direct_bonds():
+            if neighbor not in side and neighbor not in (fn, fca):
+                side.add(neighbor)
+                queue.append(neighbor)
+    backbone = [particle for particle in frag.particles() if particle not in side]
+    _remove_particles_and_ports(frag, link, backbone)
+    _rename_clashing_atoms(frag, residue)
+
+    hydrogens = [atom for atom in n.direct_bonds() if atom.element.symbol == "H"]
+    if not hydrogens:
+        raise MBuildError(
+            f"{_pdb_label(residue)} has no hydrogen on N to give up for the "
+            f"bond to {closure.name}."
+        )
+    nearest = min(hydrogens, key=lambda h: np.linalg.norm(h.pos - closure.pos))
+    _remove_particles_and_ports(protein, n, [nearest])
+    kept = [h for h in hydrogens if h is not nearest]
+    for hydrogen, name in zip(kept, _AMIDE_HYDROGENS):
+        hydrogen.name = name
+
+    added = list(frag.particles())
+    _move_into_residue(frag, residue)
+    protein.add_bond((ca, link), bond_order=1.0)
+    protein.add_bond((n, closure), bond_order=1.0)
+    return added, [(ca, link, 1.0), (n, closure, 1.0)]
+
+
+def _kabsch(source, target):
+    """Return the rotation and shift that best map ``source`` onto ``target``.
+
+    The least-squares superposition of two equally ordered point sets
+    (Kabsch). Apply it as ``points @ rotation.T + shift``.
+    """
+    source_centre, target_centre = source.mean(axis=0), target.mean(axis=0)
+    u, _, vt = np.linalg.svd((source - source_centre).T @ (target - target_centre))
+    # A reflection would turn an L residue into a D one.
+    sign = np.sign(np.linalg.det(vt.T @ u.T))
+    rotation = vt.T @ np.diag([1.0, 1.0, sign]) @ u.T
+    return rotation, target_centre - source_centre @ rotation.T
+
+
+def _warn_on_proline_phi(n, ca, c):
+    """Warn when the backbone phi at a new proline is far from what the ring allows.
+
+    ``mutate`` keeps the backbone, so a ring closed where phi is far
+    from -65 degrees is strained until a real force field lets the
+    backbone move. A residue with no preceding carbonyl has no phi.
+    """
+    previous = [
+        atom
+        for atom in n.direct_bonds()
+        if atom is not ca and atom.name == "C" and atom.parent is not ca.parent
+    ]
+    if not previous:
+        return
+    phi = _dihedral(previous[0].pos, n.pos, ca.pos, c.pos)
+    if abs(phi - _PROLINE_PHI) > _PROLINE_PHI_SPREAD:
+        logger.warning(
+            f"The backbone phi of {_pdb_label(ca.parent)} is {phi:.0f} degrees, "
+            f"far from the {_PROLINE_PHI:.0f} degrees a proline ring holds. "
+            "mutate() keeps the backbone, so the ring closes under strain; "
+            "minimize with a real force field, which lets the backbone move, "
+            "before simulating."
+        )
+
+
+def _dihedral(a, b, c, d):
+    """Return the dihedral angle a-b-c-d, in degrees."""
+    b0, b1, b2 = a - b, c - b, d - c
+    b1 = b1 / np.linalg.norm(b1)
+    v = b0 - np.dot(b0, b1) * b1
+    w = b2 - np.dot(b2, b1) * b1
+    return float(np.degrees(np.arctan2(np.dot(np.cross(b1, v), w), np.dot(v, w))))
 
 
 def _side_chain_fragment(protein, to, resname):
@@ -259,11 +409,15 @@ def _side_chain_fragment(protein, to, resname):
     stereo : str or None
         The handedness of a CCD component, read from its ideal
         coordinates, or None when the source does not fix one.
+    closure : mbuild.Compound or None
+        The side-chain atom of a CCD component that also bonds its
+        ``N``, as ``CD`` of proline does, or None. Such a side chain
+        is superposed rather than aligned along one bond.
     """
     if isinstance(to, str):
         code = to.upper()
         if code == "GLY":
-            return None, None, None, code, False, None
+            return None, None, None, code, False, None, None
         try:
             template = protein.library[code][0]
         except KeyError as error:
@@ -288,6 +442,7 @@ def _side_chain_fragment(protein, to, resname):
             raise MBuildError(
                 f"{code} has no side chain on CA. Use 'GLY' for a glycine."
             )
+        closure = _ring_closure(n, ca)
         return (
             frag,
             link,
@@ -295,6 +450,7 @@ def _side_chain_fragment(protein, to, resname):
             code,
             code not in _STANDARD_RESNAMES,
             _alpha_handedness(n.pos, ca.pos, c.pos, link.pos),
+            closure,
         )
     _check_resname(resname)
     frag, residues = _as_residues(clone(to), resname)
@@ -314,7 +470,24 @@ def _side_chain_fragment(protein, to, resname):
         )
     link = _atom_in_residue(frag, sites[0])
     anchor = _bonded_hydrogens(link, frag.name, 1)[0]
-    return frag, link, anchor, frag.name, True, None
+    return frag, link, anchor, frag.name, True, None, None
+
+
+def _ring_closure(n, ca):
+    """Return the side-chain atom bonded to a residue's ``N``, or None.
+
+    That atom closes a ring through the backbone, as ``CD`` of proline
+    does. Only an atom of the same residue counts: the carbonyl carbon
+    of the preceding residue also bonds ``N``, through the peptide bond.
+    """
+    for atom in n.direct_bonds():
+        if (
+            atom is not ca
+            and atom.parent is ca.parent
+            and atom.element.symbol.upper() != "H"
+        ):
+            return atom
+    return None
 
 
 def _old_side_chain(protein, residue, n, ca, c, stereo):
@@ -328,6 +501,12 @@ def _old_side_chain(protein, residue, n, ca, c, stereo):
     takes the old hydrogen direction. A glycine has two alpha
     hydrogens; the one whose place gives the wanted handedness
     leaves, and the other is renamed ``HA``.
+
+    A side chain that closes a ring on ``N``, as proline's does, is
+    opened at ``N`` first, and ``N`` takes back a hydrogen, named as
+    the CCD names amide hydrogens and placed in the plane of the
+    peptide bond, as ``protonate`` places one. The side chain then
+    leaves like any other.
 
     Returns
     -------
@@ -365,13 +544,23 @@ def _old_side_chain(protein, residue, n, ca, c, stereo):
         kept = alphas[1] if leaving is alphas[0] else alphas[0]
         kept.name = "HA"
         return [leaving], leaving.pos - ca.pos, []
+    closure = _ring_closure(n, ca)
+    if closure is not None:
+        _remove_bond_and_ports(protein, n, closure)
+        names = {atom.name for atom in n.direct_bonds()}
+        proton = Compound(
+            name=next(name for name in _AMIDE_HYDROGENS if name not in names),
+            element="H",
+            pos=_proton_position(n),
+        )
+        residue.add(proton)
+        protein.add_bond((n, proton), bond_order=1.0)
     try:
         leaving = _substituent(ca, cb)
     except MBuildError as error:
         raise MBuildError(
             f"mutate() cannot remove the side chain of {label}: "
-            f"{error.args[0]} A side chain bonded to the backbone at "
-            "both ends, as in proline, or joined to another residue by a "
+            f"{error.args[0]} A side chain joined to another residue by a "
             "crosslink, as a disulfide cysteine, cannot be replaced."
         ) from error
     orientation = cb.pos - ca.pos
@@ -385,6 +574,22 @@ def _old_side_chain(protein, residue, n, ca, c, stereo):
     new_orientation = ha.pos - ca.pos
     ha.pos = ca.pos + _unit(orientation) * np.linalg.norm(new_orientation)
     return leaving, new_orientation, [ha]
+
+
+def _remove_bond_and_ports(protein, atom1, atom2):
+    """Delete the bond between two atoms of one residue, leaving no ports.
+
+    ``Compound.remove_bond`` adds a port on each atom along the broken
+    bond; ``mutate`` forms no bond there, so both ports go again.
+    """
+    residue = atom1.parent
+    old_ports = {p for p in residue.children if isinstance(p, Port)}
+    protein.remove_bond((atom1, atom2))
+    new_ports = [
+        p for p in residue.children if isinstance(p, Port) and p not in old_ports
+    ]
+    if new_ports:
+        protein.remove(new_ports)
 
 
 def _variant_for(residue, variants):

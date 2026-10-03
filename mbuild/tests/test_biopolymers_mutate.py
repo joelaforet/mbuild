@@ -1,5 +1,6 @@
 """Tests for replacing the side chain of a residue in place."""
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -220,17 +221,75 @@ class TestProteinMutate(BaseTest):
         with pytest.raises(MBuildError, match="crosslink"):
             protein.mutate(bridged.resnum, "ALA", chain_id="A")
 
-    def test_proline_is_refused_both_ways(self, protein):
-        # Tests that a proline cannot be mutated and that no residue can
-        # be mutated to proline, with an error that names the reason.
-        # Proline's side chain bonds the backbone nitrogen, so removing
-        # or adding it changes the backbone, which mutate() promises to
-        # keep.
-        assert protein.get_residue(9, chain_id="A").name == "PRO"
-        with pytest.raises(MBuildError, match="PRO A:9"):
-            protein.mutate(9, "ALA", chain_id="A")
-        with pytest.raises(MBuildError, match="ring"):
-            protein.mutate(7, "PRO", chain_id="A")
+    def test_mutate_to_proline(self, protein, caplog, tmp_path):
+        # Tests that alanine 7 becomes a proline whose ring closes on
+        # the backbone nitrogen, with the backbone in place, the amide
+        # hydrogen gone, the PRO definition matched, and a file that
+        # loads again. This is needed because proline's side chain bonds
+        # N as well as CA, so no single bond can align it: mutate()
+        # superposes the CCD component on the backbone instead. Residue
+        # 7 sits at a phi of about -100 degrees, so the test also checks
+        # the warning about the strained ring.
+        before = {
+            name: protein.get_atom(7, name, chain_id="A").pos.copy()
+            for name in ("N", "CA", "C", "O", "HA")
+        }
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            residue = protein.mutate(7, "PRO", chain_id="A", platform="CPU")
+
+        assert residue.name == "PRO"
+        assert residue.hetatm is False
+        assert residue.template.name == "PRO"
+        assert residue.formal_charge == 0
+        atoms = {particle.name: particle for particle in residue.particles()}
+        assert set(atoms) == residue.template.atom_names - {"H", "OXT", "HXT"}
+        for name, pos in before.items():
+            assert np.allclose(atoms[name].pos, pos)
+        assert atoms["CD"] in atoms["N"].direct_bonds()
+        assert atoms["CB"] in atoms["CA"].direct_bonds()
+        n_cd = np.linalg.norm(atoms["N"].pos - atoms["CD"].pos)
+        assert n_cd == pytest.approx(0.147, abs=0.01)
+        assert _handedness(residue) == "L"
+        assert "phi of ALA A:7" in caplog.text
+
+        protein.save_pdb(tmp_path / "pro.pdb")
+        again = Protein(tmp_path / "pro.pdb")
+        assert again.get_residue(7, chain_id="A").template.name == "PRO"
+
+    def test_mutate_from_proline(self, protein, tmp_path):
+        # Tests that proline 9 becomes an alanine: the ring opens at N,
+        # N takes back an amide hydrogen in the plane of the peptide
+        # bond, no port is left behind, the backbone stays in place, and
+        # the file loads again. This is needed because the side chain
+        # of proline has no far side of the CA-CB bond until its bond
+        # to N is broken, and a mid-chain residue other than proline
+        # carries a hydrogen on N that the ALA definition requires.
+        residue = protein.get_residue(9, chain_id="A")
+        assert residue.name == "PRO"
+        before = {
+            name: protein.get_atom(9, name, chain_id="A").pos.copy()
+            for name in ("N", "CA", "C", "O", "HA")
+        }
+
+        protein.mutate(9, "ALA", chain_id="A", platform="CPU")
+
+        assert residue.name == "ALA"
+        assert residue.template.name == "ALA"
+        atoms = {particle.name: particle for particle in residue.particles()}
+        assert set(atoms) == residue.template.atom_names - {"H2", "OXT", "HXT"}
+        assert not any(isinstance(child, mb.Port) for child in residue.children)
+        for name, pos in before.items():
+            assert np.allclose(atoms[name].pos, pos)
+        n, h = atoms["N"], atoms["H"]
+        assert np.linalg.norm(h.pos - n.pos) == pytest.approx(0.101, abs=0.005)
+        previous = next(a for a in n.direct_bonds() if a.name == "C")
+        normal = np.cross(previous.pos - n.pos, atoms["CA"].pos - n.pos)
+        normal /= np.linalg.norm(normal)
+        assert abs(np.dot(h.pos - n.pos, normal)) < 0.01
+
+        protein.save_pdb(tmp_path / "ala.pdb")
+        again = Protein(tmp_path / "ala.pdb")
+        assert again.get_residue(9, chain_id="A").template.name == "ALA"
 
     def test_charged_default_and_deprotonate(self, protein):
         # Tests that a CCD side chain arrives in the component's default

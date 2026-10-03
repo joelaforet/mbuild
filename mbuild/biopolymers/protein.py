@@ -1338,6 +1338,7 @@ class Protein(Compound):
         resname=None,
         stereo=None,
         relax=True,
+        platform=None,
     ):
         """Replace the side chain of one residue, keeping its backbone in place.
 
@@ -1353,6 +1354,19 @@ class Protein(Compound):
         ``O`` and their hydrogens keep their coordinates. When the new
         side chain overlaps other atoms, it is relaxed together with the
         side chains within 4 A of it, with every backbone atom fixed.
+
+        Proline's side chain also bonds ``N``, so it follows another
+        path. Mutating from proline opens the ring at ``N``, which takes
+        back its amide hydrogen. Mutating to proline, or to any CCD
+        component whose side chain closes on ``N``, superposes the whole
+        component on the residue's ``N``, ``CA`` and ``C`` and on the
+        side-chain direction (a Kabsch fit), keeps its side-chain atoms,
+        bonds them to ``CA`` and ``N``, and removes one hydrogen from
+        ``N``. The ring is then always relaxed, since its two bonds
+        close at whatever length the backbone allows. The backbone
+        still does not move, so a residue whose phi is far from the
+        -65 degrees a proline ring holds gets a strained ring and a
+        warning.
 
         A CCD component gives the side chain in its default protonation
         state, which is the charged form for LYS, ARG, ASP and GLU.
@@ -1397,6 +1411,10 @@ class Protein(Compound):
         relax : bool, optional, default=True
             When the placed side chain overlaps existing atoms, minimize
             with only the new atoms free (see ``relax_fragments``).
+        platform : str, optional
+            OpenMM platform of that minimization, as in
+            ``relax_fragments``: ``"CUDA"`` when OpenMM can run on a GPU
+            here and ``"CPU"`` otherwise, unless named.
 
         Returns
         -------
@@ -1407,10 +1425,9 @@ class Protein(Compound):
         ------
         MBuildError
             When the residue lacks ``N``, ``CA`` or ``C``; when the
-            side chain cannot be removed because it bonds the backbone
-            twice, as in proline; when the target is proline, for the
-            same reason; when the CCD code is not an alpha amino acid;
-            or when no definition of the new residue describes the
+            side chain cannot be removed because a crosslink joins it to
+            another residue; when the CCD code is not an alpha amino
+            acid; or when no definition of the new residue describes the
             result.
 
         Examples
@@ -1418,6 +1435,7 @@ class Protein(Compound):
         >>> protein.mutate(1381, "4II", chain_id="A")   # serine to AzF
         >>> protein.mutate(1500, "CYS", chain_id="A")
         >>> protein.mutate(7, "ALA", chain_id="A", stereo="D")
+        >>> protein.mutate(295, "PRO", chain_id="A")
         """
         return _mutate(
             self,
@@ -1428,4 +1446,5 @@ class Protein(Compound):
             resname=resname,
             stereo=stereo,
             relax=relax,
+            platform=platform,
         )
