@@ -1379,10 +1379,11 @@ class Protein(Compound):
         -65 degrees a proline ring holds gets a strained ring and a
         warning.
 
-        A CCD component gives the side chain in its default protonation
-        state, which is the charged form for LYS, ARG, ASP and GLU.
-        Call ``deprotonate`` or ``protonate`` afterwards for another
-        state.
+        A CCD component gives the side chain in the protonation state of
+        its definition: charged for LYS and ARG, doubly protonated (and
+        charged) for HIS, and the neutral acid for ASP and GLU. Call
+        ``deprotonate`` or ``protonate`` afterwards for another state, for
+        example ``deprotonate(resnum, "OD2")`` for the aspartate of pH 7.
 
         Parameters
         ----------
