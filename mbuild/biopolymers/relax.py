@@ -38,6 +38,12 @@ _NEIGHBOURHOOD_MARGIN = 0.2
 #: Most neighbourhoods one relaxation builds.
 _NEIGHBOURHOOD_ROUNDS = 3
 
+#: Names of the backbone atoms of an amino acid, with their hydrogens.
+#: A relaxation never moves them.
+_BACKBONE_NAMES = frozenset(
+    ["N", "CA", "C", "O", "H", "H2", "H3", "HA", "HA2", "HA3", "OXT", "HXT"]
+)
+
 #: Distance, in nm, below which two atoms of a placed pose clash, and the
 #: distance below which a contact adds to the soft placement penalty.
 #: 0.17 nm is the van der Waals radius of carbon, the threshold the
@@ -1051,23 +1057,9 @@ def _side_chains_near(protein, placed, radius=0.4, particles=None):
     from scipy.spatial import cKDTree
 
     placed = set(placed)
-    backbone = {
-        "N",
-        "CA",
-        "C",
-        "O",
-        "H",
-        "H2",
-        "H3",
-        "HA",
-        "HA2",
-        "HA3",
-        "OXT",
-        "HXT",
-    }
     if particles is None:
         particles = list(protein.particles())
-    others = [p for p in particles if p not in placed and p.name not in backbone]
+    others = [p for p in particles if p not in placed and p.name not in _BACKBONE_NAMES]
     if not others or not placed:
         return []
     tree = cKDTree([p.pos for p in others])

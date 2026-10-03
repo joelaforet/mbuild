@@ -59,7 +59,11 @@ from mbuild.biopolymers.protein_pdb_io import (
     write_pdb,
 )
 from mbuild.biopolymers.protonation import _deprotonate, _protonate
-from mbuild.biopolymers.relax import _relax_particles, _side_chains_near
+from mbuild.biopolymers.relax import (
+    _BACKBONE_NAMES,
+    _relax_particles,
+    _side_chains_near,
+)
 from mbuild.biopolymers.residue import (
     Chain,
     InterResidueBond,
@@ -859,7 +863,8 @@ class Protein(Compound):
         ----------
         residues : iterable of Residue, optional
             The residues allowed to move. Default: every HETATM
-            residue (i.e. all attached fragments).
+            residue (i.e. all attached fragments). A residue with an
+            amino-acid backbone moves its side chain only.
         n_steps : int, optional, default=0
             Maximum minimization iterations. It reaches OpenMM as
             ``maxIterations``. ``0`` has OpenMM's meaning: the
@@ -901,7 +906,12 @@ class Protein(Compound):
             return
         mobile = set()
         for residue in targets:
-            mobile.update(residue.particles())
+            atoms = list(residue.particles())
+            # An amino acid, a mutated one for instance, moves its side
+            # chain only, so the backbone stays where the file put it.
+            if {"N", "CA", "C"} <= {atom.name for atom in atoms}:
+                atoms = [atom for atom in atoms if atom.name not in _BACKBONE_NAMES]
+            mobile.update(atoms)
         particles = list(self.particles())
         if side_chains:
             mobile.update(_side_chains_near(self, mobile, particles=particles))
@@ -1339,6 +1349,7 @@ class Protein(Compound):
         stereo=None,
         relax=True,
         platform=None,
+        minimize=True,
     ):
         """Replace the side chain of one residue, keeping its backbone in place.
 
@@ -1415,6 +1426,13 @@ class Protein(Compound):
             OpenMM platform of that minimization, as in
             ``relax_fragments``: ``"CUDA"`` when OpenMM can run on a GPU
             here and ``"CPU"`` otherwise, unless named.
+        minimize : bool, optional, default=True
+            False turns the new side chain clear about its own bonds but
+            leaves out the minimization, for a later ``relax_fragments``
+            call that relaxes several mutations, or mutations and
+            attached fragments, in one simulation (pass the mutated
+            residues and ``side_chains=True``). A proline ring keeps the
+            bond lengths of its superposition until then.
 
         Returns
         -------
@@ -1447,4 +1465,5 @@ class Protein(Compound):
             stereo=stereo,
             relax=relax,
             platform=platform,
+            minimize=minimize,
         )

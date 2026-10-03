@@ -164,6 +164,7 @@ def _mutate(
     stereo=None,
     relax=True,
     platform=None,
+    minimize=True,
 ):
     """Replace the side chain of one residue; see ``Protein.mutate``."""
     if stereo is not None:
@@ -270,13 +271,13 @@ def _mutate(
         residue.atom_formal_charges = charges
         residue.formal_charge = sum(charges.values())
 
-    if formed and relax:
+    if formed and relax and minimize:
         # The rigid superposition leaves the ring bonds at whatever
         # length the residue's backbone allows, so the side chain is
         # relaxed whether or not it clashes, and those bonds checked.
         _relax_until_bonded(protein, added + moved, formed, platform=platform)
     elif not formed:
-        _relax_if_clashing(protein, added + moved, ca, link, relax, platform)
+        _relax_if_clashing(protein, added + moved, ca, link, relax, platform, minimize)
     return residue
 
 

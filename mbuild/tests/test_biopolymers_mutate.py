@@ -12,7 +12,7 @@ from mbuild.biopolymers.mutate import _alpha_handedness
 from mbuild.biopolymers.relax import _closest_contact
 from mbuild.exceptions import MBuildError
 from mbuild.tests.base_test import BaseTest
-from mbuild.utils.io import get_fn, has_rdkit
+from mbuild.utils.io import get_fn, has_openmm, has_rdkit
 
 BACKBONE = ("N", "CA", "C", "O", "H")
 
@@ -255,6 +255,46 @@ class TestProteinMutate(BaseTest):
         protein.save_pdb(tmp_path / "pro.pdb")
         again = Protein(tmp_path / "pro.pdb")
         assert again.get_residue(7, chain_id="A").template.name == "PRO"
+
+    @pytest.mark.skipif(not (has_rdkit and has_openmm), reason="needs RDKit and OpenMM")
+    def test_minimize_false_defers_to_one_relaxation(self, protein, monkeypatch):
+        # Tests that mutate(minimize=False) runs no minimization, and that
+        # one relax_fragments call over the mutated residues relaxes their
+        # side chains, closes a proline ring, and leaves every backbone
+        # atom where it was. This is needed because a structure with many
+        # mutations, or mutations and attached glycans, is built fastest
+        # by placing everything first and minimizing once, and
+        # relax_fragments must keep the promise mutate makes about the
+        # backbone. The test mutates ALA 7 to PHE and TYR 37 to PRO.
+        import mbuild.biopolymers.protein as protein_module
+        from mbuild.biopolymers import relax
+
+        runs = []
+        original = relax._relax_particles
+
+        def counting(*args, **kwargs):
+            runs.append(1)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(relax, "_relax_particles", counting)
+        monkeypatch.setattr(protein_module, "_relax_particles", counting)
+        backbone = ("N", "CA", "C", "O", "HA")
+        before = {
+            (resnum, name): protein.get_atom(resnum, name, chain_id="A").pos.copy()
+            for resnum in (7, 37)
+            for name in backbone
+        }
+        phe = protein.mutate(7, "PHE", chain_id="A", minimize=False)
+        pro = protein.mutate(37, "PRO", chain_id="A", minimize=False)
+        assert runs == []
+
+        protein.relax_fragments(residues=[phe, pro], side_chains=True, platform="CPU")
+
+        assert runs == [1]
+        for (resnum, name), pos in before.items():
+            assert np.allclose(protein.get_atom(resnum, name, chain_id="A").pos, pos)
+        n, cd = (protein.get_atom(37, name, chain_id="A") for name in ("N", "CD"))
+        assert np.linalg.norm(n.pos - cd.pos) == pytest.approx(0.147, abs=0.01)
 
     def test_mutate_from_proline(self, protein, tmp_path):
         # Tests that proline 9 becomes an alanine: the ring opens at N,
