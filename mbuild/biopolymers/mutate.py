@@ -35,6 +35,7 @@ from mbuild.biopolymers.fragments import (
 from mbuild.biopolymers.matching import _leaving_expectations
 from mbuild.biopolymers.relax import (
     _PORT_SEPARATION,
+    _kabsch,
     _proton_position,
     _relax_if_clashing,
     _relax_until_bonded,
@@ -339,20 +340,6 @@ def _place_ring_side_chain(
     protein.add_bond((ca, link), bond_order=1.0)
     protein.add_bond((n, closure), bond_order=1.0)
     return added, [(ca, link, 1.0), (n, closure, 1.0)]
-
-
-def _kabsch(source, target):
-    """Return the rotation and shift that best map ``source`` onto ``target``.
-
-    The least-squares superposition of two equally ordered point sets
-    (Kabsch). Apply it as ``points @ rotation.T + shift``.
-    """
-    source_centre, target_centre = source.mean(axis=0), target.mean(axis=0)
-    u, _, vt = np.linalg.svd((source - source_centre).T @ (target - target_centre))
-    # A reflection would turn an L residue into a D one.
-    sign = np.sign(np.linalg.det(vt.T @ u.T))
-    rotation = vt.T @ np.diag([1.0, 1.0, sign]) @ u.T
-    return rotation, target_centre - source_centre @ rotation.T
 
 
 def _warn_on_proline_phi(n, ca, c):
