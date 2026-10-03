@@ -463,6 +463,59 @@ class TestProteinModify(BaseTest):
             assert np.allclose(protein_6m03.get_atom(12, name, chain_id="A").pos, pos)
 
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    def test_other_conformers_keep_every_stereocentre(self, protein_6m03):
+        # Tests that the conformer search, the last resort of the
+        # placement, keeps the configuration of every stereocentre of the
+        # fragment and the direction of the new bond. This is needed
+        # because a glycan is a chain of stereocentres: an embedding that
+        # ignores them turns a GlcNAc into another sugar, and a rigid refit
+        # that moves the bonding atom can put a mutated side chain on the
+        # wrong side of CA. The test attaches a fragment with two
+        # stereocentres to LYS 12, runs the search, and compares the CIP
+        # labels, and the bond angle and length at the link, before and
+        # after.
+        from rdkit import Chem
+
+        from mbuild.biopolymers.relax import _atoms_beyond, _try_conformers
+        from mbuild.biopolymers.residue import _rdkit_mol
+
+        fragment = prepare_fragment("*C[C@H](O)[C@@H](N)C(=O)O", "THX")
+        protein_6m03.attach(
+            fragment, resnum=12, atom_name="NZ", chain_id="A", relax=False
+        )
+        site = protein_6m03.get_atom(12, "NZ", chain_id="A")
+        bonded = next(a for a in site.direct_bonds() if a.parent.name == "THX")
+        atoms = _atoms_beyond(protein_6m03.root.bond_graph, site, bonded)
+
+        def labels():
+            editable, _ = _rdkit_mol(protein_6m03, atoms)
+            mol = editable.GetMol()
+            Chem.SanitizeMol(mol)
+            conformer = Chem.Conformer(len(atoms))
+            for i, atom in enumerate(atoms):
+                conformer.SetAtomPosition(i, (atom.pos * 10).tolist())
+            mol.AddConformer(conformer)
+            Chem.AssignStereochemistryFrom3D(mol)
+            return Chem.FindMolChiralCenters(mol, useLegacyImplementation=False)
+
+        ce = protein_6m03.get_atom(12, "CE", chain_id="A")
+
+        def link_geometry():
+            a, b = ce.pos - site.pos, bonded.pos - site.pos
+            angle = np.degrees(np.arccos(a @ b / np.linalg.norm(a) / np.linalg.norm(b)))
+            return angle, np.linalg.norm(b)
+
+        before, geometry = labels(), link_geometry()
+        assert len(before) == 2
+
+        _try_conformers(protein_6m03, atoms, site, bonded)
+
+        assert labels() == before
+        angle, length = link_geometry()
+        assert angle == pytest.approx(geometry[0], abs=2.0)
+        assert length == pytest.approx(geometry[1], abs=0.005)
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     @pytest.mark.skipif(
         not (has_hoomd and has_openmm),
         reason="relax_fragments needs mbuild.simulation (hoomd) and openmm",

@@ -819,22 +819,30 @@ def _fit_placement(protein, added, bonds, particles=None):
 
 
 def _try_conformers(protein, added, site_atom, frag_atom, count=8, particles=None):
-    """Re-embed the placed atoms in other conformers and keep the clearest.
+    """Re-embed the fragment in other conformers and keep the clearest.
 
     The conformer a fragment arrives in is one of many, and a long
-    flexible one may cross the protein in every rigid pose. This
-    builds an RDKit molecule from the placed atoms and their bonds,
-    embeds ``count`` conformers, fits each rigidly with the bond
-    kept at length, and keeps the pose whose closest contact with
-    the protein is largest. The original pose competes on the same
-    terms. Nothing is done when the molecule cannot be embedded.
+    flexible one may cross the protein in every pose the torsion search
+    reaches. This embeds ``count`` conformers of the fragment, the atoms
+    beyond ``frag_atom``, with RDKit, places each one, and keeps the pose
+    whose closest contact with the protein is largest. The original pose
+    competes on the same terms. Nothing is done when the molecule cannot
+    be embedded.
+
+    The configuration of every stereocentre is read from the current
+    coordinates and enforced in the embedding, and a conformer that comes
+    out with another configuration is dropped, so a sugar keeps its
+    identity. Each conformer is superposed on the current pose by
+    ``frag_atom`` and its neighbours, which keeps the direction of the new
+    bond and so the configuration at ``site_atom``, and is then turned
+    clear with ``_place_by_torsions``.
 
     Parameters
     ----------
     protein : Protein
         The protein that owns the placed atoms.
     added : list of mbuild.Compound
-        The placed particles.
+        The placed particles; the clearance is measured for them.
     site_atom, frag_atom : mbuild.Compound
         The two atoms of the new bond.
     count : int, optional, default=8
@@ -846,37 +854,97 @@ def _try_conformers(protein, added, site_atom, frag_atom, count=8, particles=Non
     from rdkit.Chem import AllChem
 
     everything = list(protein.particles()) if particles is None else particles
-    particles = list(added)
-    editable, index = _rdkit_mol(protein, particles)
+    graph = protein.root.bond_graph
+    fragment = _atoms_beyond(graph, site_atom, frag_atom)
+    editable, index = _rdkit_mol(protein, fragment)
+    # The bond to the protein is outside the fragment, so a hydrogen along
+    # it stands in for the protein atom: without it the bonding atom would
+    # be embedded with one neighbour too few, flat instead of tetrahedral,
+    # and the configuration at an anomeric carbon would be lost.
+    cap = Chem.Atom(1)
+    cap.SetNoImplicit(True)
+    cap = editable.AddAtom(cap)
+    editable.AddBond(index[frag_atom], cap, Chem.BondType.SINGLE)
     mol = editable.GetMol()
+    current = np.array([atom.pos for atom in fragment])
+    bond = site_atom.pos - frag_atom.pos
+    capped = np.vstack([current, frag_atom.pos + bond / np.linalg.norm(bond) * 0.109])
     try:
         Chem.SanitizeMol(mol)
-        conformers = list(AllChem.EmbedMultipleConfs(mol, numConfs=count, randomSeed=0))
+        start = Chem.Conformer(len(fragment) + 1)
+        for i, position in enumerate(capped * 10.0):
+            start.SetAtomPosition(i, position.tolist())
+        mol.AddConformer(start, assignId=True)
+        Chem.AssignStereochemistryFrom3D(mol)
+        wanted = Chem.FindMolChiralCenters(
+            mol, includeUnassigned=True, useLegacyImplementation=False
+        )
+        conformers = list(
+            AllChem.EmbedMultipleConfs(
+                mol,
+                numConfs=count,
+                randomSeed=0,
+                enforceChirality=True,
+                clearConfs=False,
+            )
+        )
     except Exception:  # noqa: BLE001 - RDKit raises several unrelated types
         conformers = []
     if not conformers:
         return
-    best = [particle.pos.copy() for particle in particles]
+    # The atoms that fix the frame of the new bond: the bonding atom, the
+    # hydrogen along the bond, and the heavy neighbours of the bonding atom.
+    # Its own hydrogens are left out, since equivalent ones may trade places
+    # between the structure and a conformer.
+    frame = [index[frag_atom], cap] + [
+        index[n] for n in graph.adj[frag_atom] if n in index and _is_heavy(n)
+    ]
+    # The torsion search may turn the site residue's side chain too, so every
+    # pose starts from, and is kept as, the positions of all of those atoms.
+    movable = list(dict.fromkeys(fragment + list(site_atom.parent.particles())))
+    start_pose = np.array([atom.pos for atom in movable])
+    best = start_pose.copy()
     best_clearance = _closest_contact(protein, added, site_atom, frag_atom, everything)
     for conformer in conformers:
-        positions = np.array(mol.GetConformer(conformer).GetPositions()) / 10.0
-        # Put the bonding atom where it is now, then fit the rest.
-        positions += frag_atom.pos - positions[index[frag_atom]]
-        for particle, position in zip(particles, positions):
-            particle.pos = position
-        _fit_placement(
-            protein, added, [(site_atom, frag_atom, 1.0)], particles=everything
+        check = Chem.Mol(mol, confId=conformer)
+        check.RemoveAllConformers()
+        check.AddConformer(mol.GetConformer(conformer), assignId=True)
+        Chem.AssignStereochemistryFrom3D(check)
+        found = Chem.FindMolChiralCenters(
+            check, includeUnassigned=True, useLegacyImplementation=False
         )
+        if found != wanted:
+            continue
+        for atom, position in zip(movable, start_pose):
+            atom.pos = position
+        positions = np.array(mol.GetConformer(conformer).GetPositions()) / 10.0
+        rotation, shift = _kabsch(positions[frame], capped[frame])
+        for atom, position in zip(fragment, positions[:-1] @ rotation.T + shift):
+            atom.pos = position
+        _place_by_torsions(protein, site_atom, frag_atom, particles=everything)
         clearance = _closest_contact(protein, added, site_atom, frag_atom, everything)
         if clearance > best_clearance:
             best_clearance = clearance
-            best = [particle.pos.copy() for particle in particles]
-    for particle, position in zip(particles, best):
-        particle.pos = position
+            best = np.array([atom.pos for atom in movable])
+    for atom, position in zip(movable, best):
+        atom.pos = position
     logger.info(
         f"Tried {len(conformers)} conformers of the placed fragment; the "
         f"clearest sits {best_clearance * 10:.2f} A from the protein."
     )
+
+
+def _kabsch(source, target):
+    """Return the rotation and shift that best map ``source`` onto ``target``.
+
+    Apply it as ``points @ rotation.T + shift``. A reflection is never
+    returned, since it would invert every stereocentre.
+    """
+    source_centre, target_centre = source.mean(axis=0), target.mean(axis=0)
+    u, _, vt = np.linalg.svd((source - source_centre).T @ (target - target_centre))
+    sign = np.sign(np.linalg.det(vt.T @ u.T))
+    rotation = vt.T @ np.diag([1.0, 1.0, sign]) @ u.T
+    return rotation, target_centre - source_centre @ rotation.T
 
 
 def _side_chains_near(protein, placed, radius=0.4, particles=None):
