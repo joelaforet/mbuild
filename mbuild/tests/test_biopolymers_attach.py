@@ -415,6 +415,53 @@ class TestProteinModify(BaseTest):
         else:
             assert all(0.09 < length < 0.22 for length in lengths)
 
+    def test_torsion_search_clears_a_crowded_site(self, protein_6m03):
+        # Tests that the placement search turns a bulky fragment, its
+        # rotatable bonds and the site side chain clear of the protein
+        # while every bond length stays exactly as it was and the
+        # backbone does not move. This is needed because a turn about a
+        # bond is the only move that leaves bond geometry untouched, so
+        # the minimizer that follows starts from a clear pose and has no
+        # bond to put back; a rigid fit that may stretch the new bond
+        # needed tens of seconds per fragment on a large protein. The
+        # test places a triphenylmethyl group rigidly on LYS 12, where it
+        # lands 0.1 A from other atoms, and runs the search.
+        from mbuild.biopolymers.relax import (
+            _atoms_beyond,
+            _closest_contact,
+            _place_by_torsions,
+        )
+
+        bulky = mb.load("C(c1ccccc1)(c1ccccc1)c1ccccc1", smiles=True)
+        protein_6m03.attach(
+            bulky,
+            "C1",
+            resnum=12,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="TPM",
+            relax=False,
+        )
+        site = protein_6m03.get_atom(12, "NZ", chain_id="A")
+        bonded = next(a for a in site.direct_bonds() if a.parent.name == "TPM")
+        fragment = _atoms_beyond(protein_6m03.root.bond_graph, site, bonded)
+        lengths = {
+            (a, b): np.linalg.norm(a.pos - b.pos) for a, b in protein_6m03.bonds()
+        }
+        backbone = {
+            name: protein_6m03.get_atom(12, name, chain_id="A").pos.copy()
+            for name in ("N", "CA", "C", "O")
+        }
+        assert _closest_contact(protein_6m03, fragment, site, bonded) < 0.02
+
+        _place_by_torsions(protein_6m03, site, bonded)
+
+        assert _closest_contact(protein_6m03, fragment, site, bonded) > 0.12
+        for (a, b), length in lengths.items():
+            assert np.linalg.norm(a.pos - b.pos) == pytest.approx(length, abs=1e-6)
+        for name, pos in backbone.items():
+            assert np.allclose(protein_6m03.get_atom(12, name, chain_id="A").pos, pos)
+
     @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
     @pytest.mark.skipif(
         not (has_hoomd and has_openmm),

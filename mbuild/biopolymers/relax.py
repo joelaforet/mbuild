@@ -2,9 +2,11 @@
 
 ``Protein.attach`` and ``Protein.mutate`` align a fragment rigidly along
 the bond it forms, which can leave it inside the protein. The functions
-here move it clear: a rigid fit that keeps every formed bond at bond
-length (``_fit_placement``), other conformers when the fragment has no
-clear rigid pose (``_try_conformers``), and a minimization with mBuild's
+here move it clear: a search over the torsions next to the new bond
+that keeps every bond length and angle as it is (``_place_by_torsions``),
+a rigid fit that keeps every formed bond at bond length when several
+bonds form (``_fit_placement``), other conformers when the fragment has
+no clear pose (``_try_conformers``), and a minimization with mBuild's
 generic force field in which only the placed atoms and the side chains
 near them move (``_relax_particles``). The minimization never returns a
 torn fragment: any bond it stretched puts the positions back.
@@ -35,6 +37,13 @@ _RELAX_CUTOFF = 1.0
 _NEIGHBOURHOOD_MARGIN = 0.2
 #: Most neighbourhoods one relaxation builds.
 _NEIGHBOURHOOD_ROUNDS = 3
+
+#: Distance, in nm, below which two atoms of a placed pose clash, and the
+#: distance below which a contact adds to the soft placement penalty.
+#: 0.17 nm is the van der Waals radius of carbon, the threshold the
+#: GlycoShape Re-Glyco placement uses.
+_CLASH_DISTANCE = 0.17
+_CONTACT_DISTANCE = 0.22
 
 
 @lru_cache(maxsize=1)
@@ -323,9 +332,11 @@ def _relax_if_clashing(protein, added, site_atom, frag_atom, relax, platform=Non
     """Relax the placed atoms when they overlap other atoms.
 
     Port alignment is rigid, so a bulky fragment can land inside the
-    protein. The relaxation moves only the placed atoms. It needs
-    the simulation dependencies; without them the method warns and
-    keeps the rigid placement.
+    protein. The fragment is first turned clear (``_place_by_torsions``),
+    which may also turn the site residue's side chain about its chi
+    bonds; the backbone never moves. The relaxation then moves only the
+    placed atoms and the side chains near them. It needs the simulation
+    dependencies; without them the method warns and keeps the placement.
 
     Parameters
     ----------
@@ -349,13 +360,12 @@ def _relax_if_clashing(protein, added, site_atom, frag_atom, relax, platform=Non
     if not (clashes and relax):
         return
     # Port alignment fixes the fragment up to a turn about the new
-    # bond. Before the minimizer sees the overlap, turn and shift
-    # the fragment rigidly to the pose that keeps the bond at length
-    # and the fragment clear of the protein. A minimizer started from
-    # atoms 0.3 A apart tears bonds; from a clear pose it converges.
-    # A floppy fragment may have no clear rigid pose in the
-    # conformer it arrived in, so other conformers are tried too.
-    _fit_placement(protein, added, [(site_atom, frag_atom, 1.0)], particles=particles)
+    # bond. Before the minimizer sees the overlap, turn the fragment,
+    # its rotatable bonds and the site side chain to a clear pose. A
+    # minimizer started from atoms 0.3 A apart tears bonds; from a
+    # clear pose it converges. Only when no turn clears the fragment
+    # are other conformers of it tried.
+    _place_by_torsions(protein, site_atom, frag_atom, particles=particles)
     if _closest_contact(protein, added, site_atom, frag_atom, particles) < 0.1:
         _try_conformers(protein, added, site_atom, frag_atom, particles=particles)
     try:
@@ -398,6 +408,308 @@ def _relax_if_clashing(protein, added, site_atom, frag_atom, relax, platform=Non
             f"Fragment relaxed; closest contact with existing atoms is now "
             f"{closest * 10:.2f} A."
         )
+
+
+def _place_by_torsions(
+    protein, site_atom, frag_atom, particles=None, site_torsions=2, fragment_torsions=4
+):
+    """Turn the fragment and the site side chain about bonds until clear.
+
+    Once a bond has formed at its length and angles, what is left to
+    choose is torsions: the turn about the new bond itself, the turns
+    about the side-chain bonds of the site residue that lead to it
+    (chi angles), and the turns about the rotatable bonds of the
+    fragment nearest the bond. Turning about a bond keeps every bond
+    length and angle exactly as it was, so no pose this search makes
+    needs a bond put back. The glycoprotein builders search the same
+    space (GLYCAM-Web's Asn chi angles, the GlycoShape Re-Glyco phi and
+    psi), as does covalent docking that treats the ligand as a side
+    chain.
+
+    Every candidate pose is scored at once: one KD-tree query against
+    the atoms within reach, and the distances between the moved atoms
+    that a turn can bring together, the latter for the best 64 poses of
+    each round only. A contact inside
+    ``_CONTACT_DISTANCE`` adds a soft penalty and one inside
+    ``_CLASH_DISTANCE`` a far steeper one, so that a single deep overlap
+    costs more than many shallow contacts. A grid over the new bond and
+    the first chi angle comes first, then three rounds of random moves
+    about the best poses, narrowing from 60 to 10 degrees. The best pose
+    is kept only when it scores better than the start.
+
+    Parameters
+    ----------
+    protein : Protein
+        The protein that holds both atoms.
+    site_atom, frag_atom : mbuild.Compound
+        The two atoms of the new bond. Everything beyond ``frag_atom``
+        is the fragment.
+    particles : list of mbuild.Compound, optional
+        The protein's particles (see ``_relax_particles``).
+    site_torsions : int, optional, default=2
+        Most side-chain bonds of the site residue to turn, counted from
+        the site atom toward ``CA``. A bond whose far side holds more
+        than this side chain and the fragment, as in a ring through the
+        backbone or a crosslink, is never turned, nor is an amide C-N
+        bond.
+    fragment_torsions : int, optional, default=4
+        Most rotatable bonds of the fragment to turn, nearest the new
+        bond first. Only a bond outside every ring, between two atoms
+        with other heavy neighbours, that carries at least three heavy
+        atoms on its far side counts.
+    """
+    from scipy.spatial import cKDTree
+
+    if particles is None:
+        particles = list(protein.particles())
+    graph = protein.root.bond_graph
+    torsions = _placement_torsions(
+        graph, site_atom, frag_atom, site_torsions, fragment_torsions
+    )
+    moving = list(dict.fromkeys(atom for _, _, atoms in torsions for atom in atoms))
+    position_of = {atom: i for i, atom in enumerate(moving)}
+    start = np.array([atom.pos for atom in moving])
+
+    # The surroundings: every atom within reach of the fragment that does
+    # not move. A moved atom's own partners one or two bonds away sit at
+    # bonded distances in every pose, so those pairs, and only those, are
+    # left out of the score.
+    xyz = np.array([particle.pos for particle in particles])
+    reach = np.linalg.norm(start - site_atom.pos, axis=1).max() + 0.6
+    near = cKDTree(xyz).query_ball_point(site_atom.pos, reach)
+    around = [i for i in near if particles[i] not in position_of]
+    # The few surrounding atoms that are such a partner of some moved
+    # atom are scored pair by pair with a fixed mask; the rest need no
+    # mask and are scored with a nearest-neighbour query.
+    partner_of = {}
+    for atom in moving:
+        for neighbor in graph.adj[atom]:
+            for partner in [neighbor, *graph.adj[neighbor]]:
+                if partner not in position_of:
+                    partner_of.setdefault(partner, set()).add(position_of[atom])
+    bonded = [i for i in around if particles[i] in partner_of]
+    around = [i for i in around if particles[i] not in partner_of]
+    bonded_xyz = xyz[bonded]
+    scored = np.ones((len(moving), len(bonded)), dtype=bool)
+    for k, i in enumerate(bonded):
+        scored[sorted(partner_of[particles[i]]), k] = False
+    tree = cKDTree(xyz[around]) if around else None
+
+    # Each torsion as (fixed axis atom, moving axis atom, moved atoms),
+    # applied innermost first: a turn nearer the protein then carries
+    # the result of every turn beyond it.
+    steps = [
+        (a, position_of[b], np.array([position_of[atom] for atom in atoms]))
+        for a, b, atoms in torsions
+    ]
+
+    def build(angles):
+        poses = np.repeat(start[None], len(angles), axis=0)
+        for t, (a, b, atoms) in enumerate(steps):
+            theta = angles[:, t]
+            if not theta.any():
+                continue
+            pivot = poses[:, b]
+            base = poses[:, position_of[a]] if a in position_of else a.pos
+            axis = pivot - base
+            axis /= np.linalg.norm(axis, axis=1, keepdims=True)
+            axis = axis[:, None, :]
+            arm = poses[:, atoms] - pivot[:, None]
+            cos, sin = np.cos(theta)[:, None, None], np.sin(theta)[:, None, None]
+            # Rodrigues' rotation of every moved atom about the bond.
+            arm = (
+                arm * cos
+                + np.cross(axis, arm) * sin
+                + axis * (arm * axis).sum(-1, keepdims=True) * (1 - cos)
+            )
+            poses[:, atoms] = pivot[:, None] + arm
+        return poses
+
+    def penalty(distances):
+        # A soft term for every contact inside _CONTACT_DISTANCE, and a
+        # term a hundred times steeper inside _CLASH_DISTANCE, so that one
+        # deep overlap costs more than many shallow contacts.
+        soft = np.clip(_CONTACT_DISTANCE - distances, 0.0, None)
+        hard = np.clip(_CLASH_DISTANCE - distances, 0.0, None)
+        return (soft**2 + 100 * hard**2).sum(-1)
+
+    # Pairs of moved atoms whose distance a turn can change: atoms moved
+    # by different sets of turns, and not one or two bonds apart.
+    moved_by = [frozenset() for _ in moving]
+    for t, (_, _, atoms) in enumerate(steps):
+        for i in atoms:
+            moved_by[i] = moved_by[i] | {t}
+    near_pairs = set()
+    for atom in moving:
+        for neighbor in graph.adj[atom]:
+            for partner in [neighbor, *graph.adj[neighbor]]:
+                if partner in position_of and partner is not atom:
+                    near_pairs.add(frozenset((position_of[atom], position_of[partner])))
+    pairs = np.array(
+        [
+            (i, j)
+            for i in range(len(moving))
+            for j in range(i + 1, len(moving))
+            if moved_by[i] != moved_by[j] and frozenset((i, j)) not in near_pairs
+        ],
+        dtype=int,
+    ).reshape(-1, 2)
+
+    def outside(poses):
+        """Penalty of each pose against the atoms that do not move."""
+        total = np.zeros(len(poses))
+        if tree is not None:
+            distances, _ = tree.query(
+                poses.reshape(-1, 3), distance_upper_bound=_CONTACT_DISTANCE
+            )
+            total += penalty(distances.reshape(poses.shape[:2]))
+        if len(bonded):
+            reach_out = np.linalg.norm(
+                poses[:, :, None] - bonded_xyz[None, None], axis=-1
+            )
+            total += penalty(
+                np.where(scored, reach_out, np.inf).reshape(len(poses), -1)
+            )
+        return total
+
+    def score(poses, keep=8):
+        """Return the indices and full penalties of the ``keep`` best poses.
+
+        The surroundings are scored for every pose; the pairs within the
+        moved atoms, which cost far more, only for the 64 best of those.
+        """
+        first = outside(poses)
+        top = np.argsort(first)[:64]
+        inner = np.linalg.norm(
+            poses[top][:, pairs[:, 0]] - poses[top][:, pairs[:, 1]], axis=-1
+        )
+        full = first[top] + penalty(inner)
+        order = np.argsort(full)[:keep]
+        return top[order], full[order]
+
+    n = len(steps)
+    new_bond = next(
+        t
+        for t, (a, b, _) in enumerate(steps)
+        if a is site_atom and moving[b] is frag_atom
+    )
+    turns = np.radians(np.arange(0.0, 360.0, 10.0))
+    chi = np.radians(np.arange(0.0, 360.0, 30.0)) if new_bond + 1 < n else [0.0]
+    grid = np.zeros((len(turns) * len(chi), n))
+    grid[:, new_bond] = np.repeat(turns, len(chi))
+    if new_bond + 1 < n:
+        grid[:, new_bond + 1] = np.tile(chi, len(turns))
+    picked, best_scores = score(build(grid))
+    best = grid[picked]
+    rng = np.random.default_rng(0)
+    for spread in np.radians([60.0, 25.0, 10.0]):
+        if best_scores[0] == 0:
+            break
+        moves = np.repeat(best, 128, axis=0) + rng.uniform(
+            -spread, spread, (len(best) * 128, n)
+        )
+        candidates = np.vstack([best, moves])
+        picked, best_scores = score(build(candidates))
+        best = candidates[picked]
+    pick = 0
+    totals = best_scores
+    current = score(start[None], keep=1)[1][0]
+    if totals[pick] < current:
+        for atom, position in zip(moving, build(best[pick : pick + 1])[0]):
+            atom.pos = position
+
+
+def _placement_torsions(graph, site_atom, frag_atom, site_torsions, fragment_torsions):
+    """Return the torsions ``_place_by_torsions`` turns, innermost first.
+
+    Each is ``(fixed atom, moving atom, atoms that move)``. The fragment
+    is everything beyond ``frag_atom``; a site-residue bond is used only
+    when its far side holds nothing but that residue's side chain and
+    the fragment.
+    """
+    import networkx as nx
+
+    fragment = _atoms_beyond(graph, site_atom, frag_atom)
+    inside = set(fragment)
+    links = graph.subgraph(inside)
+    depth = nx.single_source_shortest_path_length(links, frag_atom)
+    rotatable = []
+    for u, v in nx.bridges(links):
+        if not (_is_heavy(u) and _is_heavy(v)) or _is_amide(graph, u, v):
+            continue
+        if min(sum(_is_heavy(n) for n in graph.adj[x]) for x in (u, v)) < 2:
+            continue
+        near, far = (u, v) if depth[u] < depth[v] else (v, u)
+        moved = _atoms_beyond(graph, near, far)
+        if sum(_is_heavy(atom) for atom in moved) >= 3:
+            rotatable.append((depth[near], near, far, moved))
+    # The bonds that carry the most atoms come first: a glycosidic link
+    # swings a whole branch, where an N-acetyl group turns four atoms.
+    # The kept bonds are then turned innermost (smallest branch) first.
+    rotatable.sort(key=lambda item: -sum(_is_heavy(atom) for atom in item[3]))
+    kept = sorted(rotatable[:fragment_torsions], key=lambda item: len(item[3]))
+    torsions = [(a, b, moved) for _, a, b, moved in kept]
+    torsions.append((site_atom, frag_atom, fragment))
+
+    residue = site_atom.parent
+    allowed = inside | set(residue.children)
+    ca = next((atom for atom in residue.children if atom.name == "CA"), None)
+    if ca is None:
+        return torsions
+    # Bond distance from CA inside the residue picks, at each atom, the
+    # neighbour that leads back toward the backbone (CB from CG, not OD1).
+    toward = nx.single_source_shortest_path_length(
+        graph.subgraph(set(residue.children) - inside), ca
+    )
+    child, used = site_atom, 0
+    while used < site_torsions and child is not ca and child in toward:
+        parents = [
+            atom
+            for atom in graph.adj[child]
+            if atom in toward and toward[atom] == toward[child] - 1
+        ]
+        if not parents:
+            break
+        parent = parents[0]
+        moved = _atoms_beyond(graph, parent, child)
+        if not set(moved) <= allowed or any(
+            atom.parent is residue and atom.name in ("N", "C", "O") for atom in moved
+        ):
+            break
+        if not _is_amide(graph, parent, child):
+            torsions.append((parent, child, moved))
+            used += 1
+        child = parent
+    return torsions
+
+
+def _atoms_beyond(graph, near, far):
+    """Return ``far`` and every atom reachable from it without passing ``near``."""
+    seen, stack, found = {near, far}, [far], [far]
+    while stack:
+        for neighbor in graph.adj[stack.pop()]:
+            if neighbor not in seen:
+                seen.add(neighbor)
+                found.append(neighbor)
+                stack.append(neighbor)
+    return found
+
+
+def _is_heavy(atom):
+    return atom.element.symbol.upper() != "H"
+
+
+def _is_amide(graph, a, b):
+    """Whether ``a``-``b`` is the C-N bond of an amide, which stays planar."""
+    for n, c in ((a, b), (b, a)):
+        if n.element.symbol.upper() == "N" and c.element.symbol.upper() == "C":
+            for neighbor, data in graph.adj[c].items():
+                if (
+                    neighbor.element.symbol.upper() == "O"
+                    and (data.get("bond_order") or 1) >= 2
+                ):
+                    return True
+    return False
 
 
 def _fit_placement(protein, added, bonds, particles=None):
