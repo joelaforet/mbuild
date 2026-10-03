@@ -62,7 +62,9 @@ def _default_platform():
     return "CUDA"
 
 
-def _relax_particles(protein, mobile, n_steps=0, tolerance=50.0, platform=None):
+def _relax_particles(
+    protein, mobile, n_steps=0, tolerance=50.0, platform=None, particles=None
+):
     """Minimize with every particle outside ``mobile`` held fixed.
 
     This is the minimization behind ``relax_fragments``, which
@@ -72,18 +74,28 @@ def _relax_particles(protein, mobile, n_steps=0, tolerance=50.0, platform=None):
     ``platform`` None means ``_default_platform()``.
 
     Only the mobile atoms and the atoms that can act on them enter the
-    simulation (``_neighbourhood``), so the cost follows the size of
-    the site, not of the protein.
+    simulation (``_relax_neighbourhood``), so the cost follows the size
+    of the site, not of the protein.
+
+    ``particles`` is the list of the protein's particles. Walking the
+    hierarchy for it costs time in proportion to the whole protein, and
+    a relaxation moves atoms without adding or removing any, so a caller
+    that runs several steps on one protein walks it once and passes the
+    list to each (see ``_relax_if_clashing``). None walks it here.
     """
     platform = platform or _default_platform()
     mobile = set(mobile)
     if not mobile:
         return
-    bonds = [
-        (a, b, np.linalg.norm(a.pos - b.pos))
-        for a, b in protein.bonds()
-        if a in mobile or b in mobile
-    ]
+    if particles is None:
+        particles = list(protein.particles())
+    # The bonds of the mobile atoms, read from each atom's neighbours
+    # rather than from every bond of the protein.
+    bonds = {}
+    for atom in mobile:
+        for neighbor in atom.direct_bonds():
+            bonds.setdefault(frozenset((atom, neighbor)), (atom, neighbor))
+    bonds = [(a, b, np.linalg.norm(a.pos - b.pos)) for a, b in bonds.values()]
     before = {particle: particle.pos.copy() for particle in mobile}
     # Each round minimizes in the neighbourhood of where the mobile
     # atoms start. A round that moves an atom further than the margin
@@ -91,7 +103,7 @@ def _relax_particles(protein, mobile, n_steps=0, tolerance=50.0, platform=None):
     # neighbourhood left out, so it runs again from where it ended.
     for _ in range(_NEIGHBOURHOOD_ROUNDS):
         start = {particle: particle.pos.copy() for particle in mobile}
-        _relax_neighbourhood(protein, mobile, n_steps, tolerance, platform)
+        _relax_neighbourhood(protein, mobile, n_steps, tolerance, platform, particles)
         moved = max(np.linalg.norm(p.pos - start[p]) for p in mobile)
         if moved <= _NEIGHBOURHOOD_MARGIN:
             break
@@ -119,7 +131,7 @@ def _relax_particles(protein, mobile, n_steps=0, tolerance=50.0, platform=None):
         )
 
 
-def _relax_neighbourhood(protein, mobile, n_steps, tolerance, platform):
+def _relax_neighbourhood(protein, mobile, n_steps, tolerance, platform, particles):
     """Minimize the mobile atoms in a copy of their neighbourhood.
 
     The copy holds every atom within the nonbonded cutoff of a mobile
@@ -132,14 +144,20 @@ def _relax_neighbourhood(protein, mobile, n_steps, tolerance, platform):
     an atom is beyond the cutoff of every mobile atom, so its type
     changes no force that moves anything. Only the mobile atoms'
     positions are written back to the protein.
+
+    The bounded descent and the minimization run in one OpenMM context.
+    ``OpenMMSimulation.minimize`` would build a second context for the
+    same system, which costs more than the minimization itself at this
+    size.
     """
+    import openmm
+    import openmm.unit as u
     from scipy.spatial import cKDTree
 
     from mbuild.compound import Compound
     from mbuild.simulation import OpenMMSimulation
 
-    particles = list(protein.particles())
-    xyz = protein.xyz
+    xyz = np.array([particle.pos for particle in particles])
     index = {particle: i for i, particle in enumerate(particles)}
     radius = _RELAX_CUTOFF + _PORT_SEPARATION + _NEIGHBOURHOOD_MARGIN
     near = set()
@@ -155,9 +173,13 @@ def _relax_neighbourhood(protein, mobile, n_steps, tolerance, platform):
         )
     site = Compound(name="Neighbourhood")
     site.add(list(copies.values()))
-    for a, b, order in protein.bond_graph.edges.data("bond_order"):
-        if a in copies and b in copies:
-            site.add_bond((copies[a], copies[b]), bond_order=order)
+    # Each bond is read from the adjacency of its first copied atom, so
+    # only the bonds of the neighbourhood are visited.
+    graph = protein.root.bond_graph
+    for a in copies:
+        for b, data in graph.adj[a].items():
+            if b in copies and index[a] < index[b]:
+                site.add_bond((copies[a], copies[b]), bond_order=data.get("bond_order"))
     # The simulation needs a box: without one there is no cutoff, and
     # every force call visits every pair of atoms. The box holds the
     # whole neighbourhood with room for the cutoff on every side, so
@@ -172,12 +194,24 @@ def _relax_neighbourhood(protein, mobile, n_steps, tolerance, platform):
         if copy not in moving:
             simulation.system.setParticleMass(i, 0.0)
     _descend_in_bounded_steps(simulation, moving)
-    simulation.minimize(n_steps=n_steps, tolerance=tolerance)
+    context = simulation.simulation.context
+    openmm.LocalEnergyMinimizer.minimize(
+        context, tolerance * u.kilojoule_per_mole / u.nanometer, n_steps
+    )
+    positions = (
+        context.getState(getPositions=True)
+        .getPositions(asNumpy=True)
+        .value_in_unit(u.nanometer)
+    )
+    if np.isnan(positions).any():
+        logger.warning("The relaxation produced NaN positions; none were kept.")
+        return
     # Writing back only the mobile atoms also keeps the fixed atoms at
     # their coordinates to the last digit, which a GPU platform, with
     # its single-precision positions, would otherwise round.
+    order = {copy: i for i, copy in enumerate(site.particles())}
     for particle in mobile:
-        particle.pos = copies[particle].pos
+        particle.pos = positions[order[copies[particle]]]
 
 
 def _descend_in_bounded_steps(simulation, mobile, max_step=0.005, rounds=200):
@@ -236,7 +270,7 @@ def _descend_in_bounded_steps(simulation, mobile, max_step=0.005, rounds=200):
 
 
 def _relax_until_bonded(
-    protein, mobile, bonds, attempts=3, longest=0.18, platform=None
+    protein, mobile, bonds, attempts=3, longest=0.18, platform=None, particles=None
 ):
     """Relax the placed atoms until every formed bond is at bond length.
 
@@ -252,7 +286,11 @@ def _relax_until_bonded(
         The bond length, in nm, above which a bond counts as open.
     platform : str, optional
         OpenMM platform name; None means ``_default_platform()``.
+    particles : list of mbuild.Compound, optional
+        The protein's particles (see ``_relax_particles``).
     """
+    if particles is None:
+        particles = list(protein.particles())
 
     def open_bonds():
         return [
@@ -266,9 +304,11 @@ def _relax_until_bonded(
     # protein atom stands still; a real minimization would move
     # those side chains, so this one does. The backbone keeps the
     # coordinates of the file.
-    mobile = list(mobile) + _side_chains_near(protein, mobile)
+    mobile = list(mobile) + _side_chains_near(protein, mobile, particles=particles)
     for _ in range(attempts):
-        _relax_particles(protein, mobile, tolerance=1.0, platform=platform)
+        _relax_particles(
+            protein, mobile, tolerance=1.0, platform=platform, particles=particles
+        )
         if not open_bonds():
             return
     for name1, name2, length in open_bonds():
@@ -300,7 +340,12 @@ def _relax_if_clashing(protein, added, site_atom, frag_atom, relax, platform=Non
     platform : str, optional
         OpenMM platform name; None means ``_default_platform()``.
     """
-    clashes = _warn_on_clashes(protein, added, site_atom, frag_atom)
+    # The particles are listed once for every step below: the steps
+    # move atoms but add or remove none.
+    particles = list(protein.particles())
+    clashes = _warn_on_clashes(
+        protein, added, site_atom, frag_atom, particles=particles
+    )
     if not (clashes and relax):
         return
     # Port alignment fixes the fragment up to a turn about the new
@@ -310,9 +355,9 @@ def _relax_if_clashing(protein, added, site_atom, frag_atom, relax, platform=Non
     # atoms 0.3 A apart tears bonds; from a clear pose it converges.
     # A floppy fragment may have no clear rigid pose in the
     # conformer it arrived in, so other conformers are tried too.
-    _fit_placement(protein, added, [(site_atom, frag_atom, 1.0)])
-    if _closest_contact(protein, added, site_atom, frag_atom) < 0.1:
-        _try_conformers(protein, added, site_atom, frag_atom)
+    _fit_placement(protein, added, [(site_atom, frag_atom, 1.0)], particles=particles)
+    if _closest_contact(protein, added, site_atom, frag_atom, particles) < 0.1:
+        _try_conformers(protein, added, site_atom, frag_atom, particles=particles)
     try:
         import mbuild.simulation  # noqa: F401
     except ImportError as error:
@@ -329,13 +374,17 @@ def _relax_if_clashing(protein, added, site_atom, frag_atom, relax, platform=Non
         return
     logger.info("Relaxing the placed atoms with the protein backbone held fixed.")
     _relax_until_bonded(
-        protein, added, [(site_atom, frag_atom, 1.0)], platform=platform
+        protein,
+        added,
+        [(site_atom, frag_atom, 1.0)],
+        platform=platform,
+        particles=particles,
     )
     # The user asked for the relaxation and got it, so the result is
     # reported rather than warned about. Ordinary van der Waals
     # contacts near 2 A are expected after a minimization; only a
     # contact that stays well inside that means the minimizer failed.
-    closest = _closest_contact(protein, added, site_atom, frag_atom)
+    closest = _closest_contact(protein, added, site_atom, frag_atom, particles)
     if closest is None:
         return
     if closest < 0.15:
@@ -351,7 +400,7 @@ def _relax_if_clashing(protein, added, site_atom, frag_atom, relax, platform=Non
         )
 
 
-def _fit_placement(protein, added, bonds):
+def _fit_placement(protein, added, bonds, particles=None):
     """Move the fragment rigidly so that every formed bond can close.
 
     Port alignment places the fragment for one bond. A reaction that
@@ -371,17 +420,20 @@ def _fit_placement(protein, added, bonds):
         The placed particles.
     bonds : list of (mbuild.Compound, mbuild.Compound, float)
         The formed bonds between the protein and the fragment.
+    particles : list of mbuild.Compound, optional
+        The protein's particles (see ``_relax_particles``).
     """
     from scipy.optimize import minimize
     from scipy.spatial import cKDTree
     from scipy.spatial.transform import Rotation
 
+    everything = list(protein.particles()) if particles is None else particles
     particles = list(added)
     fragment = set(particles)
     index = {particle: i for i, particle in enumerate(particles)}
     pairs = [(a, index[b]) if b in index else (b, index[a]) for a, b, _ in bonds]
     bonded = {fixed for fixed, _ in pairs}
-    others = [p for p in protein.particles() if p not in fragment and p not in bonded]
+    others = [p for p in everything if p not in fragment and p not in bonded]
     tree = cKDTree([p.pos for p in others]) if others else None
     start = np.array([particle.pos for particle in particles])
     centre = start.mean(axis=0)
@@ -433,7 +485,7 @@ def _fit_placement(protein, added, bonds):
         particle.pos = position
 
 
-def _try_conformers(protein, added, site_atom, frag_atom, count=8):
+def _try_conformers(protein, added, site_atom, frag_atom, count=8, particles=None):
     """Re-embed the placed atoms in other conformers and keep the clearest.
 
     The conformer a fragment arrives in is one of many, and a long
@@ -454,10 +506,13 @@ def _try_conformers(protein, added, site_atom, frag_atom, count=8):
         The two atoms of the new bond.
     count : int, optional, default=8
         Conformers to try.
+    particles : list of mbuild.Compound, optional
+        The protein's particles (see ``_relax_particles``).
     """
     from rdkit import Chem
     from rdkit.Chem import AllChem
 
+    everything = list(protein.particles()) if particles is None else particles
     particles = list(added)
     editable, index = _rdkit_mol(protein, particles)
     mol = editable.GetMol()
@@ -469,15 +524,17 @@ def _try_conformers(protein, added, site_atom, frag_atom, count=8):
     if not conformers:
         return
     best = [particle.pos.copy() for particle in particles]
-    best_clearance = _closest_contact(protein, added, site_atom, frag_atom)
+    best_clearance = _closest_contact(protein, added, site_atom, frag_atom, everything)
     for conformer in conformers:
         positions = np.array(mol.GetConformer(conformer).GetPositions()) / 10.0
         # Put the bonding atom where it is now, then fit the rest.
         positions += frag_atom.pos - positions[index[frag_atom]]
         for particle, position in zip(particles, positions):
             particle.pos = position
-        _fit_placement(protein, added, [(site_atom, frag_atom, 1.0)])
-        clearance = _closest_contact(protein, added, site_atom, frag_atom)
+        _fit_placement(
+            protein, added, [(site_atom, frag_atom, 1.0)], particles=everything
+        )
+        clearance = _closest_contact(protein, added, site_atom, frag_atom, everything)
         if clearance > best_clearance:
             best_clearance = clearance
             best = [particle.pos.copy() for particle in particles]
@@ -489,7 +546,7 @@ def _try_conformers(protein, added, site_atom, frag_atom, count=8):
     )
 
 
-def _side_chains_near(protein, placed, radius=0.4):
+def _side_chains_near(protein, placed, radius=0.4, particles=None):
     """Return the side-chain atoms of the protein within ``radius`` of placed atoms.
 
     Backbone atoms (``N``, ``CA``, ``C``, ``O`` and their hydrogens)
@@ -502,6 +559,8 @@ def _side_chains_near(protein, placed, radius=0.4):
         The atoms the relaxation is about.
     radius : float, optional, default=0.4
         Distance in nm.
+    particles : list of mbuild.Compound, optional
+        The protein's particles (see ``_relax_particles``).
     """
     from scipy.spatial import cKDTree
 
@@ -520,9 +579,9 @@ def _side_chains_near(protein, placed, radius=0.4):
         "OXT",
         "HXT",
     }
-    others = [
-        p for p in protein.particles() if p not in placed and p.name not in backbone
-    ]
+    if particles is None:
+        particles = list(protein.particles())
+    others = [p for p in particles if p not in placed and p.name not in backbone]
     if not others or not placed:
         return []
     tree = cKDTree([p.pos for p in others])
@@ -532,17 +591,21 @@ def _side_chains_near(protein, placed, radius=0.4):
     return [others[i] for i in sorted(near)]
 
 
-def _closest_contact(protein, added, site_atom, frag_atom):
+def _closest_contact(protein, added, site_atom, frag_atom, particles=None):
     """Return the smallest distance (nm) from a placed atom to any other atom.
 
     ``added`` lists the placed particles. The new bond pair is left
     out. Returns None when there is nothing to compare against.
+    ``particles`` is the protein's particle list (see
+    ``_relax_particles``); None walks the protein for it.
     """
     from scipy.spatial import cKDTree
 
     added_particles = [p for p in added if p is not frag_atom]
     added_set = set(added) | {site_atom}
-    others = [p for p in protein.particles() if p not in added_set]
+    if particles is None:
+        particles = list(protein.particles())
+    others = [p for p in particles if p not in added_set]
     if not others or not added_particles:
         return None
     distances, _ = cKDTree([p.pos for p in others]).query(
@@ -551,20 +614,23 @@ def _closest_contact(protein, added, site_atom, frag_atom):
     return float(distances.min())
 
 
-def _warn_on_clashes(protein, added, site_atom, frag_atom, cutoff=0.2):
+def _warn_on_clashes(protein, added, site_atom, frag_atom, cutoff=0.2, particles=None):
     """Warn when placed atoms overlap the rest of the system.
 
     Port alignment is rigid; a bulky fragment can land inside the
     protein. The check compares every particle in ``added`` against
     every other atom, and it leaves out the new bond pair. It warns
     below ``cutoff`` nm, so the user knows to relax the structure
-    before simulating.
+    before simulating. ``particles`` is the protein's particle list
+    (see ``_relax_particles``); None walks the protein for it.
     """
     from scipy.spatial import cKDTree
 
     added_particles = list(added)
     added_set = set(added_particles) | {site_atom}
-    others = [p for p in protein.particles() if p not in added_set]
+    if particles is None:
+        particles = list(protein.particles())
+    others = [p for p in particles if p not in added_set]
     placed = [p.pos for p in added_particles if p is not frag_atom]
     if not others or not placed:
         return 0
