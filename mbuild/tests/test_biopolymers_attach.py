@@ -467,6 +467,110 @@ class TestProteinModify(BaseTest):
         not (has_hoomd and has_openmm),
         reason="relax_fragments needs mbuild.simulation (hoomd) and openmm",
     )
+    def test_minimize_false_places_and_defers_the_minimization(
+        self, protein_6m03, monkeypatch
+    ):
+        # Tests that attach(minimize=False) turns a clashing fragment
+        # clear without running a minimization, and that one
+        # relax_fragments(side_chains=True) call afterwards relaxes it
+        # with the backbone fixed. This is needed because a protein with
+        # many attachment sites, a glycoprotein, spends most of its build
+        # time in one small minimization per attach; placing every
+        # fragment first and minimizing once is the fast path. The test
+        # counts the minimizations, the closest contact after placement,
+        # the backbone coordinates and the bond lengths.
+        from mbuild.biopolymers import relax
+        from mbuild.biopolymers.relax import _closest_contact
+
+        runs = []
+        original = relax._relax_particles
+
+        def counting(*args, **kwargs):
+            runs.append(1)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(relax, "_relax_particles", counting)
+        import mbuild.biopolymers.protein as protein_module
+
+        monkeypatch.setattr(protein_module, "_relax_particles", counting)
+        bulky = mb.load("C(c1ccccc1)(c1ccccc1)c1ccccc1", smiles=True)
+        backbone = np.array(
+            [p.pos for p in protein_6m03.particles() if p.name in ("N", "CA", "C")]
+        )
+        protein_6m03.attach(
+            bulky,
+            "C1",
+            resnum=12,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="TPM",
+            minimize=False,
+        )
+        assert runs == []
+        fragment = list(protein_6m03.get_residue(307, chain_id="A").particles())
+        site = protein_6m03.get_atom(12, "NZ", chain_id="A")
+        bonded = next(a for a in site.direct_bonds() if a in set(fragment))
+        assert _closest_contact(protein_6m03, fragment, site, bonded) > 0.12
+
+        protein_6m03.relax_fragments(
+            residues=[protein_6m03.get_residue(307, chain_id="A")],
+            side_chains=True,
+            platform="CPU",
+        )
+        assert runs == [1]
+        after = np.array(
+            [p.pos for p in protein_6m03.particles() if p.name in ("N", "CA", "C")]
+        )
+        assert np.allclose(after, backbone)
+        lengths = [
+            np.linalg.norm(a.pos - b.pos)
+            for a, b in protein_6m03.bonds()
+            if a in set(fragment) or b in set(fragment)
+        ]
+        assert all(0.09 < length < 0.22 for length in lengths)
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    @pytest.mark.skipif(
+        not (has_hoomd and has_openmm),
+        reason="relax_fragments needs mbuild.simulation (hoomd) and openmm",
+    )
+    def test_a_torn_fragment_goes_back_alone(self, protein_6m03, monkeypatch, caplog):
+        # Tests that when one fragment of a joint relaxation comes out
+        # with a stretched bond, only that fragment returns to where it
+        # started and the other keeps its relaxed position. This is
+        # needed because relaxing sixty glycans in one simulation is the
+        # fast path, and one bad site must not undo the other fifty-nine.
+        # The test relaxes two acetone fragments, stretches a bond of
+        # one of them inside the minimization, and compares positions.
+        from mbuild.biopolymers import relax
+
+        acetone = mb.load("CC(C)=O", smiles=True)
+        for resnum in (5, 12):
+            protein_6m03.attach(
+                acetone, "C1", resnum=resnum, atom_name="NZ", chain_id="A", relax=False
+            )
+        first, second = [r for r in protein_6m03.residues() if r.hetatm][-2:]
+        before = {p: p.pos.copy() for r in (first, second) for p in r.particles()}
+        original = relax._relax_neighbourhood
+
+        def tearing(protein, mobile, *args):
+            original(protein, mobile, *args)
+            atom = next(p for p in first.particles() if p.name == "O1")
+            atom.pos = atom.pos + np.array([1.0, 0.0, 0.0])
+
+        monkeypatch.setattr(relax, "_relax_neighbourhood", tearing)
+        with caplog.at_level(logging.WARNING, logger="mbuild"):
+            protein_6m03.relax_fragments(residues=[first, second], platform="CPU")
+
+        assert "1 group(s)" in caplog.text
+        assert all(np.allclose(p.pos, before[p]) for p in first.particles())
+        assert any(not np.allclose(p.pos, before[p]) for p in second.particles())
+
+    @pytest.mark.skipif(not has_rdkit, reason="RDKit is not installed")
+    @pytest.mark.skipif(
+        not (has_hoomd and has_openmm),
+        reason="relax_fragments needs mbuild.simulation (hoomd) and openmm",
+    )
     def test_relaxation_simulates_only_the_neighbourhood(
         self, protein_6m03, monkeypatch
     ):

@@ -57,7 +57,7 @@ from mbuild.biopolymers.protein_pdb_io import (
     pdb_text,
     write_pdb,
 )
-from mbuild.biopolymers.relax import _relax_particles
+from mbuild.biopolymers.relax import _relax_particles, _side_chains_near
 from mbuild.biopolymers.residue import (
     Chain,
     InterResidueBond,
@@ -835,6 +835,7 @@ class Protein(Compound):
         n_steps=0,
         tolerance=50.0,
         platform=None,
+        side_chains=False,
     ):
         """Relax attached fragments while the protein stays fixed.
 
@@ -843,8 +844,14 @@ class Protein(Compound):
         ``forcefield=None``). The force field does not matter here: the
         goal is only to pull a rigidly placed fragment out of steric
         overlap so a downstream simulation stays stable. Every atom
-        outside the given residues gets zero mass, which OpenMM treats
-        as immobile, so the protein coordinates do not change.
+        outside the given residues, and outside the nearby side chains
+        when ``side_chains`` is True, is held fixed, so the backbone
+        coordinates do not change. A group of bonded mobile atoms that
+        the minimization tore apart is put back where it started, with
+        a warning; the other groups keep their relaxed positions.
+
+        After many ``attach(..., minimize=False)`` calls, one call here
+        relaxes every placed fragment in a single simulation.
 
         Parameters
         ----------
@@ -867,6 +874,11 @@ class Protein(Compound):
             can run on a GPU here and ``"CPU"`` otherwise; the same
             choice applies to the relaxation that ``attach`` and
             ``mutate`` run on their own.
+        side_chains : bool, optional, default=False
+            Also free the side chains within 4 A of the residues, as
+            the relaxation ``attach`` runs on its own does, so that a
+            fragment in a groove can push a neighbouring side chain
+            aside. Backbone atoms stay fixed either way.
         """
         try:
             import mbuild.simulation  # noqa: F401
@@ -888,7 +900,10 @@ class Protein(Compound):
         mobile = set()
         for residue in targets:
             mobile.update(residue.particles())
-        _relax_particles(self, mobile, n_steps, tolerance, platform)
+        particles = list(self.particles())
+        if side_chains:
+            mobile.update(_side_chains_near(self, mobile, particles=particles))
+        _relax_particles(self, mobile, n_steps, tolerance, platform, particles)
 
     # ------------------------------------------------------------------
     # Functionalization
@@ -1036,6 +1051,7 @@ class Protein(Compound):
         reaction=None,
         merge=False,
         platform=None,
+        minimize=True,
     ):
         """Bond a fragment Compound onto a residue of this protein.
 
@@ -1110,12 +1126,22 @@ class Protein(Compound):
             naming its oxygen here removes that residue and opens the
             glycosidic bond site.
         relax : bool, optional, default=True
-            When the placed fragment overlaps existing atoms, run an
-            energy minimization that moves only the fragment
-            (see ``relax_fragments``). The minimization runs until it
-            converges. When a build must return in bounded time, pass
-            ``relax=False`` and call ``relax_fragments`` with a
-            positive ``n_steps``.
+            When the placed fragment overlaps existing atoms, turn it
+            clear: about the new bond, about its own rotatable bonds and
+            about the side-chain bonds of the site residue, which keeps
+            every bond length and angle. Then run an energy minimization
+            that moves only the fragment and the side chains near it
+            (see ``relax_fragments``). False keeps the rigid placement
+            of the port alignment.
+        minimize : bool, optional, default=True
+            False stops after the placement and leaves out the
+            minimization. Attaching many fragments this way and then
+            calling ``relax_fragments`` once relaxes them all in one
+            simulation, which is much faster than a minimization per
+            call, and lets neighbouring fragments relax together. A
+            reaction that forms several bonds keeps them at the lengths
+            of its rigid fit until then. When a build must return in
+            bounded time, pass a positive ``n_steps`` to that call.
         platform : str, optional
             OpenMM platform of that minimization, as in
             ``relax_fragments``: ``"CUDA"`` when OpenMM can run on a GPU
@@ -1171,4 +1197,5 @@ class Protein(Compound):
             reaction=reaction,
             merge=merge,
             platform=platform,
+            minimize=minimize,
         )

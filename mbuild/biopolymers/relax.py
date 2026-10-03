@@ -120,23 +120,33 @@ def _relax_particles(
     # start is bad enough: the repulsion between overlapping atoms
     # then outweighs every bond term. A torn fragment must never be
     # returned as if it were relaxed. Any bond that ended more than
-    # half again its starting length puts the positions back and
-    # warns, so the caller knows the site needs another look.
+    # half again its starting length puts back the positions of the
+    # bonded group of mobile atoms it belongs to, and warns, so the
+    # caller knows the site needs another look. Only that group goes
+    # back: in a relaxation of many fragments at once, the others keep
+    # their relaxed positions.
     torn = [
-        (a.name, b.name, np.linalg.norm(a.pos - b.pos) * 10)
+        (a, b, np.linalg.norm(a.pos - b.pos) * 10)
         for a, b, length in bonds
         if np.linalg.norm(a.pos - b.pos) > 1.5 * max(length, 0.1)
     ]
     if torn:
-        for particle, position in before.items():
-            particle.pos = position
+        import networkx as nx
+
+        groups = nx.connected_components(protein.root.bond_graph.subgraph(mobile))
+        hit = {atom for a, b, _ in torn for atom in (a, b)}
+        restored = [group for group in groups if group & hit]
+        for group in restored:
+            for particle in group:
+                particle.pos = before[particle]
         worst = max(torn, key=lambda t: t[2])
         logger.warning(
             f"Relaxation stretched {len(torn)} bonds beyond recognition "
-            f"(worst {worst[0]}-{worst[1]} at {worst[2]:.1f} A), so the "
-            "positions before it were kept. The placed atoms overlap the "
-            "protein too badly for the generic force field; choose another "
-            "site or fragment conformer, or relax with a real force field."
+            f"(worst {worst[0].name}-{worst[1].name} at {worst[2]:.1f} A), so "
+            f"{len(restored)} group(s) of mobile atoms were put back where "
+            "they started. Those atoms overlap the protein too badly for the "
+            "generic force field; choose another site or fragment conformer, "
+            "or relax with a real force field."
         )
 
 
@@ -328,7 +338,9 @@ def _relax_until_bonded(
         )
 
 
-def _relax_if_clashing(protein, added, site_atom, frag_atom, relax, platform=None):
+def _relax_if_clashing(
+    protein, added, site_atom, frag_atom, relax, platform=None, minimize=True
+):
     """Relax the placed atoms when they overlap other atoms.
 
     Port alignment is rigid, so a bulky fragment can land inside the
@@ -350,12 +362,18 @@ def _relax_if_clashing(protein, added, site_atom, frag_atom, relax, platform=Non
         False leaves the rigid placement in place.
     platform : str, optional
         OpenMM platform name; None means ``_default_platform()``.
+    minimize : bool, optional, default=True
+        False stops after the placement and leaves the minimization to
+        a later ``relax_fragments`` call, which can then relax many
+        fragments in one simulation.
     """
     # The particles are listed once for every step below: the steps
     # move atoms but add or remove none.
     particles = list(protein.particles())
+    # The rigid placement is reported only when it is what the caller
+    # keeps; otherwise the report waits for the placement below.
     clashes = _warn_on_clashes(
-        protein, added, site_atom, frag_atom, particles=particles
+        protein, added, site_atom, frag_atom, particles=particles, warn=not relax
     )
     if not (clashes and relax):
         return
@@ -368,6 +386,9 @@ def _relax_if_clashing(protein, added, site_atom, frag_atom, relax, platform=Non
     _place_by_torsions(protein, site_atom, frag_atom, particles=particles)
     if _closest_contact(protein, added, site_atom, frag_atom, particles) < 0.1:
         _try_conformers(protein, added, site_atom, frag_atom, particles=particles)
+    if not minimize:
+        _warn_on_clashes(protein, added, site_atom, frag_atom, particles=particles)
+        return
     try:
         import mbuild.simulation  # noqa: F401
     except ImportError as error:
@@ -926,7 +947,9 @@ def _closest_contact(protein, added, site_atom, frag_atom, particles=None):
     return float(distances.min())
 
 
-def _warn_on_clashes(protein, added, site_atom, frag_atom, cutoff=0.2, particles=None):
+def _warn_on_clashes(
+    protein, added, site_atom, frag_atom, cutoff=0.2, particles=None, warn=True
+):
     """Warn when placed atoms overlap the rest of the system.
 
     Port alignment is rigid; a bulky fragment can land inside the
@@ -934,7 +957,8 @@ def _warn_on_clashes(protein, added, site_atom, frag_atom, cutoff=0.2, particles
     every other atom, and it leaves out the new bond pair. It warns
     below ``cutoff`` nm, so the user knows to relax the structure
     before simulating. ``particles`` is the protein's particle list
-    (see ``_relax_particles``); None walks the protein for it.
+    (see ``_relax_particles``); None walks the protein for it. With
+    ``warn=False`` it only counts.
     """
     from scipy.spatial import cKDTree
 
@@ -949,7 +973,7 @@ def _warn_on_clashes(protein, added, site_atom, frag_atom, cutoff=0.2, particles
     tree = cKDTree([p.pos for p in others])
     distances, _ = tree.query(placed)
     n_clashes = int((distances < cutoff).sum())
-    if n_clashes:
+    if n_clashes and warn:
         logger.warning(
             f"{n_clashes} placed atoms sit within "
             f"{cutoff * 10:.1f} A of existing atoms (closest: "

@@ -27,6 +27,7 @@ from mbuild.biopolymers.relax import (
     _open_direction,
     _relax_if_clashing,
     _relax_until_bonded,
+    _warn_on_clashes,
 )
 from mbuild.biopolymers.residue import (
     InterResidueBond,
@@ -65,6 +66,7 @@ def _attach(
     reaction=None,
     merge=False,
     platform=None,
+    minimize=True,
 ):
     # The name is checked first, before the attachment site is
     # read and before any warning is logged. The check ran inside
@@ -86,6 +88,7 @@ def _attach(
             relax,
             merge,
             platform,
+            minimize,
         )
     bond_order = int(bond_order)
     site_residue, site_atom, site_hydrogens = _attachment_site(
@@ -131,7 +134,9 @@ def _attach(
         merge,
     )
     if merge:
-        _relax_if_clashing(protein, placed, site_atom, frag_atom, relax, platform)
+        _relax_if_clashing(
+            protein, placed, site_atom, frag_atom, relax, platform, minimize
+        )
         return site_residue
 
     # The record is appended before the relaxation step, so the
@@ -153,7 +158,7 @@ def _attach(
     )
     protein.cross_bonds.append(record)
 
-    _relax_if_clashing(protein, placed, site_atom, frag_atom, relax, platform)
+    _relax_if_clashing(protein, placed, site_atom, frag_atom, relax, platform, minimize)
     return record
 
 
@@ -171,6 +176,7 @@ def _attach_by_reaction(
     relax,
     merge,
     platform=None,
+    minimize=True,
 ):
     """Bond a fragment by the rule a reaction string states.
 
@@ -374,19 +380,26 @@ def _attach_by_reaction(
     # bond lengths are checked afterwards. The minimizer now and
     # then returns without moving an atom, so the check repeats
     # the relaxation a few times before it gives up.
-    if relax and len(cross) > 1:
-        try:
-            import mbuild.simulation  # noqa: F401
-        except ImportError as error:
-            logger.warning(
-                "Cannot relax the placed fragment: mbuild.simulation is not "
-                f"importable ({error}). The ring-closing bonds keep their "
-                "rigid-placement lengths until relax_fragments() runs."
-            )
+    if len(cross) > 1:
+        if relax and minimize:
+            try:
+                import mbuild.simulation  # noqa: F401
+            except ImportError as error:
+                logger.warning(
+                    "Cannot relax the placed fragment: mbuild.simulation is not "
+                    f"importable ({error}). The ring-closing bonds keep their "
+                    "rigid-placement lengths until relax_fragments() runs."
+                )
+            else:
+                _relax_until_bonded(protein, placed, cross, platform=platform)
         else:
-            _relax_until_bonded(protein, placed, cross, platform=platform)
+            # A turn about one of several formed bonds would stretch the
+            # others, so the single-bond placement does not apply here.
+            _warn_on_clashes(protein, placed, site_atom, frag_atom)
     else:
-        _relax_if_clashing(protein, placed, site_atom, frag_atom, relax, platform)
+        _relax_if_clashing(
+            protein, placed, site_atom, frag_atom, relax, platform, minimize
+        )
     return result
 
 
