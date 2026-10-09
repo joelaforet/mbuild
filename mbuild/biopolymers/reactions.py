@@ -23,6 +23,15 @@ the product template says what changes:
   neighbour. A product heavy atom with no map number is refused, because
   nothing gives it coordinates.
 
+A template that is symmetric where the molecule is not can give
+different products from one match. The azide-alkyne template matches
+the triple bond of an unsymmetric alkyne both ways round, and each way
+is one triazole regioisomer. Naming a fragment atom
+(``fragment_atom_name``) chooses: the match that bonds it to the
+protein atom named by ``atom_name`` is used. Without one, the first
+match RDKit finds is used, which depends only on the atom order of the
+two molecules.
+
 The edits are then applied to the Compound with the machinery
 ``attach`` already has, so the protein keeps its coordinates and its
 residue hierarchy. ``REACTIONS`` holds the strings for the common
@@ -55,9 +64,11 @@ REACTIONS = {
     ),
     # Azide plus alkyne to a 1,2,3-triazole (a click reaction). Both new
     # ring bonds form, and the azide charges vanish. An unsymmetric
-    # alkyne gives one of two regioisomers: the alkyne carbon that comes
-    # first in the fragment's atom order (in a SMILES, the one written
-    # first) bonds the terminal azide nitrogen (see _match).
+    # alkyne gives one of two regioisomers. Name the alkyne carbon as
+    # fragment_atom_name to choose: it bonds the azide nitrogen named
+    # as atom_name. Without it, the alkyne carbon that comes first in
+    # the fragment's atom order (in a SMILES, the one written first)
+    # bonds the terminal azide nitrogen.
     "azide-alkyne triazole": (
         "[N:1]=[N+:2]=[N-:3].[C:4]#[C:5]>>[N:1]1[N+0:2]=[N+0:3][C:4]=[C:5]1"
     ),
@@ -126,27 +137,25 @@ def _query_mol(compound, particles):
 
 
 def _match(template, mol, particle_of, anchor, what):
-    """Return the one match of ``template`` on ``mol`` as template index -> particle.
+    """Return the matches of ``template`` on one group of atoms of ``mol``.
 
-    A match must contain ``anchor`` when one is given. Matches that
-    cover the same atoms in another order, which a symmetric template
-    produces, count once, and the first one RDKit returns is kept. The
-    molecule lists its atoms and bonds in a fixed order
-    (``_rdkit_mol``), so that is the same match in every process. Where
-    the two orders are different chemistry, as for the triple bond of
-    an unsymmetric alkyne in the azide-alkyne template, the kept one
-    maps the first template atom to the atom that comes first in the
-    molecule. Zero matches return None; several raise.
+    Each match is a dict of template index -> particle. A match must
+    contain ``anchor`` when one is given. A symmetric template can
+    cover one group of atoms in several orders; all of them are
+    returned, in the order RDKit finds them, and ``plan_reaction``
+    chooses. The molecule lists its atoms and bonds in a fixed order
+    (``_rdkit_mol``), so that order is the same in every process. Zero
+    matches return None; matches on several groups raise.
     """
     matches = mol.GetSubstructMatches(
         template, uniquify=False, useChirality=False, maxMatches=10000
     )
     if anchor is not None:
         matches = [m for m in matches if any(particle_of[i] is anchor for i in m)]
-    unique = {}
+    groups = {}
     for match in matches:
-        unique.setdefault(frozenset(match), match)
-    if not unique:
+        groups.setdefault(frozenset(match), []).append(match)
+    if not groups:
         return None
 
     # Matches that differ only in which hydrogens of one heavy atom they
@@ -163,16 +172,20 @@ def _match(template, mol, particle_of, anchor, what):
             particle_of[i].name for i in match if particle_of[i].element.symbol == "H"
         )
 
-    if len({heavy(match) for match in unique}) > 1:
+    if len({heavy(match) for match in groups}) > 1:
         names = sorted(
-            " ".join(particle_of[i].name for i in match) for match in unique.values()
+            " ".join(particle_of[i].name for i in orders[0])
+            for orders in groups.values()
         )
         raise MBuildError(
-            f"The {what} template of the reaction matches {len(unique)} groups "
+            f"The {what} template of the reaction matches {len(groups)} groups "
             f"of atoms ({'; '.join(names)}). Name the atom that reacts to choose."
         )
-    match = min(unique.values(), key=hydrogen_names)
-    return {index: particle_of[atom] for index, atom in enumerate(match)}
+    group = min(groups, key=hydrogen_names)
+    return [
+        {index: particle_of[atom] for index, atom in enumerate(match)}
+        for match in groups[group]
+    ]
 
 
 def _formal_charge(atom):
@@ -182,6 +195,29 @@ def _formal_charge(atom):
         if line.startswith("AtomFormalCharge"):
             return int(line.split()[1])
     return None
+
+
+def _joins(templates, product, matched, atom1, atom2):
+    """Whether the product forms a bond between ``atom1`` and ``atom2`` under ``matched``.
+
+    ``matched`` maps each reactant template's index to its match, a
+    dict of template atom index -> particle.
+    """
+    if atom1 is None or atom2 is None:
+        return False
+    by_map = {}
+    for index, template in enumerate(templates):
+        for atom in template.GetAtoms():
+            if atom.GetAtomMapNum():
+                by_map[atom.GetAtomMapNum()] = matched[index][atom.GetIdx()]
+    for bond in product.GetBonds():
+        pair = {
+            by_map.get(bond.GetBeginAtom().GetAtomMapNum()),
+            by_map.get(bond.GetEndAtom().GetAtomMapNum()),
+        }
+        if pair == {atom1, atom2}:
+            return True
+    return False
 
 
 def plan_reaction(
@@ -199,7 +235,11 @@ def plan_reaction(
     site_particles, frag_particles : list of mbuild.Compound
         The particles the templates may match on each side.
     site_anchor, frag_anchor : mbuild.Compound or None
-        An atom the match on that side must contain.
+        An atom the match on that side must contain. When both are
+        given and the template matches in an order that bonds them to
+        each other, that order is used: this chooses between the
+        products of a symmetric template, such as the two triazole
+        regioisomers an unsymmetric alkyne gives.
 
     Returns
     -------
@@ -219,16 +259,33 @@ def plan_reaction(
     site_mol, site_of = _query_mol(site, site_particles)
     frag_mol, frag_of = _query_mol(fragment, frag_particles)
     templates = [rxn.GetReactantTemplate(0), rxn.GetReactantTemplate(1)]
+    product = rxn.GetProductTemplate(0)
     matched = None
     for order in ((0, 1), (1, 0)):
-        site_match = _match(
+        site_matches = _match(
             templates[order[0]], site_mol, site_of, site_anchor, "protein"
         )
-        frag_match = _match(
+        frag_matches = _match(
             templates[order[1]], frag_mol, frag_of, frag_anchor, "fragment"
         )
-        if site_match is not None and frag_match is not None:
-            matched = {order[0]: site_match, order[1]: frag_match}
+        if site_matches is not None and frag_matches is not None:
+            candidates = [
+                {order[0]: site_match, order[1]: frag_match}
+                for site_match in site_matches
+                for frag_match in frag_matches
+            ]
+            # A symmetric template can match in several orders that are
+            # different products, such as the two regioisomers of a
+            # triazole. The order that bonds the two named atoms to each
+            # other is used; without one, the first order RDKit finds.
+            matched = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if _joins(templates, product, candidate, site_anchor, frag_anchor)
+                ),
+                candidates[0],
+            )
             break
     if matched is None:
         raise MBuildError(
@@ -251,7 +308,6 @@ def plan_reaction(
             if a.GetAtomMapNum() and b.GetAtomMapNum():
                 key = frozenset((a.GetAtomMapNum(), b.GetAtomMapNum()))
                 reactant_bonds[key] = _BOND_ORDERS.get(str(bond.GetBondType()), 1.0)
-    product = rxn.GetProductTemplate(0)
     product_maps = {
         atom.GetAtomMapNum() for atom in product.GetAtoms() if atom.GetAtomMapNum()
     }

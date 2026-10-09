@@ -1085,7 +1085,13 @@ class Protein(Compound):
             The group to add. Cloned before use.
         fragment_atom_name : str
             Name of the fragment atom that forms the new bond. It must
-            have at least ``bond_order`` bonded hydrogens.
+            have at least ``bond_order`` bonded hydrogens. With a
+            ``reaction``, the fragment template must include it, and
+            when the template matches in more than one order, the order
+            that bonds it to ``atom_name`` is used. That is how a
+            regioisomer is chosen: for the azide-alkyne triazole, name
+            the alkyne carbon that should bond the azide nitrogen named
+            by ``atom_name`` (``draw_fragment`` shows the names).
         resnum : int
             Residue number of the protein attachment site.
         atom_name : str
