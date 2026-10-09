@@ -873,7 +873,14 @@ class Protein(Compound):
             OpenMM platform name. The default is ``"CUDA"`` when OpenMM
             can run on a GPU here and ``"CPU"`` otherwise; the same
             choice applies to the relaxation that ``attach`` and
-            ``mutate`` run on their own.
+            ``mutate`` run on their own. A minimization on a GPU is not
+            reproducible to the last digit, even with OpenMM's
+            ``DeterministicForces`` and double precision: rounding
+            differs from run to run and the minimizer follows it, so
+            the same call can leave a flexible fragment up to about
+            2 A from where another run put it. Each result is a
+            relaxed structure. ``"CPU"`` gives the same coordinates in
+            every run, more slowly.
         side_chains : bool, optional, default=False
             Also free the side chains within 4 A of the residues, as
             the relaxation ``attach`` runs on its own does, so that a
@@ -1151,7 +1158,10 @@ class Protein(Compound):
         platform : str, optional
             OpenMM platform of that minimization, as in
             ``relax_fragments``: ``"CUDA"`` when OpenMM can run on a GPU
-            here and ``"CPU"`` otherwise, unless named.
+            here and ``"CPU"`` otherwise, unless named. On a GPU the
+            result can differ slightly from run to run (see
+            ``relax_fragments``); ``"CPU"`` gives the same coordinates
+            every time.
         reaction : str, optional
             A reaction string, for a reaction that does more than
             replace one bond on each side: a name from
