@@ -17,7 +17,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from mbuild.biopolymers.residue import _rdkit_mol
+from mbuild.biopolymers.residue import _neighbours, _rdkit_mol
 from mbuild.box import Box
 
 logger = logging.getLogger(__name__)
@@ -652,7 +652,14 @@ def _placement_torsions(graph, site_atom, frag_atom, site_torsions, fragment_tor
 
     fragment = _atoms_beyond(graph, site_atom, frag_atom)
     inside = set(fragment)
-    links = graph.subgraph(inside)
+    # The fragment's graph is built in the order of ``fragment``. A
+    # subgraph view of ``graph`` would iterate the set ``inside``, whose
+    # order follows memory addresses, and the bridges would come in an
+    # order that changes from one process to the next.
+    links = nx.Graph()
+    links.add_nodes_from(fragment)
+    links.add_edges_from((a, b) for a in fragment for b in graph.adj[a] if b in inside)
+    position = {atom: i for i, atom in enumerate(fragment)}
     depth = nx.single_source_shortest_path_length(links, frag_atom)
     rotatable = []
     for u, v in nx.bridges(links):
@@ -667,8 +674,18 @@ def _placement_torsions(graph, site_atom, frag_atom, site_torsions, fragment_tor
     # The bonds that carry the most atoms come first: a glycosidic link
     # swings a whole branch, where an N-acetyl group turns four atoms.
     # The kept bonds are then turned innermost (smallest branch) first.
-    rotatable.sort(key=lambda item: -sum(_is_heavy(atom) for atom in item[3]))
-    kept = sorted(rotatable[:fragment_torsions], key=lambda item: len(item[3]))
+    # Ties, common in a branched glycan, go to the bond met first in
+    # ``fragment``, so the same bonds are kept in every process.
+    rotatable.sort(
+        key=lambda item: (
+            -sum(_is_heavy(atom) for atom in item[3]),
+            position[item[2]],
+        )
+    )
+    kept = sorted(
+        rotatable[:fragment_torsions],
+        key=lambda item: (len(item[3]), position[item[2]]),
+    )
     torsions = [(a, b, moved) for _, a, b, moved in kept]
     torsions.append((site_atom, frag_atom, fragment))
 
@@ -1063,10 +1080,12 @@ def _open_direction(atom):
     planar atom, which is where an addition to an alkene carbon goes,
     or to the axis of a linear atom such as an alkyne carbon. It is
     where a new bond or a new hydrogen goes when no leaving atom shows
-    the way.
+    the way. The perpendicular has two senses, and the one taken
+    follows the order of the atom's bonds, read from the bond graph
+    (``_neighbours``) so that it is the same in every process.
     """
     vectors = []
-    for neighbour in atom.direct_bonds():
+    for neighbour in _neighbours(atom):
         vector = neighbour.pos - atom.pos
         vectors.append(vector / np.linalg.norm(vector))
     if not vectors:

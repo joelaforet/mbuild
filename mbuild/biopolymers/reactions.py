@@ -54,7 +54,10 @@ REACTIONS = {
         ">>[S:1][C:3]1[C:8](=[O:9])[N:7][C:6](=[O:5])[C:4]1[H:2]"
     ),
     # Azide plus alkyne to a 1,2,3-triazole (a click reaction). Both new
-    # ring bonds form, and the azide charges vanish.
+    # ring bonds form, and the azide charges vanish. An unsymmetric
+    # alkyne gives one of two regioisomers: the alkyne carbon that comes
+    # first in the fragment's atom order (in a SMILES, the one written
+    # first) bonds the terminal azide nitrogen (see _match).
     "azide-alkyne triazole": (
         "[N:1]=[N+:2]=[N-:3].[C:4]#[C:5]>>[N:1]1[N+0:2]=[N+0:3][C:4]=[C:5]1"
     ),
@@ -127,7 +130,13 @@ def _match(template, mol, particle_of, anchor, what):
 
     A match must contain ``anchor`` when one is given. Matches that
     cover the same atoms in another order, which a symmetric template
-    produces, count once. Zero matches return None; several raise.
+    produces, count once, and the first one RDKit returns is kept. The
+    molecule lists its atoms and bonds in a fixed order
+    (``_rdkit_mol``), so that is the same match in every process. Where
+    the two orders are different chemistry, as for the triple bond of
+    an unsymmetric alkyne in the azide-alkyne template, the kept one
+    maps the first template atom to the atom that comes first in the
+    molecule. Zero matches return None; several raise.
     """
     matches = mol.GetSubstructMatches(
         template, uniquify=False, useChirality=False, maxMatches=10000
