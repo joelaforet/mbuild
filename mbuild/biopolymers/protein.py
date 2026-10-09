@@ -50,6 +50,7 @@ from mbuild.biopolymers.matching import (
     _matches_agree,
     _ter_break_reason,
 )
+from mbuild.biopolymers.mutate import _mutate
 from mbuild.biopolymers.protein_pdb_io import (
     _check_residue_membership,
     _parse_pdb,
@@ -58,7 +59,11 @@ from mbuild.biopolymers.protein_pdb_io import (
     write_pdb,
 )
 from mbuild.biopolymers.protonation import _deprotonate, _protonate
-from mbuild.biopolymers.relax import _relax_particles, _side_chains_near
+from mbuild.biopolymers.relax import (
+    _BACKBONE_NAMES,
+    _relax_particles,
+    _side_chains_near,
+)
 from mbuild.biopolymers.residue import (
     Chain,
     InterResidueBond,
@@ -858,7 +863,8 @@ class Protein(Compound):
         ----------
         residues : iterable of Residue, optional
             The residues allowed to move. Default: every HETATM
-            residue (i.e. all attached fragments).
+            residue (i.e. all attached fragments). A residue with an
+            amino-acid backbone moves its side chain only.
         n_steps : int, optional, default=0
             Maximum minimization iterations. It reaches OpenMM as
             ``maxIterations``. ``0`` has OpenMM's meaning: the
@@ -907,7 +913,12 @@ class Protein(Compound):
             return
         mobile = set()
         for residue in targets:
-            mobile.update(residue.particles())
+            atoms = list(residue.particles())
+            # An amino acid, a mutated one for instance, moves its side
+            # chain only, so the backbone stays where the file put it.
+            if {"N", "CA", "C"} <= {atom.name for atom in atoms}:
+                atoms = [atom for atom in atoms if atom.name not in _BACKBONE_NAMES]
+            mobile.update(atoms)
         particles = list(self.particles())
         if side_chains:
             mobile.update(_side_chains_near(self, mobile, particles=particles))
@@ -1342,3 +1353,134 @@ class Protein(Compound):
         >>> protein.protonate(63, "NZ", chain_id="A")
         """
         return _protonate(self, resnum, atom_name, chain_id, icode)
+
+    def mutate(
+        self,
+        resnum,
+        to,
+        *,
+        chain_id=None,
+        icode="",
+        resname=None,
+        stereo=None,
+        relax=True,
+        platform=None,
+        minimize=True,
+    ):
+        """Replace the side chain of one residue, keeping its backbone in place.
+
+        The old side chain, every atom beyond the bond from ``CA`` to
+        its one heavy non-backbone neighbour (``CB`` in the canonical
+        residues), leaves. The new side chain is built from a CCD
+        component or taken from a fragment, aligned along that old bond
+        direction with the ``Port`` machinery that ``attach`` uses, and
+        bonded to ``CA``. Its atoms then move into the residue, the
+        residue takes the new name, and its definition is re-matched, so
+        ``template``, ``formal_charge`` and ``atom_formal_charges``
+        describe the mutant. The backbone atoms ``N``, ``CA``, ``C``,
+        ``O`` and their hydrogens keep their coordinates. When the new
+        side chain overlaps other atoms, it is relaxed together with the
+        side chains within 4 A of it, with every backbone atom fixed.
+
+        Proline's side chain also bonds ``N``, so it follows another
+        path. Mutating from proline opens the ring at ``N``, which takes
+        back its amide hydrogen. Mutating to proline, or to any CCD
+        component whose side chain closes on ``N``, superposes the whole
+        component on the residue's ``N``, ``CA`` and ``C`` and on the
+        side-chain direction (a Kabsch fit), keeps its side-chain atoms,
+        bonds them to ``CA`` and ``N``, and removes one hydrogen from
+        ``N``. The ring is then always relaxed, since its two bonds
+        close at whatever length the backbone allows. The backbone
+        still does not move, so a residue whose phi is far from the
+        -65 degrees a proline ring holds gets a strained ring and a
+        warning.
+
+        A CCD component gives the side chain in the protonation state of
+        its definition: charged for LYS and ARG, doubly protonated (and
+        charged) for HIS, and the neutral acid for ASP and GLU. Call
+        ``deprotonate`` or ``protonate`` afterwards for another state, for
+        example ``deprotonate(resnum, "OD2")`` for the aspartate of pH 7.
+
+        Parameters
+        ----------
+        resnum : int
+            Residue number of the residue to mutate.
+        to : str or mbuild.Compound
+            The new side chain. A string is a CCD code of an alpha amino
+            acid, canonical (``"PHE"``) or not (``"4II"``,
+            p-azido-L-phenylalanine). The component supplies the atom
+            names, the chemistry and the geometry; everything but its
+            side chain is discarded. A code the bundled library does not
+            hold needs a Protein built with ``download=True``.
+            A Compound is a side chain alone, with one atom marked as the
+            bond site, as ``prepare_fragment("*Cc1ccccc1", "PHE")``
+            builds it. The marked atom bonds to ``CA`` in place of one
+            of its hydrogens.
+        chain_id : str, optional
+            Chain of the residue; required when residue numbers repeat
+            across chains.
+        icode : str, optional
+            Insertion code of the residue.
+        resname : str, optional
+            Residue name for a Compound side chain, of three characters
+            or fewer. A Residue input keeps its own name when this is
+            omitted. Ignored for a CCD code.
+        stereo : {"L", "D"}, optional
+            Handedness of the alpha carbon after the mutation. ``"L"``
+            or ``"D"`` flips the alpha hydrogen and the side chain when
+            the residue has the other handedness. The default for a
+            CCD code is the handedness of the component, read from its
+            ideal coordinates, so ``"PHE"`` gives L-phenylalanine and
+            ``"DPN"`` gives D-phenylalanine whatever the residue was.
+            The default for a fragment is the current handedness of
+            the residue, which puts the new ``CB`` where the old one
+            was. A glycine has no handedness; there a fragment gives
+            an L residue.
+        relax : bool, optional, default=True
+            When the placed side chain overlaps existing atoms, minimize
+            with only the new atoms free (see ``relax_fragments``).
+        platform : str, optional
+            OpenMM platform of that minimization, as in
+            ``relax_fragments``: ``"CUDA"`` when OpenMM can run on a GPU
+            here and ``"CPU"`` otherwise, unless named.
+        minimize : bool, optional, default=True
+            False turns the new side chain clear about its own bonds but
+            leaves out the minimization, for a later ``relax_fragments``
+            call that relaxes several mutations, or mutations and
+            attached fragments, in one simulation (pass the mutated
+            residues and ``side_chains=True``). A proline ring keeps the
+            bond lengths of its superposition until then.
+
+        Returns
+        -------
+        Residue
+            The mutated residue, the same object as before the call.
+
+        Raises
+        ------
+        MBuildError
+            When the residue lacks ``N``, ``CA`` or ``C``; when the
+            side chain cannot be removed because a crosslink joins it to
+            another residue; when the CCD code is not an alpha amino
+            acid; or when no definition of the new residue describes the
+            result.
+
+        Examples
+        --------
+        >>> protein.mutate(1381, "4II", chain_id="A")   # serine to AzF
+        >>> protein.mutate(1500, "CYS", chain_id="A")
+        >>> protein.mutate(7, "ALA", chain_id="A", stereo="D")
+        >>> protein.mutate(295, "PRO", chain_id="A")
+        """
+        return _mutate(
+            self,
+            resnum,
+            to,
+            chain_id=chain_id,
+            icode=icode,
+            resname=resname,
+            stereo=stereo,
+            relax=relax,
+            platform=platform,
+            minimize=minimize,
+        )
