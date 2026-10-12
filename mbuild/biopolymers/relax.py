@@ -429,6 +429,68 @@ def _relax_until_bonded(
         )
 
 
+class _Surroundings:
+    """The protein's atoms for the clash checks of one placement.
+
+    Each check compares the placed atoms with every other atom. A
+    KD-tree over the whole protein per check costs time in proportion
+    to the protein, paid once per check and once per attach, so a
+    glycosylation of many sites would cost the square of the protein's
+    size. Between the checks of one placement only the fragment and the
+    site residue move, so one tree holds every other atom and is built
+    once; the atoms that can move are compared at their current
+    positions, which keeps every result what a fresh tree would give.
+
+    Parameters
+    ----------
+    particles : list of mbuild.Compound
+        The protein's particles (see ``_relax_particles``).
+    movable : iterable of mbuild.Compound
+        Every particle that may move while this object is in use.
+    """
+
+    def __init__(self, particles, movable):
+        from scipy.spatial import cKDTree
+
+        movable = set(movable)
+        self.particles = particles
+        self.xyz = np.array([particle.pos for particle in particles])
+        flags = np.array([particle in movable for particle in particles], dtype=bool)
+        self.fixed = np.flatnonzero(~flags)
+        self.movable = np.flatnonzero(flags)
+        self.tree = cKDTree(self.xyz[self.fixed])
+
+    def _movable_xyz(self):
+        return np.array([self.particles[i].pos for i in self.movable]).reshape(-1, 3)
+
+    def positions(self):
+        """Return every particle's position, the movable ones as they are now."""
+        xyz = self.xyz.copy()
+        xyz[self.movable] = self._movable_xyz()
+        return xyz
+
+    def within(self, point, radius):
+        """Return the indices of the particles within ``radius`` of ``point``."""
+        hits = self.fixed[self.tree.query_ball_point(point, radius)]
+        moved = self._movable_xyz()
+        close = self.movable[np.linalg.norm(moved - point, axis=1) <= radius]
+        return np.sort(np.concatenate([hits, close]))
+
+    def nearest(self, points, exclude):
+        """Return each point's distance to the closest particle not in ``exclude``.
+
+        ``exclude`` may hold only movable particles.
+        """
+        points = np.asarray(points).reshape(-1, 3)
+        distances, _ = self.tree.query(points)
+        others = [i for i in self.movable if self.particles[i] not in exclude]
+        if others:
+            xyz = np.array([self.particles[i].pos for i in others])
+            direct = np.linalg.norm(points[:, None] - xyz[None], axis=-1).min(axis=1)
+            distances = np.minimum(distances, direct)
+        return distances
+
+
 def _relax_if_clashing(
     protein, added, site_atom, frag_atom, relax, platform=None, minimize=True
 ):
@@ -461,10 +523,24 @@ def _relax_if_clashing(
     # The particles are listed once for every step below: the steps
     # move atoms but add or remove none.
     particles = list(protein.particles())
+    # Until the minimization, only the fragment and the site residue
+    # move, so every check up to it shares one tree of the other atoms.
+    movable = (
+        set(added)
+        | set(site_atom.parent.particles())
+        | set(_atoms_beyond(protein.root.bond_graph, site_atom, frag_atom))
+    )
+    around = _Surroundings(particles, movable)
     # The rigid placement is reported only when it is what the caller
     # keeps; otherwise the report waits for the placement below.
     clashes = _warn_on_clashes(
-        protein, added, site_atom, frag_atom, particles=particles, warn=not relax
+        protein,
+        added,
+        site_atom,
+        frag_atom,
+        particles=particles,
+        warn=not relax,
+        surroundings=around,
     )
     if not (clashes and relax):
         return
@@ -474,11 +550,32 @@ def _relax_if_clashing(
     # minimizer started from atoms 0.3 A apart tears bonds; from a
     # clear pose it converges. Only when no turn clears the fragment
     # are other conformers of it tried.
-    _place_by_torsions(protein, site_atom, frag_atom, particles=particles)
-    if _closest_contact(protein, added, site_atom, frag_atom, particles) < 0.1:
-        _try_conformers(protein, added, site_atom, frag_atom, particles=particles)
+    _place_by_torsions(
+        protein, site_atom, frag_atom, particles=particles, surroundings=around
+    )
+    if (
+        _closest_contact(
+            protein, added, site_atom, frag_atom, particles, surroundings=around
+        )
+        < 0.1
+    ):
+        _try_conformers(
+            protein,
+            added,
+            site_atom,
+            frag_atom,
+            particles=particles,
+            surroundings=around,
+        )
     if not minimize:
-        _warn_on_clashes(protein, added, site_atom, frag_atom, particles=particles)
+        _warn_on_clashes(
+            protein,
+            added,
+            site_atom,
+            frag_atom,
+            particles=particles,
+            surroundings=around,
+        )
         return
     try:
         import mbuild.simulation  # noqa: F401
@@ -523,7 +620,13 @@ def _relax_if_clashing(
 
 
 def _place_by_torsions(
-    protein, site_atom, frag_atom, particles=None, site_torsions=2, fragment_torsions=4
+    protein,
+    site_atom,
+    frag_atom,
+    particles=None,
+    site_torsions=2,
+    fragment_torsions=4,
+    surroundings=None,
 ):
     """Turn the fragment and the site side chain about bonds until clear.
 
@@ -569,6 +672,9 @@ def _place_by_torsions(
         bond first. Only a bond outside every ring, between two atoms
         with other heavy neighbours, that carries at least three heavy
         atoms on its far side counts.
+    surroundings : _Surroundings, optional
+        A tree of the protein's atoms built for this placement, in which
+        the fragment and the site residue are movable. None builds one.
     """
     from scipy.spatial import cKDTree
 
@@ -586,9 +692,11 @@ def _place_by_torsions(
     # not move. A moved atom's own partners one or two bonds away sit at
     # bonded distances in every pose, so those pairs, and only those, are
     # left out of the score.
-    xyz = np.array([particle.pos for particle in particles])
+    if surroundings is None:
+        surroundings = _Surroundings(particles, moving)
+    xyz = surroundings.positions()
     reach = np.linalg.norm(start - site_atom.pos, axis=1).max() + 0.6
-    near = cKDTree(xyz).query_ball_point(site_atom.pos, reach)
+    near = surroundings.within(site_atom.pos, reach)
     around = [i for i in near if particles[i] not in position_of]
     # The few surrounding atoms that are such a partner of some moved
     # atom are scored pair by pair with a fixed mask; the rest need no
@@ -671,8 +779,11 @@ def _place_by_torsions(
         """Penalty of each pose against the atoms that do not move."""
         total = np.zeros(len(poses))
         if tree is not None:
+            # every moved atom of every pose: spread over all cores
             distances, _ = tree.query(
-                poses.reshape(-1, 3), distance_upper_bound=_CONTACT_DISTANCE
+                poses.reshape(-1, 3),
+                distance_upper_bound=_CONTACT_DISTANCE,
+                workers=-1,
             )
             total += penalty(distances.reshape(poses.shape[:2]))
         if len(bonded):
@@ -909,7 +1020,9 @@ def _fit_placement(protein, added, bonds, particles=None):
         particle.pos = position
 
 
-def _try_conformers(protein, added, site_atom, frag_atom, count=8, particles=None):
+def _try_conformers(
+    protein, added, site_atom, frag_atom, count=8, particles=None, surroundings=None
+):
     """Re-embed the fragment in other conformers and keep the clearest.
 
     The conformer a fragment arrives in is one of many, and a long
@@ -940,6 +1053,8 @@ def _try_conformers(protein, added, site_atom, frag_atom, count=8, particles=Non
         Conformers to try.
     particles : list of mbuild.Compound, optional
         The protein's particles (see ``_relax_particles``).
+    surroundings : _Surroundings, optional
+        Passed on to every clash check; see ``_place_by_torsions``.
     """
     from rdkit import Chem
     from rdkit.Chem import AllChem
@@ -995,7 +1110,9 @@ def _try_conformers(protein, added, site_atom, frag_atom, count=8, particles=Non
     movable = list(dict.fromkeys(fragment + list(site_atom.parent.particles())))
     start_pose = np.array([atom.pos for atom in movable])
     best = start_pose.copy()
-    best_clearance = _closest_contact(protein, added, site_atom, frag_atom, everything)
+    best_clearance = _closest_contact(
+        protein, added, site_atom, frag_atom, everything, surroundings=surroundings
+    )
     for conformer in conformers:
         check = Chem.Mol(mol, confId=conformer)
         check.RemoveAllConformers()
@@ -1012,8 +1129,16 @@ def _try_conformers(protein, added, site_atom, frag_atom, count=8, particles=Non
         rotation, shift = _kabsch(positions[frame], capped[frame])
         for atom, position in zip(fragment, positions[:-1] @ rotation.T + shift):
             atom.pos = position
-        _place_by_torsions(protein, site_atom, frag_atom, particles=everything)
-        clearance = _closest_contact(protein, added, site_atom, frag_atom, everything)
+        _place_by_torsions(
+            protein,
+            site_atom,
+            frag_atom,
+            particles=everything,
+            surroundings=surroundings,
+        )
+        clearance = _closest_contact(
+            protein, added, site_atom, frag_atom, everything, surroundings=surroundings
+        )
         if clearance > best_clearance:
             best_clearance = clearance
             best = np.array([atom.pos for atom in movable])
@@ -1069,18 +1194,26 @@ def _side_chains_near(protein, placed, radius=0.4, particles=None):
     return [others[i] for i in sorted(near)]
 
 
-def _closest_contact(protein, added, site_atom, frag_atom, particles=None):
+def _closest_contact(
+    protein, added, site_atom, frag_atom, particles=None, surroundings=None
+):
     """Return the smallest distance (nm) from a placed atom to any other atom.
 
     ``added`` lists the placed particles. The new bond pair is left
     out. Returns None when there is nothing to compare against.
     ``particles`` is the protein's particle list (see
     ``_relax_particles``); None walks the protein for it.
+    ``surroundings`` (see ``_Surroundings``) answers from its tree.
     """
     from scipy.spatial import cKDTree
 
     added_particles = [p for p in added if p is not frag_atom]
     added_set = set(added) | {site_atom}
+    if surroundings is not None:
+        if not added_particles or len(surroundings.particles) <= len(added_set):
+            return None
+        points = [p.pos for p in added_particles]
+        return float(surroundings.nearest(points, added_set).min())
     if particles is None:
         particles = list(protein.particles())
     others = [p for p in particles if p not in added_set]
@@ -1093,7 +1226,14 @@ def _closest_contact(protein, added, site_atom, frag_atom, particles=None):
 
 
 def _warn_on_clashes(
-    protein, added, site_atom, frag_atom, cutoff=0.2, particles=None, warn=True
+    protein,
+    added,
+    site_atom,
+    frag_atom,
+    cutoff=0.2,
+    particles=None,
+    warn=True,
+    surroundings=None,
 ):
     """Warn when placed atoms overlap the rest of the system.
 
@@ -1103,20 +1243,25 @@ def _warn_on_clashes(
     below ``cutoff`` nm, so the user knows to relax the structure
     before simulating. ``particles`` is the protein's particle list
     (see ``_relax_particles``); None walks the protein for it. With
-    ``warn=False`` it only counts.
+    ``warn=False`` it only counts. ``surroundings`` (see
+    ``_Surroundings``) answers from its tree.
     """
     from scipy.spatial import cKDTree
 
     added_particles = list(added)
     added_set = set(added_particles) | {site_atom}
-    if particles is None:
-        particles = list(protein.particles())
-    others = [p for p in particles if p not in added_set]
     placed = [p.pos for p in added_particles if p is not frag_atom]
-    if not others or not placed:
-        return 0
-    tree = cKDTree([p.pos for p in others])
-    distances, _ = tree.query(placed)
+    if surroundings is not None:
+        if not placed or len(surroundings.particles) <= len(added_set):
+            return 0
+        distances = surroundings.nearest(placed, added_set)
+    else:
+        if particles is None:
+            particles = list(protein.particles())
+        others = [p for p in particles if p not in added_set]
+        if not others or not placed:
+            return 0
+        distances, _ = cKDTree([p.pos for p in others]).query(placed)
     n_clashes = int((distances < cutoff).sum())
     if n_clashes and warn:
         logger.warning(
