@@ -109,6 +109,73 @@ def uff_forces(top, snap, order_map, r_cut=1.0, backend="hoomd"):
     raise ValueError(f"Unknown backend '{backend}'. Options: 'hoomd', 'openmm'.")
 
 
+class _Site:
+    __slots__ = ("name",)
+
+    def __init__(self):
+        self.name = None
+
+
+class _Connection:
+    __slots__ = ("connection_members",)
+
+    def __init__(self, members):
+        self.connection_members = members
+
+
+class BondGraphTopology:
+    """The connectivity the OpenMM UFF builder needs, read from a bond graph.
+
+    A stand-in for a GMSO topology with connections identified: ``sites``
+    (one per particle, in ``compound.particles()`` order), ``bonds``, ``angles``
+    and ``dihedrals`` (each with ``connection_members``), their counts, and
+    ``box``. Angles and dihedrals are enumerated from neighbor lists, which is
+    much faster than ``to_gmso()`` plus ``identify_connections()`` on large
+    compounds and gives the same set of connections.
+
+    Parameters
+    ----------
+    compound : mb.Compound
+    box : object or None, default None
+        Anything not None marks the system as periodic for the nonbonded force.
+    """
+
+    def __init__(self, compound, box=None):
+        particles = list(compound.particles())
+        index = {p: i for i, p in enumerate(particles)}
+        n = len(particles)
+        sites = [_Site() for _ in range(n)]
+        neighbors = [[] for _ in range(n)]
+        bonds = []
+        for u, v in compound.bond_graph.edges():
+            i, j = index[u], index[v]
+            neighbors[i].append(j)
+            neighbors[j].append(i)
+            bonds.append((i, j))
+        angles = []
+        for j, nbrs in enumerate(neighbors):
+            for a in range(len(nbrs)):
+                for b in range(a + 1, len(nbrs)):
+                    angles.append((nbrs[a], j, nbrs[b]))
+        # one dihedral per path i-j-k-l of four distinct atoms, per central bond
+        dihedrals = []
+        for j, k in bonds:
+            for i in neighbors[j]:
+                if i == k:
+                    continue
+                for m in neighbors[k]:
+                    if m != j and m != i:
+                        dihedrals.append((i, j, k, m))
+        self.sites = sites
+        self.bonds = [_Connection((sites[i], sites[j])) for i, j in bonds]
+        self.angles = [_Connection(tuple(sites[x] for x in a)) for a in angles]
+        self.dihedrals = [_Connection(tuple(sites[x] for x in d)) for d in dihedrals]
+        self.n_bonds = len(self.bonds)
+        self.n_angles = len(self.angles)
+        self.n_dihedrals = len(self.dihedrals)
+        self.box = box
+
+
 class UFFTypingError(Exception):
     """Raised when a compound cannot be typed with the lean UFF subset."""
 
@@ -125,7 +192,7 @@ def assign_uff_types(top, compound):
 
     Parameters
     ----------
-    top : gmso.Topology
+    top : gmso.Topology or BondGraphTopology
         Topology whose sites are relabeled in place. Site order must match the
         order of ``compound.particles()``.
     compound : mb.Compound
@@ -432,7 +499,7 @@ def _openmm_forces(top, order_map, r_cut):
 
     Parameters
     ----------
-    top : gmso.Topology
+    top : gmso.Topology or BondGraphTopology
         UFF-typed topology with connections identified.
     order_map : dict
         (i, j) -> bond order map, as returned by assign_uff_types.
