@@ -899,14 +899,17 @@ class OpenMMSimulation:
         import openmm.unit as u
         from openmm.app import Element, Topology
 
-        from mbuild.utils.simulation.uff import assign_uff_types, uff_forces
+        from mbuild.utils.simulation.uff import (
+            BondGraphTopology,
+            assign_uff_types,
+            uff_forces,
+        )
 
-        top = compound.to_gmso()
-        top.identify_connections()
-        # to_gmso always fills top.box with a bounding box; only treat the
-        # system as periodic when the compound itself defines a box.
-        if not compound.box:
-            top.box = None
+        # Connectivity straight from the bond graph: converting to GMSO and
+        # identifying connections costs far more than the force setup itself
+        # on large compounds. The system is periodic only when the compound
+        # itself defines a box.
+        top = BondGraphTopology(compound, box=compound.box or None)
         _, order_map = assign_uff_types(top, compound)
 
         particles_list = list(compound.particles())

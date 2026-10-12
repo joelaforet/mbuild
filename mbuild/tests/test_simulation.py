@@ -980,3 +980,29 @@ class TestOpenMMSimulation(BaseTest):
         assert not np.allclose(coords_after_min, simple_compound.xyz, atol=1e-6)
         energy = sim.get_energy()
         assert len(energy["potential_energy"]) == 2
+
+
+@pytest.mark.parametrize("smiles", ["C1CC1CC1CCC1c1ccccc1", "CC(=O)OC#N"])
+def test_bond_graph_topology_matches_gmso(smiles):
+    """BondGraphTopology finds the same angles and dihedrals as GMSO, rings included."""
+    from mbuild.utils.simulation.uff import BondGraphTopology
+
+    cpd = mb.load(smiles, smiles=True)
+    light = BondGraphTopology(cpd)
+    top = cpd.to_gmso()
+    top.identify_connections()
+
+    def index_sets(t):
+        idx = {s: i for i, s in enumerate(t.sites)}
+        sets = []
+        for conns in (t.bonds, t.angles, t.dihedrals):
+            members = {tuple(idx[m] for m in c.connection_members) for c in conns}
+            sets.append({min(m, m[::-1]) for m in members})
+        return sets
+
+    assert index_sets(light) == index_sets(top)
+    assert (light.n_bonds, light.n_angles, light.n_dihedrals) == (
+        top.n_bonds,
+        top.n_angles,
+        top.n_dihedrals,
+    )
