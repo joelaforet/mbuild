@@ -723,26 +723,60 @@ def _place_by_torsions(
         for a, b, atoms in torsions
     ]
 
+    # No turn moves the axis atoms of a turn applied after it (a bond
+    # inside a branch carries fewer atoms, so it comes first), so every
+    # axis is fixed by the start positions. The atoms that the same turns
+    # move then form a rigid group, and a pose is one rotation and shift
+    # per group: the turns are composed as 3x3 matrices, and each atom is
+    # moved once rather than once per turn.
+    pivots = start[[b for _, b, _ in steps]]
+    axes = pivots - np.array(
+        [start[position_of[a]] if a in position_of else a.pos for a, _, _ in steps]
+    )
+    axes /= np.linalg.norm(axes, axis=1, keepdims=True)
+    member = np.zeros((len(moving), len(steps)), dtype=bool)
+    for t, (_, _, atoms) in enumerate(steps):
+        member[atoms, t] = True
+    groups = {}
+    for i, row in enumerate(member):
+        groups.setdefault(tuple(np.flatnonzero(row)), []).append(i)
+    groups = [(list(turns), np.array(atoms)) for turns, atoms in groups.items()]
+    cross = np.array(
+        [[[0, -u[2], u[1]], [u[2], 0, -u[0]], [-u[1], u[0], 0]] for u in axes]
+    )
+    outer = axes[:, :, None] * axes[:, None, :]
+
     def build(angles):
-        poses = np.repeat(start[None], len(angles), axis=0)
-        for t, (a, b, atoms) in enumerate(steps):
+        count = len(angles)
+        rotations, shifts = [], []
+        for t in range(len(steps)):
             theta = angles[:, t]
             if not theta.any():
+                rotations.append(None)
+                shifts.append(None)
                 continue
-            pivot = poses[:, b]
-            base = poses[:, position_of[a]] if a in position_of else a.pos
-            axis = pivot - base
-            axis /= np.linalg.norm(axis, axis=1, keepdims=True)
-            axis = axis[:, None, :]
-            arm = poses[:, atoms] - pivot[:, None]
             cos, sin = np.cos(theta)[:, None, None], np.sin(theta)[:, None, None]
-            # Rodrigues' rotation of every moved atom about the bond.
-            arm = (
-                arm * cos
-                + np.cross(axis, arm) * sin
-                + axis * (arm * axis).sum(-1, keepdims=True) * (1 - cos)
-            )
-            poses[:, atoms] = pivot[:, None] + arm
+            # Rodrigues' rotation about the bond, through its moving atom.
+            rotation = cos * np.eye(3) + sin * cross[t] + (1 - cos) * outer[t]
+            rotations.append(rotation)
+            shifts.append(pivots[t] - rotation @ pivots[t])
+        poses = np.empty((count, len(moving), 3))
+        for turns, atoms in groups:
+            rotation, shift = None, None
+            for t in turns:
+                if rotations[t] is None:
+                    continue
+                if rotation is None:
+                    rotation, shift = rotations[t], shifts[t]
+                else:
+                    rotation = rotations[t] @ rotation
+                    shift = (rotations[t] @ shift[:, :, None])[:, :, 0] + shifts[t]
+            if rotation is None:
+                poses[:, atoms] = start[atoms]
+            else:
+                poses[:, atoms] = (
+                    start[atoms] @ rotation.transpose(0, 2, 1) + shift[:, None]
+                )
         return poses
 
     def penalty(distances):
@@ -774,6 +808,10 @@ def _place_by_torsions(
         ],
         dtype=int,
     ).reshape(-1, 2)
+    flat = pairs[:, 0] * len(moving) + pairs[:, 1]
+    origin = site_atom.pos
+    bonded_rel = bonded_xyz - origin
+    bonded_squared = (bonded_rel**2).sum(-1)
 
     def outside(poses):
         """Penalty of each pose against the atoms that do not move."""
@@ -787,9 +825,14 @@ def _place_by_torsions(
             )
             total += penalty(distances.reshape(poses.shape[:2]))
         if len(bonded):
-            reach_out = np.linalg.norm(
-                poses[:, :, None] - bonded_xyz[None, None], axis=-1
+            # |x - y|^2 = |x|^2 + |y|^2 - 2 x.y, as one matrix product; the
+            # coordinates are taken about the site atom, so that the terms
+            # stay small and the difference keeps its precision
+            rel = poses - origin
+            squared = (
+                (rel**2).sum(-1)[:, :, None] + bonded_squared - 2 * rel @ bonded_rel.T
             )
+            reach_out = np.sqrt(np.clip(squared, 0.0, None))
             total += penalty(
                 np.where(scored, reach_out, np.inf).reshape(len(poses), -1)
             )
@@ -803,9 +846,12 @@ def _place_by_torsions(
         """
         first = outside(poses)
         top = np.argsort(first)[:64]
-        inner = np.linalg.norm(
-            poses[top][:, pairs[:, 0]] - poses[top][:, pairs[:, 1]], axis=-1
-        )
+        # every pair distance of each pose from one Gram matrix, as above
+        chosen = poses[top] - origin
+        norms = (chosen**2).sum(-1)
+        gram = (chosen @ chosen.transpose(0, 2, 1)).reshape(len(top), -1)
+        squared = norms[:, pairs[:, 0]] + norms[:, pairs[:, 1]] - 2 * gram[:, flat]
+        inner = np.sqrt(np.clip(squared, 0.0, None))
         full = first[top] + penalty(inner)
         order = np.argsort(full)[:keep]
         return top[order], full[order]
@@ -1092,6 +1138,9 @@ def _try_conformers(
                 randomSeed=0,
                 enforceChirality=True,
                 clearConfs=False,
+                # every core; with a seed RDKit returns the same conformers
+                # for any thread count
+                numThreads=0,
             )
         )
     except Exception:  # noqa: BLE001 - RDKit raises several unrelated types
