@@ -24,7 +24,7 @@ __all__ = ["ModificationPlan"]
 _ORDER_NAMES = {1.0: "1", 2.0: "2", 3.0: "3", 1.5: "aromatic"}
 
 
-@dataclass
+@dataclass(eq=False)
 class ModificationPlan:
     """The edits one modification makes, as particles of the compounds.
 
@@ -111,7 +111,9 @@ class ModificationPlan:
     # -- text --------------------------------------------------------
 
     def _in_fragment(self, atom):
-        return self.fragment is not None and atom.root is self.fragment.root
+        # Read from the set made when the plan was, not from atom.root:
+        # after apply the fragment's atoms belong to the protein.
+        return atom in self._state.get("in_fragment", ())
 
     def _label(self, atom):
         """Name an atom the way errors do: ``LYS A:48 NZ`` or ``OC8 C1``."""
@@ -150,7 +152,7 @@ class ModificationPlan:
             text += f" ({_ORDER_NAMES.get(float(order), f'{order:g}')})"
         return text
 
-    def header(self):
+    def _header(self):
         """Return the one-line heading of the plan."""
         from mbuild.biopolymers.residue import _pdb_label
 
@@ -170,7 +172,7 @@ class ModificationPlan:
 
     def summary(self):
         """Return the plan as one line, for a log."""
-        parts = [self.header()]
+        parts = [self._header()]
         if self.leaving:
             parts.append(
                 "leaves " + ", ".join(self._group_text(a) for _, a in self.leaving)
@@ -189,7 +191,7 @@ class ModificationPlan:
         return "; ".join(parts)
 
     def __str__(self):
-        lines = [self.header()]
+        lines = [self._header()]
 
         def row(key, text):
             lines.append(f"  {key:<9} {text}")
@@ -312,6 +314,13 @@ class ModificationPlan:
                 raise MBuildError(stale)
         if self.site is not None and self.site.root is not protein:
             raise MBuildError(stale)
+        # A protonation plan reads the residue's template variant; a
+        # plan to do nothing is also stale once that variant changed.
+        if (
+            "template" in self._state
+            and self.site.template is not self._state["template"]
+        ):
+            raise MBuildError(stale)
 
     # -- drawing -----------------------------------------------------
 
@@ -340,6 +349,20 @@ class ModificationPlan:
             if any(n in interesting for n in particle.direct_bonds()):
                 keep.append(particle)
         editable, index = _rdkit_mol(compound, keep)
+        # _rdkit_mol gives every atom no implicit hydrogens, so a heavy
+        # atom whose hydrogens are hidden is told how many it carries,
+        # or sanitization would draw radicals on it.
+        present, kept = set(particles), set(keep)
+        for particle in keep:
+            if particle.element.symbol == "H":
+                continue
+            hidden = sum(
+                1
+                for n in particle.direct_bonds()
+                if n.element.symbol == "H" and n in present and n not in kept
+            )
+            if hidden:
+                editable.GetAtomWithIdx(index[particle]).SetNumExplicitHs(hidden)
         colors = {}
         for particle in keep:
             if particle in mark_red:
@@ -486,6 +509,9 @@ class ModificationPlan:
         options = drawer.drawOptions()
         options.annotationFontScale = 0.65
         options.legendFontSize = 14
+        # The site residue is cut from its chain at N and C; those open
+        # valences are not chemistry of the plan, so no radical dots.
+        options.includeRadicals = False
         drawer.DrawMolecules(
             mols,
             legends=[legend for _, _, legend in panels],

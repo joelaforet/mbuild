@@ -155,6 +155,23 @@ def _beta_atom(ca, backbone):
     return heavy[0] if heavy else None
 
 
+def _reachable(start, blocked):
+    """Return the atoms reachable from ``start`` without passing through ``blocked``.
+
+    ``start`` is first. This is the walk that cuts a ring side chain
+    off a backbone: the plan and the placement both use it.
+    """
+    found, queue = [start], [start]
+    seen = set(blocked) | {start}
+    while queue:
+        for neighbor in queue.pop().direct_bonds():
+            if neighbor not in seen:
+                seen.add(neighbor)
+                found.append(neighbor)
+                queue.append(neighbor)
+    return found
+
+
 def _plan_mutate(
     protein,
     resnum,
@@ -237,14 +254,8 @@ def _plan_mutate(
         plan.notes.append(
             "the ring on N opens first, and N takes back an amide hydrogen"
         )
-        group, seen, queue = [cb], {ca, n, cb}, [cb]
-        while queue:
-            for neighbor in queue.pop().direct_bonds():
-                if neighbor not in seen:
-                    seen.add(neighbor)
-                    group.append(neighbor)
-                    queue.append(neighbor)
-        plan._add_leaving(ca, cb, group)
+        plan._add_leaving(ca, cb, _reachable(cb, (ca, n)))
+        plan.new_hydrogens.append(n)
         current = _alpha_handedness(n.pos, ca.pos, c.pos, cb.pos)
     else:
         try:
@@ -264,18 +275,14 @@ def _plan_mutate(
         plan.notes.append("glycine: CA takes a second alpha hydrogen")
     elif closure is not None:
         fn, fca = (_atom_in_residue(frag, name) for name in ("N", "CA"))
-        side, queue = {link}, [link]
-        while queue:
-            for neighbor in queue.pop().direct_bonds():
-                if neighbor not in side and neighbor not in (fn, fca):
-                    side.add(neighbor)
-                    queue.append(neighbor)
+        side = set(_reachable(link, (fn, fca)))
         backbone = [particle for particle in frag.particles() if particle not in side]
         plan._add_leaving(link, fca, backbone)
         plan.formed.extend([(ca, link, 1.0), (n, closure, 1.0)])
         plan.notes.append(
-            "the side chain closes a ring on N, which gives up a hydrogen; "
-            "the component is superposed on the backbone"
+            "the side chain closes a ring on N, which gives up the hydrogen "
+            "nearest the ring (chosen when the plan is applied); the component "
+            "is superposed on the backbone"
         )
     else:
         plan._add_leaving(link, anchor, _substituent(link, anchor))
@@ -288,6 +295,7 @@ def _plan_mutate(
             + (", swapping the alpha hydrogen and the side chain" if flip else "")
         )
     plan._state.update(
+        in_fragment=set(frag.particles()) if frag is not None else set(),
         new_name=new_name,
         hetatm=hetatm,
         stereo=stereo,
@@ -437,12 +445,7 @@ def _place_ring_side_chain(
 
     # The side chain is every atom reachable from the atom on CA
     # without passing through the component's N or CA.
-    side, queue = {link}, [link]
-    while queue:
-        for neighbor in queue.pop().direct_bonds():
-            if neighbor not in side and neighbor not in (fn, fca):
-                side.add(neighbor)
-                queue.append(neighbor)
+    side = set(_reachable(link, (fn, fca)))
     backbone = [particle for particle in frag.particles() if particle not in side]
     _remove_particles_and_ports(frag, link, backbone)
     _rename_clashing_atoms(frag, residue)

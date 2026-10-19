@@ -336,7 +336,6 @@ def _plan_attach_by_reaction(
         reaction_name=reaction if reaction in REACTIONS else None,
         frag_residues=frag_residues,
         in_fragment=in_fragment,
-        moving=moving,
         cross=cross,
         primary=primary,
     )
@@ -364,7 +363,7 @@ def _apply_attach_by_reaction(plan):
     site_direction, frag_direction = direction(site_atom), direction(frag_atom)
     for kept, leaving in plan.leaving:
         root = added if leaving in in_fragment else protein
-        group = _substituent(kept, leaving)
+        group = state["gone"][leaving]
         _remove_particles_and_ports(root, kept, group)
         protein._leaving_atoms[kept] = tuple(
             sorted(protein._leaving_atoms.get(kept, ()) + tuple(p.name for p in group))

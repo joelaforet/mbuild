@@ -280,3 +280,97 @@ class TestModificationPlan(BaseTest):
         assert "<svg" in (tmp_path / "plan.svg").read_text()
         plans[0].save(tmp_path / "plan.png")
         assert (tmp_path / "plan.png").read_bytes()[:4] == b"\x89PNG"
+
+    def test_drawings_hide_hydrogens_without_radicals(self, protein, octanoyl):
+        # Tests that hiding hydrogens in a panel leaves the heavy atoms
+        # their hydrogen counts, so the drawing shows no radicals that
+        # drawing every hydrogen would not show.
+        from rdkit import Chem
+        from rdkit.Chem import Descriptors
+
+        plan = protein.plan_attach(octanoyl, resnum=5, atom_name="NZ", chain_id="A")
+        particles = list(plan.site.particles())
+        counts = []
+        for hydrogens in (False, True):
+            mol, _, _ = plan._panel(protein, particles, set(), set(), hydrogens)
+            Chem.SanitizeMol(mol)
+            counts.append(Descriptors.NumRadicalElectrons(mol))
+        assert counts[0] == counts[1]
+        product, _ = plan._product(False)
+        Chem.SanitizeMol(product)
+        assert Descriptors.NumRadicalElectrons(product) == counts[1]
+
+    def test_failed_apply_marks_the_plan_applied(self, protein, monkeypatch):
+        # Tests that a plan whose apply raised midway is not applied
+        # again: the first attempt changed the protein already.
+        from mbuild.biopolymers import protonation
+
+        def boom(residue):
+            raise RuntimeError("stop")
+
+        plan = protein.plan_deprotonate(5, "NZ", chain_id="A")
+        monkeypatch.setattr(protonation, "_warn_on_split_charge", boom)
+        with pytest.raises(RuntimeError):
+            protein.apply(plan)
+        assert plan.applied
+        with pytest.raises(MBuildError, match="already been applied"):
+            protein.apply(plan)
+
+    def test_plan_mutate_from_proline(self, protein):
+        plan = protein.plan_mutate(9, "ALA", chain_id="A", platform="CPU")
+        assert plan.site.name == "PRO"
+        group = plan.groups[plan.leaving[0][1]]
+        assert group[0] == "CB" and {"CG", "CD"} <= set(group)
+        assert [atom.name for atom in plan.new_hydrogens] == ["N"]
+        assert any("ring on N opens" in note for note in plan.notes)
+        assert "<svg" in plan._repr_svg_()
+        assert protein.apply(plan).name == "ALA"
+
+    def test_text_keeps_the_sides_after_apply(self, protein, octanoyl):
+        plan = protein.plan_attach(
+            octanoyl, resnum=5, atom_name="NZ", chain_id="A", relax=False
+        )
+        protein.apply(plan)
+        assert "leaves    protein: HZ1 | fragment: H1" in str(plan)
+        assert plan.summary().startswith("attach: LYS A:5 NZ + OC8 C1")
+
+    def test_merge_on_the_one_bond_path(self, protein):
+        acetone = mb.load("CC(C)=O", smiles=True)
+        plan = protein.plan_attach(
+            acetone,
+            "C1",
+            resnum=5,
+            atom_name="NZ",
+            chain_id="A",
+            fragment_resname="ACE",
+            merge=True,
+            relax=False,
+        )
+        assert "merge the atoms into the site residue" in str(plan)
+        residue = protein.apply(plan)
+        assert residue is plan.site and residue.template is None
+
+    def test_glycine_plan_follows_the_handedness(self, protein):
+        protein.mutate(7, "GLY", chain_id="A", relax=False)
+        left = protein.plan_mutate(7, "PHE", chain_id="A", stereo="L")
+        right = protein.plan_mutate(7, "PHE", chain_id="A", stereo="D")
+        assert left.leaving[0][1] is not right.leaving[0][1]
+        assert {left.leaving[0][1].name, right.leaving[0][1].name} == {"HA2", "HA3"}
+
+    def test_heavy_leaving_atoms_list_their_groups(self, protein, octanoyl):
+        plan = protein.plan_attach(
+            octanoyl, resnum=5, atom_name="CE", chain_id="A", leaving_atom_names="NZ"
+        )
+        assert plan.groups[plan.leaving[0][1]] == ("NZ", "HZ1", "HZ2", "HZ3")
+        assert "protein: NZ (+HZ1 HZ2 HZ3)" in str(plan)
+        plan = protein.plan_attach(
+            octanoyl, resnum=5, atom_name="CA", chain_id="A", leaving_atom_names="CB"
+        )
+        assert "protein: CB (+" in str(plan) and "atoms)" in str(plan)
+
+    def test_no_op_protonation_plan_goes_stale_with_the_template(self, protein):
+        plan = protein.plan_protonate(5, "NZ", chain_id="A")
+        assert "nothing" in str(plan)
+        protein.deprotonate(5, "NZ", chain_id="A")
+        with pytest.raises(MBuildError, match="changed since"):
+            protein.apply(plan)

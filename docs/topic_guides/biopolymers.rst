@@ -107,10 +107,10 @@ as a drawing; ``apply`` then makes the edits. ``attach(...)`` is
 The checks run when the plan is made, so a wrong atom name, a leaving
 atom inside a ring or a reaction string that does not match raise
 before anything changes. A plan is applied once, to the protein it was
-made for, and only while that protein still holds the atoms it names;
-plan again after another modification touched them.
+made for, and only while that protein still holds the atoms and bonds
+it names; plan again after another modification touched them.
 ``plan.save("plan.svg")`` writes the drawing, and ``plan.save("plan.png")``
-does with an RDKit built with Cairo, as the conda-forge package is.
+does so with an RDKit built with Cairo, as the conda-forge package is.
 
 Point mutations
 ---------------

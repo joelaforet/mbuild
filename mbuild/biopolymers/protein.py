@@ -876,7 +876,8 @@ class Protein(Compound):
         The checks of ``attach`` run here: a site or fragment atom that
         does not exist, a leaving atom in a ring, a reaction string
         that does not match, or an argument the reaction string
-        overrides all raise, and the kept-charge warning is logged.
+        overrides all raise, and the kept-charge warning is logged here,
+        not again by ``apply``.
 
         Returns
         -------
@@ -998,15 +999,16 @@ class Protein(Compound):
         """
         plan._check_fresh(self)
         logger.info(plan.summary())
+        # Marked before the edits: a plan whose apply raised midway has
+        # changed the protein, so it must not run again on top of that.
+        plan.applied = True
         apply = {
             "attach": _apply_attach,
             "mutate": _apply_mutate,
             "protonate": _apply_protonate,
             "deprotonate": _apply_deprotonate,
         }[plan.kind]
-        result = apply(plan)
-        plan.applied = True
-        return result
+        return apply(plan)
 
     def relax_fragments(
         self,

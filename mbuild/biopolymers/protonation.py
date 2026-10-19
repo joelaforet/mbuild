@@ -53,6 +53,7 @@ def _plan_deprotonate(protein, resnum, atom_name, chain_id=None, icode=""):
     plan = ModificationPlan(
         kind="deprotonate", protein=protein, site=residue, site_atom=atom
     )
+    plan._state["template"] = variant
     if not protons:
         plan._state["noop"] = (
             f"Atom {atom_name} of residue {_pdb_label(residue)} "
@@ -128,6 +129,7 @@ def _plan_protonate(protein, resnum, atom_name, chain_id=None, icode=""):
     plan = ModificationPlan(
         kind="protonate", protein=protein, site=residue, site_atom=atom
     )
+    plan._state["template"] = variant
     if target is None:
         plan._state["noop"] = (
             f"Atom {atom_name} of residue {_pdb_label(residue)} "
