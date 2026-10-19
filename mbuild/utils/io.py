@@ -355,6 +355,14 @@ except ImportError:
     has_freud = False
 
 try:
+    import coxeter
+
+    has_coxeter = True
+    del coxeter
+except ImportError:
+    has_coxeter = False
+
+try:
     import openmm
 
     has_openmm = True
