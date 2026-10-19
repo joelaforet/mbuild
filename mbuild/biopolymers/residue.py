@@ -189,9 +189,15 @@ def _remove_particles_and_ports(root, atom, particles):
 
     ``Compound.remove`` leaves one auto-generated port on the atom per
     severed bond. Those ports are removed here, so the atom keeps only
-    the ports the caller made. The second ``remove`` call scans the
-    whole compound once more for orphaned ports. This cost is accepted
-    to stay on the public ``Compound`` API.
+    the ports the caller made.
+
+    ``Compound.remove`` ends by scanning the compound it is called on
+    for ports whose anchor is gone, which on a protein walks every
+    atom. ``remove_bond`` puts each port it opens in the parent of the
+    port's atom, so when every removed particle sits in ``atom``'s own
+    residue, every port the removal opens or orphans is in that residue
+    too, and ``remove`` runs on the residue alone. Otherwise it runs on
+    ``root``.
 
     Parameters
     ----------
@@ -204,13 +210,15 @@ def _remove_particles_and_ports(root, atom, particles):
         The particles to remove.
     """
     residue = atom.parent
+    particles = list(particles)
+    scope = residue if all(p.parent is residue for p in particles) else root
     old_ports = {p for p in residue.children if isinstance(p, Port)}
-    root.remove(list(particles))
+    scope.remove(particles)
     new_ports = [
         p for p in residue.children if isinstance(p, Port) and p not in old_ports
     ]
     if new_ports:
-        root.remove(new_ports)
+        scope.remove(new_ports)
 
 
 @lru_cache(maxsize=1)
