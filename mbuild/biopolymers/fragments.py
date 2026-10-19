@@ -17,7 +17,7 @@ from mbuild.biopolymers.ccd import (
     _parse_cif_blocks,
 )
 from mbuild.biopolymers.protein_pdb_io import _parse_pdb
-from mbuild.biopolymers.residue import Residue, _rdkit_mol
+from mbuild.biopolymers.residue import Residue, _bonds_among, _rdkit_mol
 from mbuild.bond_graph import BondGraph
 from mbuild.compound import Compound
 from mbuild.exceptions import MBuildError
@@ -142,7 +142,9 @@ def _move_into_residue(compound, residue):
     """Move the particles, ports and bonds of a compound into a residue.
 
     The particles become direct children of ``residue`` and every bond
-    is added again with its bond order. ``compound`` is left empty.
+    is added again with its bond order, in the order of the bond graph
+    (``_bonds_among``), so that the residue's bonds are in the same
+    order in every process. ``compound`` is left empty.
     ``_wrap_in_residue`` uses this to flatten a fragment into a new
     residue, and ``Protein.mutate`` uses it to move a placed side chain
     into the residue it now belongs to.
@@ -157,7 +159,7 @@ def _move_into_residue(compound, residue):
     particles = list(compound.particles())
     bonds = [
         (particle1, particle2, data["bond_order"])
-        for particle1, particle2, data in compound.bonds(return_bond_order=True)
+        for particle1, particle2, data in _bonds_among(compound, particles)
     ]
     ports = list(compound.all_ports())
     for port in ports:

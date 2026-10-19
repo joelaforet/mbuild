@@ -257,6 +257,35 @@ def _atom_of(residue, atom_name):
     return particle
 
 
+def _bonds_among(compound, particles):
+    """Yield ``(particle1, particle2, data)`` for the bonds between ``particles``.
+
+    The bonds come in the order of the root's bond graph, so the result
+    is the same in every process. ``Compound.bonds`` gives that order
+    only on the root: below it, it reads a networkx subgraph, which
+    iterates a set of particles, and particles hash by ``id``. The
+    order of a residue's bonds then follows memory addresses, and with
+    it the atom order of every RDKit match, so the same call could
+    pick a different one of two equivalent matches from one run to
+    the next.
+    """
+    wanted = set(particles)
+    for particle1, particle2, data in compound.root.bond_graph.edges(data=True):
+        if particle1 in wanted and particle2 in wanted:
+            yield particle1, particle2, data
+
+
+def _neighbours(atom):
+    """Return the atoms bonded to ``atom``, in the order of the bond graph.
+
+    ``Compound.direct_bonds`` returns a set, whose order follows
+    memory addresses (see ``_bonds_among``). Code whose result depends
+    on the order of the neighbours, such as the side of a planar atom
+    that ``_open_direction`` picks, reads them here instead.
+    """
+    return list(atom.root.bond_graph.adj[atom])
+
+
 def _rdkit_mol(compound, particles):
     """Return an editable RDKit molecule of ``particles`` and a particle-to-index map.
 
@@ -269,8 +298,11 @@ def _rdkit_mol(compound, particles):
     the bond order that ``compound`` holds; an aromatic bond and its
     atoms are flagged aromatic, which ``SanitizeMol`` requires. A bond
     with an order outside ``_rdkit_bond_orders`` raises, because this
-    package needs a real order on every bond. The molecule is not
-    sanitized and holds no conformer; each caller finishes it.
+    package needs a real order on every bond. Atoms follow the order of
+    ``particles`` and bonds the order of the bond graph
+    (``_bonds_among``), so the molecule, and every match made on it, is
+    the same in every process. The molecule is not sanitized and holds
+    no conformer; each caller finishes it.
 
     Parameters
     ----------
@@ -296,9 +328,7 @@ def _rdkit_mol(compound, particles):
         atom.SetFormalCharge(charges.get(particle.name, 0))
         atom.SetNoImplicit(True)
         index[particle] = editable.AddAtom(atom)
-    for particle1, particle2, data in compound.bonds(return_bond_order=True):
-        if particle1 not in index or particle2 not in index:
-            continue
+    for particle1, particle2, data in _bonds_among(compound, index):
         order = float(data["bond_order"])
         if order not in orders:
             raise MBuildError(

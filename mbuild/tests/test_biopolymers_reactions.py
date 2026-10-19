@@ -157,6 +157,49 @@ class TestReactionStrings(BaseTest):
         )
         assert ca.parent is azf
 
+    @pytest.mark.parametrize(
+        "atom_name, fragment_atom_name, expected",
+        [
+            ("N3", None, {"N1": "C11", "N3": "C10"}),
+            ("N3", "C10", {"N1": "C11", "N3": "C10"}),
+            ("N3", "C11", {"N1": "C10", "N3": "C11"}),
+            ("N1", "C10", {"N1": "C10", "N3": "C11"}),
+        ],
+    )
+    def test_fragment_atom_name_chooses_the_triazole_regioisomer(
+        self, _azf_cached, atom_name, fragment_atom_name, expected
+    ):
+        # Tests that naming an alkyne carbon chooses which azide
+        # nitrogen it bonds, and so which of the two triazole
+        # regioisomers an unsymmetric alkyne (the DBCO core) forms.
+        # This is needed because the template matches the triple bond
+        # both ways round, and without a name the first match decides.
+        protein = mb.clone(_azf_cached)
+        record = protein.attach(
+            prepare_fragment("CC(=O)N1Cc2ccccc2C#Cc2ccccc21", "DBC"),
+            fragment_atom_name,
+            resnum=5,
+            atom_name=atom_name,
+            chain_id="A",
+            reaction="azide-alkyne triazole",
+            relax=False,
+        )
+        azf = protein.get_residue(5, chain_id="A")
+        partners = {
+            atom.name: next(
+                other.name
+                for other in atom.direct_bonds()
+                if other.parent is record.residue2
+            )
+            for atom in azf.particles()
+            if atom.name in ("N1", "N3")
+        }
+        assert partners == expected
+        assert {record.atom1_name, record.atom2_name} == {
+            atom_name,
+            partners[atom_name],
+        }
+
     def test_reaction_written_fragment_first_still_matches(self, azf_protein):
         # Tests that a reaction whose first template is the fragment is
         # accepted, because attach() tries the two orders. This is
