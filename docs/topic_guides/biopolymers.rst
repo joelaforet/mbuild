@@ -80,6 +80,38 @@ the neutral amine acylates, so deprotonate it first:
 the result, so the template, the residue formal charge and the per-atom
 formal charges all agree with the structure afterwards.
 
+Seeing what a modification will do
+----------------------------------
+
+Each verb has a ``plan_`` form that reads the same arguments and
+changes nothing. The plan names the atoms that leave, the bonds that
+form, break or change order, and the charges that change, as text and
+as a drawing; ``apply`` then makes the edits. ``attach(...)`` is
+``apply(plan_attach(...))``, and the same holds for ``mutate``,
+``protonate`` and ``deprotonate``.
+
+.. code-block:: python
+
+    plan = protein.plan_attach(fragment, resnum=63, atom_name="NZ", chain_id="A")
+    print(plan)
+    plan.draw()          # the site, the fragment and the product, in 2D
+    protein.apply(plan)
+
+::
+
+    attach: LYS A:63 NZ + OC8 C1
+      leaves    protein: HZ1 | fragment: H1
+      forms     NZ-C1 (1)
+      then      align the fragment on ports; turn it clear of clashes and minimize the neighbourhood; record the bond
+
+The checks run when the plan is made, so a wrong atom name, a leaving
+atom inside a ring or a reaction string that does not match raise
+before anything changes. A plan is applied once, to the protein it was
+made for, and only while that protein still holds the atoms it names;
+plan again after another modification touched them.
+``plan.save("plan.svg")`` writes the drawing, and ``plan.save("plan.png")``
+does with an RDKit built with Cairo, as the conda-forge package is.
+
 Point mutations
 ---------------
 
@@ -226,6 +258,10 @@ local to the site. A reaction that forms several bonds between the
 sides is placed by fitting the fragment to all of them and then relaxed
 until every bond is at bond length. Each formed bond is recorded with
 the reaction string, so ``bond_records()`` describes the product.
+``plan_attach`` with a reaction string shows the edits the string
+makes before they are applied, which is the way to check a string you
+wrote yourself. With a reaction, ``bond_order`` and the leaving-atom
+names are refused rather than ignored, since the string decides both.
 
 Shipped strings: ``hydrogen substitution`` (the default behaviour of
 ``attach``), ``amide coupling``, ``thiol-maleimide``,
@@ -338,6 +374,9 @@ API
 
 .. autoclass:: mbuild.biopolymers.Protein
     :members:
+
+.. autoclass:: mbuild.biopolymers.ModificationPlan
+    :members: draw, save, summary
 
 .. autoclass:: mbuild.biopolymers.Chain
     :members:

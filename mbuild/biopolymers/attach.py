@@ -21,6 +21,7 @@ from mbuild.biopolymers.fragments import (
     _detach_particles,
     _move_into_residue,
 )
+from mbuild.biopolymers.plan import ModificationPlan
 from mbuild.biopolymers.relax import (
     _PORT_SEPARATION,
     _PROTON_BOND_LENGTH,
@@ -45,7 +46,7 @@ from mbuild.port import Port
 logger = logging.getLogger(__name__)
 
 
-def _attach(
+def _plan_attach(
     protein,
     fragment,
     fragment_atom_name=None,
@@ -65,14 +66,45 @@ def _attach(
     platform=None,
     minimize=True,
 ):
-    # The name is checked first, before the attachment site is
-    # read and before any warning is logged. The check ran inside
-    # _as_residues before, so the charge warning of a valid site
-    # reached the user ahead of the error about the name.
-    """Bond a fragment onto a residue; see ``Protein.attach``."""
+    """Read the arguments of ``attach`` into a plan; see ``Protein.plan_attach``.
+
+    The name is checked first, before the attachment site is read and
+    before any warning is logged, so the error about a bad name reaches
+    the user ahead of the charge warning of a valid site. Nothing is
+    changed: the fragment is cloned, and the leaving atoms and the bond
+    are only chosen. ``_apply_attach`` makes the edits.
+    """
     _check_resname(fragment_resname)
+    options = {
+        "relax": relax,
+        "minimize": minimize,
+        "merge": merge,
+        "platform": platform,
+    }
     if reaction is not None:
-        return _attach_by_reaction(
+        # The string decides what leaves and with which order the
+        # bond forms, so an argument that says otherwise is a mistake
+        # rather than something to ignore.
+        ignored = [
+            name
+            for name, given in (
+                ("bond_order", int(bond_order) != 1),
+                ("leaving_atom_names", leaving_atom_names is not None),
+                (
+                    "fragment_leaving_atom_names",
+                    fragment_leaving_atom_names is not None,
+                ),
+            )
+            if given
+        ]
+        if ignored:
+            raise MBuildError(
+                "A reaction string decides the bond orders and the leaving "
+                f"atoms, so {', '.join(ignored)} cannot be given with "
+                "reaction=. Drop them, or write what leaves into the "
+                "reaction string."
+            )
+        return _plan_attach_by_reaction(
             protein,
             fragment,
             reaction,
@@ -83,10 +115,7 @@ def _attach(
             icode,
             fragment_resnum,
             fragment_resname,
-            relax,
-            merge,
-            platform,
-            minimize,
+            options,
         )
     bond_order = int(bond_order)
     site_residue, site_atom, site_hydrogens = _attachment_site(
@@ -101,16 +130,54 @@ def _attach(
         bond_order,
         fragment_leaving_atom_names,
     )
-
+    plan = ModificationPlan(
+        kind="attach",
+        protein=protein,
+        site=site_residue,
+        site_atom=site_atom,
+        fragment=added,
+        fragment_atom=frag_atom,
+        options=options,
+    )
     # One leaving group per bond order unit on each side, a hydrogen
-    # by default (the polymer.add_monomer convention); the port
-    # points along the sum of the broken-bond vectors. Both ports
-    # are opened while
-    # the fragment is still detached, so that each removal runs on
-    # its own compound.
-    site_port = _port_along_hydrogens(protein, protein, site_atom, site_hydrogens)
+    # by default (the polymer.add_monomer convention). A heavy leaving
+    # atom takes its substituent with it.
+    for atom, anchors in ((site_atom, site_hydrogens), (frag_atom, frag_hydrogens)):
+        for anchor in anchors:
+            plan._add_leaving(atom, anchor, _substituent(atom, anchor))
+    plan.formed.append((site_atom, frag_atom, float(bond_order)))
+    plan._state.update(
+        frag_residues=frag_residues,
+        frag_residue=frag_residue,
+        site_hydrogens=site_hydrogens,
+        frag_hydrogens=frag_hydrogens,
+        bond_order=bond_order,
+        in_fragment=set(added.particles()),
+    )
+    return plan
+
+
+def _apply_attach(plan):
+    """Make the edits of an attach plan; see ``Protein.apply``."""
+    if plan.reaction is not None:
+        return _apply_attach_by_reaction(plan)
+    protein, state = plan.protein, plan._state
+    site_residue, site_atom, added = plan.site, plan.site_atom, plan.fragment
+    frag_atom, frag_residues = plan.fragment_atom, state["frag_residues"]
+    frag_residue, bond_order = state["frag_residue"], state["bond_order"]
+    merge, relax = plan.options["merge"], plan.options["relax"]
+    platform, minimize = plan.options["platform"], plan.options["minimize"]
+
+    # The port points along the sum of the broken-bond vectors. Both
+    # ports are opened while the fragment is still detached, so that
+    # each removal runs on its own compound.
+    site_port = _port_along_hydrogens(
+        protein, protein, site_atom, state["site_hydrogens"]
+    )
     site_residue.add(site_port, label="attach_site")
-    frag_port = _port_along_hydrogens(protein, added, frag_atom, frag_hydrogens)
+    frag_port = _port_along_hydrogens(
+        protein, added, frag_atom, state["frag_hydrogens"]
+    )
     added.add(frag_port, label="attach_frag")
     # A heavy leaving atom takes its substituent with it. When that
     # substituent was a residue of its own (the hydroxyl residue a
@@ -160,7 +227,7 @@ def _attach(
     return record
 
 
-def _attach_by_reaction(
+def _plan_attach_by_reaction(
     protein,
     fragment,
     reaction,
@@ -171,24 +238,24 @@ def _attach_by_reaction(
     icode,
     fragment_resnum,
     fragment_resname,
-    relax,
-    merge,
-    platform=None,
-    minimize=True,
+    options,
 ):
-    """Bond a fragment by the rule a reaction string states.
+    """Read a reaction string into a plan; see ``Protein.plan_attach``.
 
     ``reactions.plan_reaction`` reads the string into leaving atoms,
     formed, broken and reordered bonds, charges and new hydrogens.
-    This method applies them in that order with the same steps as
-    the plain ``attach``: leaving groups go, ports open at the two
-    atoms of the bond that joins the sides, the fragment is
-    aligned and bonded through ``force_overlap``, and the remaining
-    edits follow. A residue whose bonds or charges the reaction
-    changed keeps no template, because no CCD variant describes it;
-    its bond record does.
+    Here the bond that joins the sides is chosen, the groups that
+    leave are listed, and the kept-charge warning runs when the
+    reaction states no charge for the anchor. ``_apply_attach_by_reaction``
+    then applies the edits in that order with the same steps as the
+    plain ``attach``: leaving groups go, ports open at the two atoms of
+    the bond that joins the sides, the fragment is aligned and bonded
+    through ``force_overlap``, and the remaining edits follow. A
+    residue whose bonds or charges the reaction changed keeps no
+    template, because no CCD variant describes it; its bond record
+    does.
     """
-    from mbuild.biopolymers.reactions import plan_reaction
+    from mbuild.biopolymers.reactions import REACTIONS, plan_reaction
 
     site_residue = protein.get_residue(resnum, chain_id=chain_id, icode=icode)
     site_anchor = _atom_of(site_residue, atom_name)
@@ -230,7 +297,7 @@ def _attach_by_reaction(
     ]
     if not cross:
         raise MBuildError(
-            f"The reaction {plan.smarts!r} forms no bond between the protein "
+            f"The reaction {plan.reaction!r} forms no bond between the protein "
             "and the fragment, so there is nothing to attach."
         )
     primary = next((b for b in cross if site_anchor in b[:2]), cross[0])
@@ -239,6 +306,51 @@ def _attach_by_reaction(
         if primary[1] in in_fragment
         else (primary[1], primary[0])
     )
+    # The anchor keeps its charge unless the reaction states another,
+    # so the warning of the one-bond rule applies to it as well.
+    if site_anchor not in plan.charges:
+        _warn_on_kept_charge(site_residue, resnum, atom_name)
+    plan.protein, plan.site, plan.site_atom = protein, site_residue, site_atom
+    plan.fragment, plan.fragment_atom, plan.options = added, frag_atom, options
+    for kept, leaving in list(plan.leaving):
+        plan._add_leaving(kept, leaving, _substituent(kept, leaving), append=False)
+    for hydrogen in sorted(moving, key=lambda atom: atom.name):
+        old = next(
+            other
+            for pair in plan.removed
+            for other in pair
+            if hydrogen in pair and other is not hydrogen
+        )
+        new = next(
+            (
+                other
+                for a, b, _ in plan.formed
+                for other in (a, b)
+                if hydrogen in (a, b) and other is not hydrogen
+            ),
+            None,
+        )
+        if new is not None:
+            plan.notes.append(f"{hydrogen.name} moves from {old.name} to {new.name}")
+    plan._state.update(
+        reaction_name=reaction if reaction in REACTIONS else None,
+        frag_residues=frag_residues,
+        in_fragment=in_fragment,
+        moving=moving,
+        cross=cross,
+        primary=primary,
+    )
+    return plan
+
+
+def _apply_attach_by_reaction(plan):
+    """Make the edits of a reaction plan; see ``_plan_attach_by_reaction``."""
+    protein, state = plan.protein, plan._state
+    site_residue, site_atom, added = plan.site, plan.site_atom, plan.fragment
+    frag_atom, frag_residues = plan.fragment_atom, state["frag_residues"]
+    in_fragment, cross, primary = state["in_fragment"], state["cross"], state["primary"]
+    merge, relax = plan.options["merge"], plan.options["relax"]
+    platform, minimize = plan.options["platform"], plan.options["minimize"]
 
     # 1. Leaving groups. The port at each bonding atom points along
     #    its leaving group, or into its open site when nothing leaves.
@@ -368,7 +480,7 @@ def _attach_by_reaction(
             order=int(order) if float(order).is_integer() else order,
             leaving1=protein._leaving_atoms.get(protein_atom, ()),
             leaving2=protein._leaving_atoms.get(fragment_atom, ()),
-            reaction=plan.smarts,
+            reaction=plan.reaction,
         )
         protein.cross_bonds.append(record)
         if protein_atom is site_atom:

@@ -39,8 +39,7 @@ conjugations, keyed by name; ``attach`` accepts either the name or a
 string.
 """
 
-from dataclasses import dataclass, field
-
+from mbuild.biopolymers.plan import ModificationPlan
 from mbuild.biopolymers.residue import _rdkit_mol
 from mbuild.exceptions import MBuildError
 
@@ -80,43 +79,6 @@ REACTIONS = {
 }
 
 _BOND_ORDERS = {"SINGLE": 1.0, "DOUBLE": 2.0, "TRIPLE": 3.0, "AROMATIC": 1.5}
-
-
-@dataclass
-class ReactionPlan:
-    """The edits a reaction string makes, as particles of the two compounds.
-
-    Attributes
-    ----------
-    leaving : list of (mbuild.Compound, mbuild.Compound)
-        ``(kept atom, leaving atom)`` pairs. The leaving atom and every
-        atom beyond it, away from the kept atom, are removed.
-    formed : list of (mbuild.Compound, mbuild.Compound, float)
-        Bonds to add, with their order.
-    removed : list of (mbuild.Compound, mbuild.Compound)
-        Bonds to break between atoms that both stay.
-    reordered : list of (mbuild.Compound, mbuild.Compound, float)
-        Bonds that stay and take a new order.
-    charges : dict of mbuild.Compound -> int
-        Formal charges the product template states.
-    new_hydrogens : list of mbuild.Compound
-        Atoms that gain a hydrogen the product creates.
-    smarts : str
-        The reaction string, resolved from its name.
-    """
-
-    leaving: list = field(default_factory=list)
-    formed: list = field(default_factory=list)
-    removed: list = field(default_factory=list)
-    reordered: list = field(default_factory=list)
-    charges: dict = field(default_factory=dict)
-    new_hydrogens: list = field(default_factory=list)
-    smarts: str = ""
-
-    def cross_bonds(self, side_particles):
-        """Return the formed bonds with one atom in ``side_particles``."""
-        side = set(side_particles)
-        return [bond for bond in self.formed if (bond[0] in side) != (bond[1] in side)]
 
 
 def _query_mol(compound, particles):
@@ -243,7 +205,9 @@ def plan_reaction(
 
     Returns
     -------
-    ReactionPlan
+    ModificationPlan
+        The edits, with ``reaction`` set to the resolved SMARTS. The
+        caller fills in the protein, the site and the fragment.
     """
     from rdkit.Chem import AllChem
 
@@ -295,7 +259,7 @@ def plan_reaction(
             "included."
         )
 
-    plan = ReactionPlan(smarts=smarts)
+    plan = ModificationPlan(kind="attach", reaction=smarts)
     by_map = {}
     reactant_bonds = {}
     for index, template in enumerate(templates):

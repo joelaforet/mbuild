@@ -37,8 +37,9 @@ from dataclasses import replace
 import numpy as np
 
 from mbuild.biopolymers.attach import (
-    _attach,
+    _apply_attach,
     _bonded_hydrogens,
+    _plan_attach,
     _port_along_hydrogens,
 )
 from mbuild.biopolymers.ccd import CCDLibrary
@@ -50,7 +51,7 @@ from mbuild.biopolymers.matching import (
     _matches_agree,
     _ter_break_reason,
 )
-from mbuild.biopolymers.mutate import _mutate
+from mbuild.biopolymers.mutate import _apply_mutate, _plan_mutate
 from mbuild.biopolymers.protein_pdb_io import (
     _check_residue_membership,
     _parse_pdb,
@@ -58,7 +59,12 @@ from mbuild.biopolymers.protein_pdb_io import (
     pdb_text,
     write_pdb,
 )
-from mbuild.biopolymers.protonation import _deprotonate, _protonate
+from mbuild.biopolymers.protonation import (
+    _apply_deprotonate,
+    _apply_protonate,
+    _plan_deprotonate,
+    _plan_protonate,
+)
 from mbuild.biopolymers.relax import (
     _BACKBONE_NAMES,
     _relax_particles,
@@ -835,6 +841,173 @@ class Protein(Compound):
             ),
         )
 
+    def plan_attach(
+        self,
+        fragment,
+        fragment_atom_name=None,
+        *,
+        resnum,
+        atom_name,
+        chain_id=None,
+        icode="",
+        fragment_resnum=None,
+        fragment_resname=None,
+        bond_order=1,
+        relax=True,
+        leaving_atom_names=None,
+        fragment_leaving_atom_names=None,
+        reaction=None,
+        merge=False,
+        platform=None,
+        minimize=True,
+    ):
+        """Return the plan of ``attach`` without applying it.
+
+        The parameters are those of ``attach``. The protein is not
+        changed and the fragment is cloned, so the plan can be read,
+        printed and drawn before ``apply`` makes the edits:
+
+        >>> plan = protein.plan_attach(dye, resnum=1500, atom_name="SG",
+        ...                            chain_id="A", reaction="thiol-maleimide")
+        >>> print(plan)
+        >>> plan.draw()
+        >>> protein.apply(plan)
+
+        The checks of ``attach`` run here: a site or fragment atom that
+        does not exist, a leaving atom in a ring, a reaction string
+        that does not match, or an argument the reaction string
+        overrides all raise, and the kept-charge warning is logged.
+
+        Returns
+        -------
+        ModificationPlan
+        """
+        return _plan_attach(
+            self,
+            fragment,
+            fragment_atom_name,
+            resnum=resnum,
+            atom_name=atom_name,
+            chain_id=chain_id,
+            icode=icode,
+            fragment_resnum=fragment_resnum,
+            fragment_resname=fragment_resname,
+            bond_order=bond_order,
+            relax=relax,
+            leaving_atom_names=leaving_atom_names,
+            fragment_leaving_atom_names=fragment_leaving_atom_names,
+            reaction=reaction,
+            merge=merge,
+            platform=platform,
+            minimize=minimize,
+        )
+
+    def plan_mutate(
+        self,
+        resnum,
+        to,
+        *,
+        chain_id=None,
+        icode="",
+        resname=None,
+        stereo=None,
+        relax=True,
+        platform=None,
+        minimize=True,
+    ):
+        """Return the plan of ``mutate`` without applying it.
+
+        The parameters are those of ``mutate``. The plan names the side
+        chain that leaves, the one that arrives, the name the residue
+        takes and its handedness. See ``plan_attach``.
+
+        Returns
+        -------
+        ModificationPlan
+        """
+        return _plan_mutate(
+            self,
+            resnum,
+            to,
+            chain_id=chain_id,
+            icode=icode,
+            resname=resname,
+            stereo=stereo,
+            relax=relax,
+            platform=platform,
+            minimize=minimize,
+        )
+
+    def plan_deprotonate(self, resnum, atom_name, chain_id=None, icode=""):
+        """Return the plan of ``deprotonate`` without applying it.
+
+        The plan names the proton that leaves and the template variant
+        the residue takes. When the atom carries no acidic proton the
+        plan does nothing, and ``apply`` logs the warning that
+        ``deprotonate`` logs.
+
+        Returns
+        -------
+        ModificationPlan
+        """
+        return _plan_deprotonate(self, resnum, atom_name, chain_id, icode)
+
+    def plan_protonate(self, resnum, atom_name, chain_id=None, icode=""):
+        """Return the plan of ``protonate`` without applying it.
+
+        The plan names the proton that arrives and the template variant
+        the residue takes. When the atom takes no proton the plan does
+        nothing, and ``apply`` logs the warning that ``protonate`` logs.
+
+        Returns
+        -------
+        ModificationPlan
+        """
+        return _plan_protonate(self, resnum, atom_name, chain_id, icode)
+
+    def apply(self, plan):
+        """Make the edits of a plan, then relax and record as the plan says.
+
+        Every one-call verb is this method on its plan: ``attach(...)``
+        is ``apply(plan_attach(...))``. The plan's one-line summary is
+        logged at INFO level before the edits.
+
+        A plan is applied once, to the protein it was made for, and
+        only while that protein still holds the atoms and bonds the
+        plan names. A plan made before another modification touched
+        the same atoms is refused; plan it again.
+
+        Parameters
+        ----------
+        plan : ModificationPlan
+            From ``plan_attach``, ``plan_mutate``, ``plan_protonate``
+            or ``plan_deprotonate``.
+
+        Returns
+        -------
+        InterResidueBond, Residue or None
+            What the one-call verb returns: the bond record or the
+            merged site residue for an attach, the mutated residue for
+            a mutation, and None for a protonation change.
+
+        Raises
+        ------
+        MBuildError
+            When the plan was applied already, was made for another
+            protein, or no longer matches this one.
+        """
+        plan._check_fresh(self)
+        logger.info(plan.summary())
+        apply = {
+            "attach": _apply_attach,
+            "mutate": _apply_mutate,
+            "protonate": _apply_protonate,
+            "deprotonate": _apply_deprotonate,
+        }[plan.kind]
+        result = apply(plan)
+        plan.applied = True
+        return result
+
     def relax_fragments(
         self,
         residues=None,
@@ -1074,6 +1247,9 @@ class Protein(Compound):
     ):
         """Bond a fragment Compound onto a residue of this protein.
 
+        ``plan_attach`` returns what this call will do without doing it,
+        as text and as a drawing; this call is ``apply(plan_attach(...))``.
+
         One leaving group leaves each side per unit of bond order, so a
         double bond removes two from each atom. By default the leaving
         groups are hydrogens bonded to the named protein atom and to the
@@ -1208,24 +1384,25 @@ class Protein(Compound):
             the named atom. With ``merge=True`` there is no record, and
             the site residue is returned.
         """
-        return _attach(
-            self,
-            fragment,
-            fragment_atom_name,
-            resnum=resnum,
-            atom_name=atom_name,
-            chain_id=chain_id,
-            icode=icode,
-            fragment_resnum=fragment_resnum,
-            fragment_resname=fragment_resname,
-            bond_order=bond_order,
-            relax=relax,
-            leaving_atom_names=leaving_atom_names,
-            fragment_leaving_atom_names=fragment_leaving_atom_names,
-            reaction=reaction,
-            merge=merge,
-            platform=platform,
-            minimize=minimize,
+        return self.apply(
+            self.plan_attach(
+                fragment,
+                fragment_atom_name,
+                resnum=resnum,
+                atom_name=atom_name,
+                chain_id=chain_id,
+                icode=icode,
+                fragment_resnum=fragment_resnum,
+                fragment_resname=fragment_resname,
+                bond_order=bond_order,
+                relax=relax,
+                leaving_atom_names=leaving_atom_names,
+                fragment_leaving_atom_names=fragment_leaving_atom_names,
+                reaction=reaction,
+                merge=merge,
+                platform=platform,
+                minimize=minimize,
+            )
         )
 
     def deprotonate(self, resnum, atom_name, chain_id=None, icode=""):
@@ -1292,7 +1469,7 @@ class Protein(Compound):
         >>> protein.deprotonate(63, "NZ", chain_id="A")
         >>> protein.attach(fragment, resnum=63, atom_name="NZ", chain_id="A")
         """
-        return _deprotonate(self, resnum, atom_name, chain_id, icode)
+        return self.apply(self.plan_deprotonate(resnum, atom_name, chain_id, icode))
 
     def protonate(self, resnum, atom_name, chain_id=None, icode=""):
         """Add a proton to one atom and update its charge.
@@ -1352,7 +1529,7 @@ class Protein(Compound):
         >>> protein.deprotonate(63, "NZ", chain_id="A")
         >>> protein.protonate(63, "NZ", chain_id="A")
         """
-        return _protonate(self, resnum, atom_name, chain_id, icode)
+        return self.apply(self.plan_protonate(resnum, atom_name, chain_id, icode))
 
     def mutate(
         self,
@@ -1368,6 +1545,9 @@ class Protein(Compound):
         minimize=True,
     ):
         """Replace the side chain of one residue, keeping its backbone in place.
+
+        ``plan_mutate`` returns what this call will do without doing it;
+        this call is ``apply(plan_mutate(...))``.
 
         The old side chain, every atom beyond the bond from ``CA`` to
         its one heavy non-backbone neighbour (``CB`` in the canonical
@@ -1472,15 +1652,16 @@ class Protein(Compound):
         >>> protein.mutate(7, "ALA", chain_id="A", stereo="D")
         >>> protein.mutate(295, "PRO", chain_id="A")
         """
-        return _mutate(
-            self,
-            resnum,
-            to,
-            chain_id=chain_id,
-            icode=icode,
-            resname=resname,
-            stereo=stereo,
-            relax=relax,
-            platform=platform,
-            minimize=minimize,
+        return self.apply(
+            self.plan_mutate(
+                resnum,
+                to,
+                chain_id=chain_id,
+                icode=icode,
+                resname=resname,
+                stereo=stereo,
+                relax=relax,
+                platform=platform,
+                minimize=minimize,
+            )
         )

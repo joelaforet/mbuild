@@ -33,6 +33,7 @@ from mbuild.biopolymers.fragments import (
     fragment_from_ccd,
 )
 from mbuild.biopolymers.matching import _leaving_expectations
+from mbuild.biopolymers.plan import ModificationPlan
 from mbuild.biopolymers.relax import (
     _PORT_SEPARATION,
     _kabsch,
@@ -154,7 +155,7 @@ def _beta_atom(ca, backbone):
     return heavy[0] if heavy else None
 
 
-def _mutate(
+def _plan_mutate(
     protein,
     resnum,
     to,
@@ -167,7 +168,13 @@ def _mutate(
     platform=None,
     minimize=True,
 ):
-    """Replace the side chain of one residue; see ``Protein.mutate``."""
+    """Read the arguments of ``mutate`` into a plan; see ``Protein.plan_mutate``.
+
+    The side chain that leaves and the one that arrives are chosen
+    here without changing the residue. ``_old_side_chain`` makes the
+    same choice again when the plan is applied, and also moves the
+    atoms that a flipped handedness or an opened proline ring moves.
+    """
     if stereo is not None:
         stereo = str(stereo).upper()
         if stereo not in ("L", "D"):
@@ -185,6 +192,123 @@ def _mutate(
     )
     if stereo is None:
         stereo = component_stereo
+    plan = ModificationPlan(
+        kind="mutate",
+        protein=protein,
+        site=residue,
+        site_atom=ca,
+        fragment=frag,
+        fragment_atom=link,
+        options={"relax": relax, "minimize": minimize, "platform": platform},
+    )
+
+    # What leaves CA. A residue with a CB loses everything beyond the
+    # CA-CB bond; a glycine loses the alpha hydrogen whose place gives
+    # the wanted handedness.
+    try:
+        cb = _beta_atom(ca, (n, c))
+    except MBuildError as error:
+        raise MBuildError(
+            f"mutate() cannot replace the side chain of {label}: {error.args[0]}"
+        ) from error
+    current = None
+    if cb is None:
+        alphas = [
+            atom for atom in ca.direct_bonds() if atom.element.symbol.upper() == "H"
+        ]
+        if len(alphas) != 2:
+            raise MBuildError(
+                f"{label} has no side chain on CA and {len(alphas)} alpha "
+                "hydrogens instead of two, so mutate() cannot tell where a "
+                "side chain goes."
+            )
+        wanted = stereo or "L"
+        old = next(
+            atom
+            for atom in alphas
+            if _alpha_handedness(n.pos, ca.pos, c.pos, atom.pos) == wanted
+        )
+        plan._add_leaving(ca, old, [old])
+    elif _ring_closure(n, ca) is not None:
+        # A proline ring has no far side of the CA-CB bond until the
+        # ring is opened at N, which happens when the plan is applied.
+        # The side chain is every atom reachable from CB without
+        # passing through CA or N.
+        plan.notes.append(
+            "the ring on N opens first, and N takes back an amide hydrogen"
+        )
+        group, seen, queue = [cb], {ca, n, cb}, [cb]
+        while queue:
+            for neighbor in queue.pop().direct_bonds():
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    group.append(neighbor)
+                    queue.append(neighbor)
+        plan._add_leaving(ca, cb, group)
+        current = _alpha_handedness(n.pos, ca.pos, c.pos, cb.pos)
+    else:
+        try:
+            group = _substituent(ca, cb)
+        except MBuildError as error:
+            raise MBuildError(
+                f"mutate() cannot remove the side chain of {label}: "
+                f"{error.args[0]} A side chain joined to another residue by a "
+                "crosslink, as a disulfide cysteine, cannot be replaced."
+            ) from error
+        plan._add_leaving(ca, cb, group)
+        current = _alpha_handedness(n.pos, ca.pos, c.pos, cb.pos)
+
+    # What arrives on CA.
+    if frag is None:
+        plan.new_hydrogens.append(ca)
+        plan.notes.append("glycine: CA takes a second alpha hydrogen")
+    elif closure is not None:
+        fn, fca = (_atom_in_residue(frag, name) for name in ("N", "CA"))
+        side, queue = {link}, [link]
+        while queue:
+            for neighbor in queue.pop().direct_bonds():
+                if neighbor not in side and neighbor not in (fn, fca):
+                    side.add(neighbor)
+                    queue.append(neighbor)
+        backbone = [particle for particle in frag.particles() if particle not in side]
+        plan._add_leaving(link, fca, backbone)
+        plan.formed.extend([(ca, link, 1.0), (n, closure, 1.0)])
+        plan.notes.append(
+            "the side chain closes a ring on N, which gives up a hydrogen; "
+            "the component is superposed on the backbone"
+        )
+    else:
+        plan._add_leaving(link, anchor, _substituent(link, anchor))
+        plan.formed.append((ca, link, 1.0))
+    plan.notes.append(f"{label} becomes {new_name}" + (" (HETATM)" if hetatm else ""))
+    if stereo is not None:
+        flip = current is not None and stereo != current
+        plan.notes.append(
+            f"{stereo} handedness"
+            + (", swapping the alpha hydrogen and the side chain" if flip else "")
+        )
+    plan._state.update(
+        new_name=new_name,
+        hetatm=hetatm,
+        stereo=stereo,
+        closure=closure,
+        anchor=anchor,
+        n=n,
+        c=c,
+        to=to,
+    )
+    return plan
+
+
+def _apply_mutate(plan):
+    """Make the edits of a mutate plan; see ``Protein.apply``."""
+    protein, residue, state = plan.protein, plan.site, plan._state
+    n, ca, c = state["n"], plan.site_atom, state["c"]
+    frag, link, anchor = plan.fragment, plan.fragment_atom, state["anchor"]
+    closure, stereo, to = state["closure"], state["stereo"], state["to"]
+    new_name, hetatm = state["new_name"], state["hetatm"]
+    relax, platform = plan.options["relax"], plan.options["platform"]
+    minimize = plan.options["minimize"]
 
     # 1. The old side chain leaves, and the direction the new one
     #    takes is chosen. Flipping the handedness swaps the roles of

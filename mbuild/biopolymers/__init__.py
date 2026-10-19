@@ -8,6 +8,7 @@ from mbuild.biopolymers.fragments import (
     fragment_from_smiles,
     prepare_fragment,
 )
+from mbuild.biopolymers.plan import ModificationPlan
 from mbuild.biopolymers.protein import Protein
 from mbuild.biopolymers.reactions import REACTIONS
 from mbuild.biopolymers.residue import Chain, Residue
@@ -16,6 +17,7 @@ __all__ = [
     "REACTIONS",
     "CCDLibrary",
     "Chain",
+    "ModificationPlan",
     "Protein",
     "Residue",
     "draw_fragment",

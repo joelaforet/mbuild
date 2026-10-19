@@ -13,6 +13,7 @@ from itertools import combinations
 
 from mbuild.biopolymers.ccd import _ACIDIC_PROTONS, _BASIC_ATOMS
 from mbuild.biopolymers.matching import _bond_separation
+from mbuild.biopolymers.plan import ModificationPlan
 from mbuild.biopolymers.relax import _proton_position
 from mbuild.biopolymers.residue import (
     _assign_template,
@@ -33,8 +34,13 @@ logger = logging.getLogger(__name__)
 _SPLIT_CHARGE_MAX_BONDS = 2
 
 
-def _deprotonate(protein, resnum, atom_name, chain_id=None, icode=""):
-    """Remove the acidic proton of one atom; see ``Protein.deprotonate``."""
+def _plan_deprotonate(protein, resnum, atom_name, chain_id=None, icode=""):
+    """Choose the proton that ``deprotonate`` removes; see ``Protein.plan_deprotonate``.
+
+    A plan whose atom carries no acidic proton is a plan to do
+    nothing: ``apply`` logs the warning that ``deprotonate`` logs and
+    changes nothing, so a notebook cell runs twice without an error.
+    """
     residue = protein.get_residue(resnum, chain_id=chain_id, icode=icode)
     atom = _atom_of(residue, atom_name)
     variant = residue.template
@@ -44,22 +50,45 @@ def _deprotonate(protein, resnum, atom_name, chain_id=None, icode=""):
         for name in _ACIDIC_PROTONS.get(residue.name, ()):
             if name in bonded and _atom_in_residue(residue, name) is not None:
                 protons.append(name)
+    plan = ModificationPlan(
+        kind="deprotonate", protein=protein, site=residue, site_atom=atom
+    )
     if not protons:
-        logger.warning(
+        plan._state["noop"] = (
             f"Atom {atom_name} of residue {_pdb_label(residue)} "
             "carries no acidic proton, so nothing changed. The atom is "
             "already deprotonated, or its protons are not acidic."
         )
-        return
+        return plan
     proton_name = protons[0]
-    _remove_particles_and_ports(protein, atom, [_atom_in_residue(residue, proton_name)])
-    _assign_template(residue, variant.deprotonated_at(proton_name))
-    _warn_if_variant_is_absent(protein, residue, atom_name, proton_name)
+    proton = _atom_in_residue(residue, proton_name)
+    target = variant.deprotonated_at(proton_name)
+    plan._add_leaving(atom, proton, [proton])
+    plan.charges[atom] = residue.atom_formal_charges.get(atom_name, 0) - 1
+    plan.notes.append(f"the residue becomes {target.description}")
+    plan._state.update(proton_name=proton_name, target=target)
+    return plan
+
+
+def _apply_deprotonate(plan):
+    """Remove the proton a deprotonation plan names; see ``Protein.apply``."""
+    if plan._state.get("noop"):
+        logger.warning(plan._state["noop"])
+        return
+    protein, residue, atom = plan.protein, plan.site, plan.site_atom
+    proton = plan.leaving[0][1]
+    _remove_particles_and_ports(protein, atom, [proton])
+    _assign_template(residue, plan._state["target"])
+    _warn_if_variant_is_absent(protein, residue, atom.name, plan._state["proton_name"])
     _warn_on_split_charge(residue)
 
 
-def _protonate(protein, resnum, atom_name, chain_id=None, icode=""):
-    """Add a proton to one atom; see ``Protein.protonate``."""
+def _plan_protonate(protein, resnum, atom_name, chain_id=None, icode=""):
+    """Choose the proton that ``protonate`` adds; see ``Protein.plan_protonate``.
+
+    A plan whose atom takes no proton is a plan to do nothing, as for
+    ``_plan_deprotonate``.
+    """
     residue = protein.get_residue(resnum, chain_id=chain_id, icode=icode)
     atom = _atom_of(residue, atom_name)
     variant = residue.template
@@ -83,7 +112,7 @@ def _protonate(protein, resnum, atom_name, chain_id=None, icode=""):
     # bond, so adding it back would over-coordinate the atom.
     if any(other.parent is not residue for other in atom.direct_bonds()):
         protons = []
-    target = None
+    target = proton_name = None
     for proton_name in protons:
         wanted = variant.atom_names | {proton_name}
         target = next(
@@ -96,18 +125,36 @@ def _protonate(protein, resnum, atom_name, chain_id=None, icode=""):
         )
         if target is not None:
             break
+    plan = ModificationPlan(
+        kind="protonate", protein=protein, site=residue, site_atom=atom
+    )
     if target is None:
-        logger.warning(
+        plan._state["noop"] = (
             f"Atom {atom_name} of residue {_pdb_label(residue)} "
             "has no protonation variant in the CCD template, so nothing "
             "changed. The atom is already protonated, it bonds to another "
             "residue, or the template does not protonate it."
         )
+        return plan
+    plan.new_hydrogens.append(atom)
+    plan.charges[atom] = target.name_to_atom[atom_name].formal_charge
+    plan.notes.append(f"adds {proton_name}; the residue becomes {target.description}")
+    plan._state.update(proton_name=proton_name, target=target)
+    return plan
+
+
+def _apply_protonate(plan):
+    """Add the proton a protonation plan names; see ``Protein.apply``."""
+    if plan._state.get("noop"):
+        logger.warning(plan._state["noop"])
         return
-    proton = Compound(name=proton_name, element="H", pos=_proton_position(atom))
+    residue, atom = plan.site, plan.site_atom
+    proton = Compound(
+        name=plan._state["proton_name"], element="H", pos=_proton_position(atom)
+    )
     residue.add(proton)
     residue.add_bond((atom, proton), bond_order=1.0)
-    _assign_template(residue, target)
+    _assign_template(residue, plan._state["target"])
     _warn_on_split_charge(residue)
 
 
