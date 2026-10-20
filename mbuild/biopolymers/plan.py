@@ -17,6 +17,7 @@ This is the two-step form of the verbs. ``attach(...)`` is
 
 from dataclasses import dataclass, field
 
+from mbuild.biopolymers.residue import _rdkit_bond_orders
 from mbuild.exceptions import MBuildError
 
 __all__ = ["ModificationPlan"]
@@ -409,12 +410,14 @@ class ModificationPlan:
                 editable.RemoveBond(index[atom1], index[atom2])
         for atom1, atom2, order in self.formed:
             if atom1 in index and atom2 in index:
-                editable.AddBond(index[atom1], index[atom2], _rdkit_order(order))
+                editable.AddBond(
+                    index[atom1], index[atom2], _rdkit_bond_orders()[float(order)]
+                )
         for atom1, atom2, order in self.reordered:
             if atom1 in index and atom2 in index:
                 bond = editable.GetBondBetweenAtoms(index[atom1], index[atom2])
                 if bond is not None:
-                    bond.SetBondType(_rdkit_order(order))
+                    bond.SetBondType(_rdkit_bond_orders()[float(order)])
         for atom, charge in self.charges.items():
             if atom in index:
                 editable.GetAtomWithIdx(index[atom]).SetFormalCharge(charge)
@@ -532,14 +535,3 @@ class ModificationPlan:
         text = self._render(size, hydrogens, png=png)
         with open(filename, "wb" if png else "w") as handle:
             handle.write(text)
-
-
-def _rdkit_order(order):
-    from rdkit import Chem
-
-    return {
-        1.0: Chem.BondType.SINGLE,
-        2.0: Chem.BondType.DOUBLE,
-        3.0: Chem.BondType.TRIPLE,
-        1.5: Chem.BondType.AROMATIC,
-    }.get(float(order), Chem.BondType.SINGLE)

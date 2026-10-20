@@ -10,7 +10,6 @@ its first argument, so the class keeps only the public verbs.
 """
 
 import logging
-from collections import deque
 
 import numpy as np
 
@@ -37,6 +36,7 @@ from mbuild.biopolymers.residue import (
     _atom_of,
     _chain_of,
     _pdb_label,
+    _reachable,
     _remove_particles_and_ports,
 )
 from mbuild.compound import Compound
@@ -730,23 +730,15 @@ def _substituent(atom, anchor):
     that contains both atoms has no far side, so that case raises
     instead of removing the rest of the molecule.
     """
-    group = [anchor]
-    seen = {atom, anchor}
-    queue = deque([anchor])
-    while queue:
-        for neighbor in queue.popleft().direct_bonds():
-            if neighbor in seen:
-                continue
-            if atom in neighbor.direct_bonds():
-                raise MBuildError(
-                    f"Leaving atom {anchor.name} is in a ring with "
-                    f"{atom.name}, so there is no group on the far side "
-                    "of the bond to remove. Name a hydrogen or an atom "
-                    "outside the ring."
-                )
-            seen.add(neighbor)
-            group.append(neighbor)
-            queue.append(neighbor)
+    group = _reachable(anchor, (atom,))
+    adjacency = atom.root.bond_graph.adj[atom]
+    if any(particle in adjacency for particle in group[1:]):
+        raise MBuildError(
+            f"Leaving atom {anchor.name} is in a ring with "
+            f"{atom.name}, so there is no group on the far side "
+            "of the bond to remove. Name a hydrogen or an atom "
+            "outside the ring."
+        )
     return group
 
 

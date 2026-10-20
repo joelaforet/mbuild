@@ -46,6 +46,7 @@ from mbuild.biopolymers.residue import (
     _assign_template,
     _atom_in_residue,
     _pdb_label,
+    _reachable,
     _remove_particles_and_ports,
 )
 from mbuild.compound import Compound
@@ -153,23 +154,6 @@ def _beta_atom(ca, backbone):
             "is no single side chain to replace."
         )
     return heavy[0] if heavy else None
-
-
-def _reachable(start, blocked):
-    """Return the atoms reachable from ``start`` without passing through ``blocked``.
-
-    ``start`` is first. This is the walk that cuts a ring side chain
-    off a backbone: the plan and the placement both use it.
-    """
-    found, queue = [start], [start]
-    seen = set(blocked) | {start}
-    while queue:
-        for neighbor in queue.pop().direct_bonds():
-            if neighbor not in seen:
-                seen.add(neighbor)
-                found.append(neighbor)
-                queue.append(neighbor)
-    return found
 
 
 def _plan_mutate(

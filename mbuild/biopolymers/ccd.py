@@ -225,9 +225,7 @@ class BondTemplate:
     """One intra-residue bond of a CCD residue template.
 
     The CCD gives every bond an integer order, so a parsed template
-    holds integers. A template that ``template_from_dict`` builds from
-    a residue that mBuild made can hold the fractional order 1.5, which
-    is the order the mBuild bond graph gives an aromatic bond.
+    holds integers.
     """
 
     atom1: str
@@ -691,102 +689,6 @@ def parse_ccd_cif(text):
     )
 
 
-def _require_keys(mapping, keys, what):
-    """Check that a dict read from a file holds the keys a reader needs.
-
-    A file that a user edited, or that another tool wrote, can hold a
-    dict with a key absent. Reading that dict by index raises a
-    ``KeyError`` that names the key alone, and no message says which
-    file or which part of it. This function raises the mBuild error
-    instead, and the caller gives the text that names the part.
-
-    Parameters
-    ----------
-    mapping : dict
-        The dict to check.
-    keys : sequence of str
-        The keys that the reader needs.
-    what : str
-        Text that names the dict and the file that holds it, for the
-        message.
-
-    Raises
-    ------
-    MBuildError
-        When one key or more is absent.
-    """
-    missing = [key for key in keys if key not in mapping]
-    if missing:
-        names = ", ".join(repr(key) for key in missing)
-        raise MBuildError(f"{what} holds no key {names}.")
-
-
-def template_from_dict(data, source=None):
-    """Return a ``ResidueTemplate`` from its plain-dict form.
-
-    The dict holds JSON types only. ``Protein.save_pdb`` writes it for
-    every residue that mBuild built and the CCD does not define, and
-    ``Protein`` reads it back through this function. The keys are
-    ``name``, ``description``, ``atoms``, ``bonds``, ``linking`` and
-    ``crosslink``; each atom carries ``name``, ``element``,
-    ``formal_charge`` and ``leaving``, and each bond carries ``atom1``,
-    ``atom2`` and ``order``. ``linking``, ``crosslink``,
-    ``formal_charge``, ``leaving`` and ``order`` have defaults; the
-    others must be present.
-
-    Parameters
-    ----------
-    data : dict
-        The template in its plain-dict form.
-    source : str, optional
-        Path of the file that holds the dict. The messages name it.
-
-    Returns
-    -------
-    ResidueTemplate
-        The template. It carries no synonyms, because the file that
-        holds it also writes the atom names it describes.
-
-    Raises
-    ------
-    MBuildError
-        When a key that has no default is absent. The message names
-        the template, the key, and the file when ``source`` is given.
-    """
-    label = f"template {data.get('name', '<unnamed>')!r}"
-    if source is not None:
-        label = f"{label} of {source}"
-    _require_keys(data, ("name", "description", "atoms", "bonds"), f"The {label}")
-    for atom in data["atoms"]:
-        _require_keys(atom, ("name", "element"), f"An atom of the {label}")
-    for bond in data["bonds"]:
-        _require_keys(bond, ("atom1", "atom2"), f"A bond of the {label}")
-    crosslink = data.get("crosslink")
-    return ResidueTemplate(
-        name=data["name"],
-        description=data["description"],
-        atoms=tuple(
-            AtomTemplate(
-                name=atom["name"],
-                element=atom["element"],
-                formal_charge=int(atom.get("formal_charge", 0)),
-                leaving=bool(atom.get("leaving", False)),
-            )
-            for atom in data["atoms"]
-        ),
-        bonds=tuple(
-            BondTemplate(
-                atom1=bond["atom1"],
-                atom2=bond["atom2"],
-                order=bond.get("order", 1),
-            )
-            for bond in data["bonds"]
-        ),
-        linking=data.get("linking"),
-        crosslink=tuple(crosslink) if crosslink else None,
-    )
-
-
 def _fix_caps(template):
     """Give ACE/NME peptide linking and mark the reacting H as leaving.
 
@@ -981,26 +883,6 @@ class CCDLibrary:
         if resname not in self._templates:
             self._templates[resname] = self._load(resname)
         return self._templates[resname]
-
-    def copy(self):
-        """Return a library with the same search paths and templates.
-
-        A ``Protein`` that reads a bond-records file patches the
-        templates of the residues that the file names. The patch
-        describes one file, so the ``Protein`` copies the library
-        first, and a library that the caller passed keeps its own
-        templates.
-
-        Returns
-        -------
-        CCDLibrary
-            The copy. It shares the frozen templates, and it holds its
-            own map from residue name to variants.
-        """
-        other = CCDLibrary(download=self._download)
-        other._paths = list(self._paths)
-        other._templates = dict(self._templates)
-        return other
 
     def _load(self, resname):
         """Read, parse, patch, and expand the templates for one residue.

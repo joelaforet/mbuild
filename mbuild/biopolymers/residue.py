@@ -294,6 +294,26 @@ def _neighbours(atom):
     return list(atom.root.bond_graph.adj[atom])
 
 
+def _reachable(start, blocked):
+    """Return ``start`` and every atom reachable from it without passing ``blocked``.
+
+    This is the walk that cuts a group off at a bond: the atoms beyond
+    ``anchor`` away from ``atom`` are ``_reachable(anchor, (atom,))``.
+    It reads the root bond graph's adjacency, so its order is the same
+    in every process (see ``_neighbours``).
+    """
+    adjacency = start.root.bond_graph.adj
+    seen = set(blocked) | {start}
+    found, queue = [start], [start]
+    while queue:
+        for neighbor in adjacency[queue.pop()]:
+            if neighbor not in seen:
+                seen.add(neighbor)
+                found.append(neighbor)
+                queue.append(neighbor)
+    return found
+
+
 def _rdkit_mol(compound, particles):
     """Return an editable RDKit molecule of ``particles`` and a particle-to-index map.
 

@@ -13,6 +13,7 @@ from mbuild.biopolymers import (
     fragment_from_pdb,
     prepare_fragment,
 )
+from mbuild.biopolymers.residue import _reachable
 from mbuild.exceptions import MBuildError
 from mbuild.tests.base_test import BaseTest
 from mbuild.utils.io import get_fn, has_hoomd, has_openmm, has_rdkit
@@ -427,7 +428,6 @@ class TestProteinModify(BaseTest):
         # test places a triphenylmethyl group rigidly on LYS 12, where it
         # lands 0.1 A from other atoms, and runs the search.
         from mbuild.biopolymers.relax import (
-            _atoms_beyond,
             _closest_contact,
             _place_by_torsions,
         )
@@ -444,7 +444,7 @@ class TestProteinModify(BaseTest):
         )
         site = protein_6m03.get_atom(12, "NZ", chain_id="A")
         bonded = next(a for a in site.direct_bonds() if a.parent.name == "TPM")
-        fragment = _atoms_beyond(protein_6m03.root.bond_graph, site, bonded)
+        fragment = _reachable(bonded, (site,))
         lengths = {
             (a, b): np.linalg.norm(a.pos - b.pos) for a, b in protein_6m03.bonds()
         }
@@ -476,8 +476,8 @@ class TestProteinModify(BaseTest):
         # after.
         from rdkit import Chem
 
-        from mbuild.biopolymers.relax import _atoms_beyond, _try_conformers
-        from mbuild.biopolymers.residue import _rdkit_mol
+        from mbuild.biopolymers.relax import _try_conformers
+        from mbuild.biopolymers.residue import _rdkit_mol, _reachable
 
         fragment = prepare_fragment("*C[C@H](O)[C@@H](N)C(=O)O", "THX")
         protein_6m03.attach(
@@ -485,7 +485,7 @@ class TestProteinModify(BaseTest):
         )
         site = protein_6m03.get_atom(12, "NZ", chain_id="A")
         bonded = next(a for a in site.direct_bonds() if a.parent.name == "THX")
-        atoms = _atoms_beyond(protein_6m03.root.bond_graph, site, bonded)
+        atoms = _reachable(bonded, (site,))
 
         def labels():
             editable, _ = _rdkit_mol(protein_6m03, atoms)

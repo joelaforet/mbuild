@@ -17,7 +17,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from mbuild.biopolymers.residue import _neighbours, _rdkit_mol
+from mbuild.biopolymers.residue import _neighbours, _rdkit_mol, _reachable
 from mbuild.box import Box
 
 logger = logging.getLogger(__name__)
@@ -528,7 +528,7 @@ def _relax_if_clashing(
     movable = (
         set(added)
         | set(site_atom.parent.particles())
-        | set(_atoms_beyond(protein.root.bond_graph, site_atom, frag_atom))
+        | set(_reachable(frag_atom, (site_atom,)))
     )
     around = _Surroundings(particles, movable)
     # The rigid placement is reported only when it is what the caller
@@ -898,7 +898,7 @@ def _placement_torsions(graph, site_atom, frag_atom, site_torsions, fragment_tor
     """
     import networkx as nx
 
-    fragment = _atoms_beyond(graph, site_atom, frag_atom)
+    fragment = _reachable(frag_atom, (site_atom,))
     inside = set(fragment)
     # The fragment's graph is built in the order of ``fragment``. A
     # subgraph view of ``graph`` would iterate the set ``inside``, whose
@@ -916,7 +916,7 @@ def _placement_torsions(graph, site_atom, frag_atom, site_torsions, fragment_tor
         if min(sum(_is_heavy(n) for n in graph.adj[x]) for x in (u, v)) < 2:
             continue
         near, far = (u, v) if depth[u] < depth[v] else (v, u)
-        moved = _atoms_beyond(graph, near, far)
+        moved = _reachable(far, (near,))
         if sum(_is_heavy(atom) for atom in moved) >= 3:
             rotatable.append((depth[near], near, far, moved))
     # The bonds that carry the most atoms come first: a glycosidic link
@@ -957,7 +957,7 @@ def _placement_torsions(graph, site_atom, frag_atom, site_torsions, fragment_tor
         if not parents:
             break
         parent = parents[0]
-        moved = _atoms_beyond(graph, parent, child)
+        moved = _reachable(child, (parent,))
         if not set(moved) <= allowed or any(
             atom.parent is residue and atom.name in ("N", "C", "O") for atom in moved
         ):
@@ -967,18 +967,6 @@ def _placement_torsions(graph, site_atom, frag_atom, site_torsions, fragment_tor
             used += 1
         child = parent
     return torsions
-
-
-def _atoms_beyond(graph, near, far):
-    """Return ``far`` and every atom reachable from it without passing ``near``."""
-    seen, stack, found = {near, far}, [far], [far]
-    while stack:
-        for neighbor in graph.adj[stack.pop()]:
-            if neighbor not in seen:
-                seen.add(neighbor)
-                found.append(neighbor)
-                stack.append(neighbor)
-    return found
 
 
 def _is_heavy(atom):
@@ -1124,7 +1112,7 @@ def _try_conformers(
 
     everything = list(protein.particles()) if particles is None else particles
     graph = protein.root.bond_graph
-    fragment = _atoms_beyond(graph, site_atom, frag_atom)
+    fragment = _reachable(frag_atom, (site_atom,))
     editable, index = _rdkit_mol(protein, fragment)
     # The bond to the protein is outside the fragment, so a hydrogen along
     # it stands in for the protein atom: without it the bonding atom would
@@ -1219,13 +1207,14 @@ def _try_conformers(
 def _kabsch(source, target):
     """Return the rotation and shift that best map ``source`` onto ``target``.
 
-    Apply it as ``points @ rotation.T + shift``. A reflection is never
-    returned, since it would invert every stereocentre.
+    Apply it as ``points @ rotation.T + shift``. ``align_vectors``
+    returns a proper rotation, so no stereocentre is inverted.
     """
+    from scipy.spatial.transform import Rotation
+
     source_centre, target_centre = source.mean(axis=0), target.mean(axis=0)
-    u, _, vt = np.linalg.svd((source - source_centre).T @ (target - target_centre))
-    sign = np.sign(np.linalg.det(vt.T @ u.T))
-    rotation = vt.T @ np.diag([1.0, 1.0, sign]) @ u.T
+    rotation = Rotation.align_vectors(target - target_centre, source - source_centre)[0]
+    rotation = rotation.as_matrix()
     return rotation, target_centre - source_centre @ rotation.T
 
 
@@ -1260,35 +1249,44 @@ def _side_chains_near(protein, placed, radius=0.4, particles=None):
     return [others[i] for i in sorted(near)]
 
 
-def _closest_contact(
+def _contact_distances(
     protein, added, site_atom, frag_atom, particles=None, surroundings=None
 ):
-    """Return the smallest distance (nm) from a placed atom to any other atom.
+    """Return each placed atom's distance (nm) to the closest other atom.
 
     ``added`` lists the placed particles. The new bond pair is left
-    out. Returns None when there is nothing to compare against.
+    out: ``frag_atom`` is not measured and ``site_atom`` is not
+    measured against. Returns None when there is nothing to compare.
     ``particles`` is the protein's particle list (see
     ``_relax_particles``); None walks the protein for it.
     ``surroundings`` (see ``_Surroundings``) answers from its tree.
     """
     from scipy.spatial import cKDTree
 
-    added_particles = [p for p in added if p is not frag_atom]
+    placed = [p.pos for p in added if p is not frag_atom]
     added_set = set(added) | {site_atom}
+    if not placed:
+        return None
     if surroundings is not None:
-        if not added_particles or len(surroundings.particles) <= len(added_set):
+        if len(surroundings.particles) <= len(added_set):
             return None
-        points = [p.pos for p in added_particles]
-        return float(surroundings.nearest(points, added_set).min())
+        return surroundings.nearest(placed, added_set)
     if particles is None:
         particles = list(protein.particles())
     others = [p for p in particles if p not in added_set]
-    if not others or not added_particles:
+    if not others:
         return None
-    distances, _ = cKDTree([p.pos for p in others]).query(
-        [p.pos for p in added_particles]
+    return cKDTree([p.pos for p in others]).query(placed)[0]
+
+
+def _closest_contact(
+    protein, added, site_atom, frag_atom, particles=None, surroundings=None
+):
+    """Return the smallest distance (nm) from a placed atom to any other atom, or None."""
+    distances = _contact_distances(
+        protein, added, site_atom, frag_atom, particles, surroundings
     )
-    return float(distances.min())
+    return None if distances is None else float(distances.min())
 
 
 def _warn_on_clashes(
@@ -1304,30 +1302,16 @@ def _warn_on_clashes(
     """Warn when placed atoms overlap the rest of the system.
 
     Port alignment is rigid; a bulky fragment can land inside the
-    protein. The check compares every particle in ``added`` against
-    every other atom, and it leaves out the new bond pair. It warns
-    below ``cutoff`` nm, so the user knows to relax the structure
-    before simulating. ``particles`` is the protein's particle list
-    (see ``_relax_particles``); None walks the protein for it. With
-    ``warn=False`` it only counts. ``surroundings`` (see
-    ``_Surroundings``) answers from its tree.
+    protein. The check compares every placed atom against every other
+    atom (``_contact_distances``) and warns below ``cutoff`` nm, so the
+    user knows to relax the structure before simulating. With
+    ``warn=False`` it only counts.
     """
-    from scipy.spatial import cKDTree
-
-    added_particles = list(added)
-    added_set = set(added_particles) | {site_atom}
-    placed = [p.pos for p in added_particles if p is not frag_atom]
-    if surroundings is not None:
-        if not placed or len(surroundings.particles) <= len(added_set):
-            return 0
-        distances = surroundings.nearest(placed, added_set)
-    else:
-        if particles is None:
-            particles = list(protein.particles())
-        others = [p for p in particles if p not in added_set]
-        if not others or not placed:
-            return 0
-        distances, _ = cKDTree([p.pos for p in others]).query(placed)
+    distances = _contact_distances(
+        protein, added, site_atom, frag_atom, particles, surroundings
+    )
+    if distances is None:
+        return 0
     n_clashes = int((distances < cutoff).sum())
     if n_clashes and warn:
         logger.warning(
