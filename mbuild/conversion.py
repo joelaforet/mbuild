@@ -89,6 +89,12 @@ def load(
     number seed to reproducibly generate the same starting structure. This is
     NOT possible with `openbabel`, use `rdkit` if you need control over starting
     structure's position (recommended).
+
+    The default mdtraj backend reads a `.pdb` file. It reads the
+    coordinates, the element symbols, and the chain and residue
+    hierarchy, but no residue chemistry. `mbuild.biopolymers.Protein`
+    reads a protein PDB file by CCD template matching, so the loaded
+    compound also carries formal charges and bond orders.
     """
     # First check if we are loading from an object
     if not (
@@ -490,6 +496,57 @@ def load_file(
         )
     # Note: 'Input not supported' error will be handled
     # by the corresponding backend
+    return compound
+
+
+def from_coxeter(shape, compound=None, ref_length=1, element=None, name=None):
+    """Backend-specific loading function for Coxeter.
+
+        Vertices are placed as particles and edges become bonds. The shape is
+        scaled so that its longest edge has length ``ref_length``, independent of
+        coxeter's native (unit-volume / unit-area) normalization.
+
+        Parameters
+        ----------
+        shape : coxeter.shapes.base_classes.Shape
+            Any Shape subclassed member of coxeter.shapes that exposes ``vertices`` and ``edges``.
+        compound : mb.Compound, optional, default=None
+            Host mb.Compound to load into. A new one is created if left as ``None``.
+        ref_length : float, optional, default=1
+            Target length of the longest edge, in the compound's units.
+        element : str, optional, default=None
+            The element symbol that sets the particle type for the particles.
+            If None, a generic bead-type is used.
+        name : str, optional, default="X"
+            Sets the particle name, but not the element.
+            Use this instead of ``element`` for non-atomistic particles.
+    Info
+    ----
+    See https://coxeter.readthedocs.io/en/latest/package-shapes.html# for more details on available shape geometry.
+    """
+    if compound is None:
+        compound = mb.Compound()
+
+    scale = ref_length / shape.edge_lengths.max()
+
+    particles = []
+    for v in shape.vertices:
+        p = mb.Compound(pos=np.asarray(v) * scale)
+        if element:
+            p.element = element_from_symbol(element)
+            if not name:
+                p.name = element
+            else:
+                p.name = name
+        elif name:
+            p.name = name
+        compound.add(p)
+        particles.append(p)
+
+    for edge in shape.edges:
+        p1 = particles[int(edge[0])]
+        p2 = particles[int(edge[1])]
+        compound.add_bond(particle_pair=(p1, p2))
     return compound
 
 
