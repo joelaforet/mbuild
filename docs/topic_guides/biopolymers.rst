@@ -2,23 +2,21 @@
 Biopolymers
 ===========
 
-``mbuild.biopolymers`` loads a protonated protein PDB file, modifies it
-covalently, and writes a file that a residue-template force-field tool
+``mbuild.biopolymers`` loads a protonated protein PDB file, performs some covalent modification, and writes a file that a residue-template force-field tool
 can ingest.
 
 Why template matching
 ---------------------
 
-Chemistry is never guessed. Every residue is matched against a template
+Chemistry is not guessed from some static data. Every residue is matched against a template
 from the wwPDB Chemical Component Dictionary (CCD) **by atom name**, and
 the bonds, bond orders and formal charges come from that template. A
-residue whose atoms no template variant explains raises an error naming
-the residue and the fix, rather than producing a structure that is
-quietly wrong.
+residue whose atoms are not matched by a template variant raises an error naming
+the residue and a potential fix, rather than producing a structure that loads but is wrong.
 
 That strictness is what the downstream tools need. Assigning force-field
 parameters to a modified protein requires the element, the connectivity,
-the bond orders and the formal charge of every atom. A reader that
+the bond orders, and the formal charge of every atom. A reader that
 infers bonds from interatomic distances supplies the first two and
 guesses the rest, so the error surfaces later, during parameterization
 or during the simulation.
@@ -30,8 +28,7 @@ leaving fragment is a residue that is bonded to something: a missing
 on a cysteine means a disulfide, which additionally requires a
 ``CONECT`` record between the two ``SG`` atoms.
 
-The input must be fully protonated at the desired pH. mBuild adds no
-hydrogens; prepare the file with PDBFixer or Reduce first.
+The input must be fully protonated at the desired pH. mBuild does not add hydrogens; prepare the file with PDBFixer or Reduce first.
 
 Loading and inspecting
 ----------------------
@@ -83,8 +80,7 @@ formal charges all agree with the structure afterwards.
 Seeing what a modification will do
 ----------------------------------
 
-Each verb has a ``plan_`` form that reads the same arguments and
-changes nothing. The plan names the atoms that leave, the bonds that
+Each verb has a ``plan_`` form that takes the same arguments but doesn't actually modify anything. The plan names the atoms that leave, the bonds that
 form, break or change order, and the charges that change, as text and
 as a drawing; ``apply`` then makes the edits. ``attach(...)`` is
 ``apply(plan_attach(...))``, and the same holds for ``mutate``,
@@ -132,7 +128,7 @@ that calls it something other than ``CB`` works too. When the placed
 side chain overlaps other atoms, it is relaxed together with the side
 chains within 4 A of it; the backbone keeps the file's coordinates.
 The same holds for a fragment placed by ``attach``. A
-non-canonical amino acid the CCD holds, such as p-azido-L-phenylalanine
+non-canonical amino acid present in the CCD, such as p-azido-L-phenylalanine
 (``4II``), works the same way from a Protein built with
 ``download=True``, and the written file names the residue ``4II`` so
 a residue library that knows the component reads it back:
@@ -142,7 +138,7 @@ a residue library that knows the component reads it back:
     protein = Protein("1fnf_clean.pdb", download=True)
     protein.mutate(1381, "4II", chain_id="A")
 
-A side chain the CCD does not hold is written as a fragment, with a
+A side chain not present in the CCD is written as a fragment, with a
 ``*`` at the atom that bonds to ``CA``. The marked atom becomes ``CB``:
 
 .. code-block:: python
@@ -155,9 +151,8 @@ from its ideal coordinates: ``"PHE"`` is L-phenylalanine and ``"DPN"``
 is D-phenylalanine. A fragment keeps the handedness the residue had,
 because the new ``CB`` goes where the old one was. ``stereo="D"`` or
 ``stereo="L"`` overrides either default by swapping the places of the
-side chain and the alpha hydrogen. A glycine has no handedness and a
-fragment makes it an L residue unless you ask for D. A CCD side chain arrives in the
-protonation state of its definition: charged for lysine and arginine,
+side chain and the alpha hydrogen. A glycine doesn't have handedness and a
+fragment defaults to an L residue unless you ask for D. A CCD side chain is protonated according to its definition: charged for lysine and arginine,
 doubly protonated for histidine, and the neutral acid for aspartate and
 glutamate; ``deprotonate`` and ``protonate`` change it afterwards. Proline's side chain also bonds the backbone
 nitrogen, so it takes another path in both directions: mutating to
@@ -216,8 +211,8 @@ A leaving atom may also be a heavy atom bonded to the link atom. The
 whole group on the far side of that bond leaves with it, and a residue
 that this empties is dropped.
 
-A fragment built from SMILES or read from a PDB file carries atom names
-you did not choose. ``draw_fragment`` shows them: a 2D drawing with
+A fragment built from SMILES or read from a PDB file has atom names
+automatically generated. ``draw_fragment`` shows them: a 2D drawing with
 every atom labelled, the bond sites in blue, any names you pass in red,
 and a tint per residue when the fragment has several. Read the atom
 that bonds and the atom that leaves off the picture before calling
@@ -302,9 +297,8 @@ link atom is recorded on the residue, so ``attach`` needs no
 Attaching a glycan from a PDB file
 ----------------------------------
 
-A glycan from a glycan builder has residue names that no template
-library knows, and a force field such as GLYCAM06 assigns its
-parameters by exactly those names. ``fragment_from_pdb`` reads such a
+A glycan from a glycan builder has residue names that not present in the CCD, and a force field such as GLYCAM06 assigns its
+parameters by those names. ``fragment_from_pdb`` reads such a
 file with its residues intact. It takes the bonds from the ``CONECT``
 records, which glycan builders write, and perceives the bond orders
 from the connectivity and coordinates with RDKit.
