@@ -16,17 +16,20 @@ code ``I`` for a nucleotide, but OpenMM and PACKMOL write ``I`` for an
 iodide ion, so the bundled ``I.cif`` describes iodide.
 
 The ``_ACIDIC_PROTONS``, ``_BASIC_ATOMS`` and ``_ATOM_NAME_SYNONYMS``
-tables and the cap, disulfide and histidine patches are derived from
-openff-pablo (https://github.com/openforcefield/openff-pablo, MIT license).
+tables and the cap, disulfide and histidine patches are derived from the
+Open Force Field Initiative's PDB loading code, developed in openff-pablo
+and being merged into the OpenFF Toolkit
+(https://github.com/openforcefield/openff-toolkit, MIT license).
 """
 
-# Portions of this module are derived from openff-pablo
-# (https://github.com/openforcefield/openff-pablo), which carries this
-# license:
+# Portions of this module are derived from the Open Force Field
+# Initiative's PDB loading code, which is being merged into the OpenFF
+# Toolkit (https://github.com/openforcefield/openff-toolkit), and are used
+# under this license:
 #
 # MIT License
 #
-# Copyright (c) 2025 Ashley Mitchell
+# Copyright (c) 2025 Open Force Field Initiative
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
