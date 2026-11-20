@@ -337,21 +337,6 @@ class ResidueTemplate:
         return self.leaving_fragment_of(self.posterior_link_atom)
 
 
-def _cif_rows(block, category):
-    """Return the rows of a CIF category as dicts keyed by item name.
-
-    A category with a single row is written as key-value pairs rather than
-    a ``loop_``, and pycifrw then returns strings instead of lists.
-    """
-    prefix = category + "."
-    columns = {}
-    for key in block.keys():
-        if key.startswith(prefix):
-            value = block[key]
-            columns[key[len(prefix) :]] = [value] if isinstance(value, str) else value
-    return [dict(zip(columns, values)) for values in zip(*columns.values())]
-
-
 def parse_ccd_cif(filename):
     """Parse a CCD component ``.cif`` file into a ResidueTemplate.
 
@@ -405,6 +390,101 @@ def parse_ccd_cif(filename):
         bonds=bonds,
         linking="peptide" if comp_type in _PEPTIDE_LINKING_TYPES else None,
     )
+
+
+class CCDLibrary:
+    """A library of CCD residue templates, keyed by residue name.
+
+    ``library[resname]`` returns the list of ``ResidueTemplate`` variants
+    of a residue; the first is the CCD species as written. Templates are
+    read on first use from ``{RESNAME}.cif`` files in ``paths``, then the
+    user download cache (``~/.mbuild/ccd_cache``), then the files bundled
+    with mBuild.
+
+    Parameters
+    ----------
+    paths : list of str or pathlib.Path, optional, default=None
+        Directories searched first for ``{RESNAME}.cif`` files.
+    download : bool, optional, default=False
+        Download residues found in no directory from files.rcsb.org into
+        the user download cache.
+    """
+
+    # Parsed variants shared by all instances, keyed by file path and
+    # modification time.
+    _parse_cache = {}
+
+    def __init__(self, paths=None, download=False):
+        self._paths = [Path(p) for p in paths or []]
+        self._paths += [USER_CCD_CACHE_DIR, CCD_CACHE_DIR]
+        self._download = download
+        self._templates = {}
+
+    def __contains__(self, resname):
+        try:
+            self[resname]
+        except KeyError:
+            return False
+        return True
+
+    def __getitem__(self, resname):
+        resname = resname.upper()
+        if resname not in self._templates:
+            self._templates[resname] = self._load(resname)
+        return self._templates[resname]
+
+    def _load(self, resname):
+        """Find, parse and expand the templates of one residue."""
+        for directory in self._paths:
+            path = directory / f"{resname}.cif"
+            if path.exists():
+                break
+        else:
+            if not self._download:
+                raise KeyError(
+                    f"Residue {resname!r} is not in the CCD template library. "
+                    "Pass download=True to fetch it from RCSB, or add its "
+                    ".cif file to one of the library paths."
+                )
+            path = self._download_cif(resname)
+        path = path.resolve()
+        key = (str(path), path.stat().st_mtime_ns)
+        if key not in CCDLibrary._parse_cache:
+            template = _patch(parse_ccd_cif(path))
+            CCDLibrary._parse_cache[key] = _protonation_variants(template)
+        return CCDLibrary._parse_cache[key]
+
+    @staticmethod
+    def _download_cif(resname):
+        """Download one CCD ``.cif`` file into the user download cache."""
+        url = RCSB_CCD_URL.format(resname)
+        logger.info(f"Downloading CCD definition of {resname} from {url}")
+        try:
+            with urllib.request.urlopen(url) as response:
+                text = response.read()
+        except Exception as error:
+            raise KeyError(
+                f"Could not download the CCD definition of {resname!r}: {error}"
+            ) from error
+        USER_CCD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = USER_CCD_CACHE_DIR / f"{resname}.cif"
+        path.write_bytes(text)
+        return path
+
+
+def _cif_rows(block, category):
+    """Return the rows of a CIF category as dicts keyed by item name.
+
+    A category with a single row is written as key-value pairs rather than
+    a ``loop_``, and pycifrw then returns strings instead of lists.
+    """
+    prefix = category + "."
+    columns = {}
+    for key in block.keys():
+        if key.startswith(prefix):
+            value = block[key]
+            columns[key[len(prefix) :]] = [value] if isinstance(value, str) else value
+    return [dict(zip(columns, values)) for values in zip(*columns.values())]
 
 
 def _with_leaving(template, name):
@@ -550,83 +630,3 @@ def _protonation_variants(template):
             for atom in variant.atoms
         )
     ]
-
-
-class CCDLibrary:
-    """A library of CCD residue templates, keyed by residue name.
-
-    ``library[resname]`` returns the list of ``ResidueTemplate`` variants
-    of a residue; the first is the CCD species as written. Templates are
-    read on first use from ``{RESNAME}.cif`` files in ``paths``, then the
-    user download cache (``~/.mbuild/ccd_cache``), then the files bundled
-    with mBuild.
-
-    Parameters
-    ----------
-    paths : list of str or pathlib.Path, optional, default=None
-        Directories searched first for ``{RESNAME}.cif`` files.
-    download : bool, optional, default=False
-        Download residues found in no directory from files.rcsb.org into
-        the user download cache.
-    """
-
-    # Parsed variants shared by all instances, keyed by file path and
-    # modification time.
-    _parse_cache = {}
-
-    def __init__(self, paths=None, download=False):
-        self._paths = [Path(p) for p in paths or []]
-        self._paths += [USER_CCD_CACHE_DIR, CCD_CACHE_DIR]
-        self._download = download
-        self._templates = {}
-
-    def __contains__(self, resname):
-        try:
-            self[resname]
-        except KeyError:
-            return False
-        return True
-
-    def __getitem__(self, resname):
-        resname = resname.upper()
-        if resname not in self._templates:
-            self._templates[resname] = self._load(resname)
-        return self._templates[resname]
-
-    def _load(self, resname):
-        """Find, parse and expand the templates of one residue."""
-        for directory in self._paths:
-            path = directory / f"{resname}.cif"
-            if path.exists():
-                break
-        else:
-            if not self._download:
-                raise KeyError(
-                    f"Residue {resname!r} is not in the CCD template library. "
-                    "Pass download=True to fetch it from RCSB, or add its "
-                    ".cif file to one of the library paths."
-                )
-            path = self._download_cif(resname)
-        path = path.resolve()
-        key = (str(path), path.stat().st_mtime_ns)
-        if key not in CCDLibrary._parse_cache:
-            template = _patch(parse_ccd_cif(path))
-            CCDLibrary._parse_cache[key] = _protonation_variants(template)
-        return CCDLibrary._parse_cache[key]
-
-    @staticmethod
-    def _download_cif(resname):
-        """Download one CCD ``.cif`` file into the user download cache."""
-        url = RCSB_CCD_URL.format(resname)
-        logger.info(f"Downloading CCD definition of {resname} from {url}")
-        try:
-            with urllib.request.urlopen(url) as response:
-                text = response.read()
-        except Exception as error:
-            raise KeyError(
-                f"Could not download the CCD definition of {resname!r}: {error}"
-            ) from error
-        USER_CCD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        path = USER_CCD_CACHE_DIR / f"{resname}.cif"
-        path.write_bytes(text)
-        return path
