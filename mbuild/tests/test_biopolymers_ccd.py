@@ -151,6 +151,11 @@ class TestCCDLibrary(BaseTest):
         assert CCDLibrary(paths=[local])["zzz"][0].name == "ZZZ"
         assert "ZZZ" not in CCDLibrary()
 
+    def test_bundled_before_download_cache(self, user_cache):
+        (user_cache / "ALA.cif").write_text("data_ALA\n")
+        templates = CCDLibrary()["ALA"]
+        assert "CB" in templates[0].atom_names
+
     def test_download(self, user_cache, monkeypatch):
         payload = (ccd.CCD_CACHE_DIR / "ALA.cif").read_bytes().replace(b"ALA", b"ZZZ")
 

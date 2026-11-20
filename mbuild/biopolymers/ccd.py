@@ -398,8 +398,8 @@ class CCDLibrary:
     ``library[resname]`` returns the list of ``ResidueTemplate`` variants
     of a residue; the first is the CCD species as written. Templates are
     read on first use from ``{RESNAME}.cif`` files in ``paths``, then the
-    user download cache (``~/.mbuild/ccd_cache``), then the files bundled
-    with mBuild.
+    files bundled with mBuild, then the user download cache
+    (``~/.mbuild/ccd_cache``).
 
     Parameters
     ----------
@@ -416,7 +416,7 @@ class CCDLibrary:
 
     def __init__(self, paths=None, download=False):
         self._paths = [Path(p) for p in paths or []]
-        self._paths += [USER_CCD_CACHE_DIR, CCD_CACHE_DIR]
+        self._paths += [CCD_CACHE_DIR, USER_CCD_CACHE_DIR]
         self._download = download
         self._templates = {}
 
